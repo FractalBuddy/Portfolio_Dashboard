@@ -1,36 +1,36 @@
 {
-  "generated_at": "2026-09-11T16:02:53.723452+00:00",
+  "generated_at": "2026-09-11T18:15:29.169430+00:00",
   "indices": [
     {
       "symbol": "^GSPC",
       "name": "S&P 500",
-      "price": 7673.2998,
-      "change_pct": 1.07,
-      "change_pct_7d": 0.55,
-      "volume_ratio": 0.22
+      "price": 7669.5801,
+      "change_pct": 1.03,
+      "change_pct_7d": 0.5,
+      "volume_ratio": 0.32
     },
     {
       "symbol": "^IXIC",
       "name": "Nasdaq Composite",
-      "price": 26403.9316,
-      "change_pct": 1.24,
-      "change_pct_7d": 1.17,
-      "volume_ratio": 0.38
+      "price": 26377.4141,
+      "change_pct": 1.13,
+      "change_pct_7d": 1.06,
+      "volume_ratio": 0.53
     },
     {
       "symbol": "^DJI",
       "name": "Dow Jones",
-      "price": 52607.9414,
-      "change_pct": 1.04,
-      "change_pct_7d": -0.3,
-      "volume_ratio": 0.4
+      "price": 52629.9883,
+      "change_pct": 1.09,
+      "change_pct_7d": -0.26,
+      "volume_ratio": 0.54
     },
     {
       "symbol": "^RUT",
       "name": "Russell 2000",
-      "price": 2909.4631,
-      "change_pct": 0.64,
-      "change_pct_7d": -0.37,
+      "price": 2908.8252,
+      "change_pct": 0.62,
+      "change_pct_7d": -0.39,
       "volume_ratio": null
     },
     {
@@ -86,210 +86,210 @@
     {
       "symbol": "AAPL",
       "name": "Apple",
-      "price": 333.885,
-      "change_pct": 2.24,
-      "change_pct_7d": 2.69,
-      "volume_ratio": 0.58
+      "price": 332.78,
+      "change_pct": 1.9,
+      "change_pct_7d": 2.35,
+      "volume_ratio": 0.73
     },
     {
       "symbol": "MSFT",
       "name": "Microsoft",
-      "price": 495.75,
+      "price": 495.73,
       "change_pct": 0.67,
-      "change_pct_7d": -1.05,
-      "volume_ratio": 0.37
+      "change_pct_7d": -1.06,
+      "volume_ratio": 0.44
     },
     {
       "symbol": "NVDA",
       "name": "NVIDIA",
-      "price": 219.86,
-      "change_pct": 0.69,
-      "change_pct_7d": 1.23,
-      "volume_ratio": 0.39
+      "price": 219.19,
+      "change_pct": 0.38,
+      "change_pct_7d": 0.92,
+      "volume_ratio": 0.49
     },
     {
       "symbol": "GOOGL",
       "name": "Alphabet",
-      "price": 341.59,
-      "change_pct": 2.7,
-      "change_pct_7d": 2.03,
-      "volume_ratio": 0.47
+      "price": 339.49,
+      "change_pct": 2.07,
+      "change_pct_7d": 1.4,
+      "volume_ratio": 0.6
     },
     {
       "symbol": "AMZN",
       "name": "Amazon",
-      "price": 255.87,
-      "change_pct": 1.58,
-      "change_pct_7d": 0.37,
-      "volume_ratio": 0.37
+      "price": 256.59,
+      "change_pct": 1.87,
+      "change_pct_7d": 0.66,
+      "volume_ratio": 0.53
     },
     {
       "symbol": "META",
       "name": "Meta",
-      "price": 652.1,
-      "change_pct": 1.2,
-      "change_pct_7d": 12.71,
-      "volume_ratio": 0.36
+      "price": 649.06,
+      "change_pct": 0.73,
+      "change_pct_7d": 12.19,
+      "volume_ratio": 0.48
     },
     {
       "symbol": "TSLA",
       "name": "Tesla",
-      "price": 365.8408,
-      "change_pct": 0.63,
-      "change_pct_7d": 2.74,
-      "volume_ratio": 0.39
+      "price": 365.185,
+      "change_pct": 0.45,
+      "change_pct_7d": 2.55,
+      "volume_ratio": 0.52
     },
     {
       "symbol": "AVGO",
       "name": "Broadcom",
-      "price": 365.186,
-      "change_pct": 1.21,
-      "change_pct_7d": -1.22,
-      "volume_ratio": 0.23
+      "price": 365.12,
+      "change_pct": 1.19,
+      "change_pct_7d": -1.23,
+      "volume_ratio": 0.31
     },
     {
       "symbol": "JPM",
       "name": "JPMorgan Chase",
-      "price": 356.71,
-      "change_pct": 0.89,
-      "change_pct_7d": 0.5,
-      "volume_ratio": 0.37
+      "price": 356.98,
+      "change_pct": 0.97,
+      "change_pct_7d": 0.57,
+      "volume_ratio": 0.51
     },
     {
       "symbol": "LLY",
       "name": "Eli Lilly",
-      "price": 1123.4825,
-      "change_pct": 0.04,
-      "change_pct_7d": -3.15,
-      "volume_ratio": 0.23
+      "price": 1118.79,
+      "change_pct": -0.37,
+      "change_pct_7d": -3.55,
+      "volume_ratio": 0.35
     },
     {
       "symbol": "COHR",
       "name": "Coherent Corp.",
-      "price": 306.33,
-      "change_pct": 4.49,
-      "change_pct_7d": 12.61,
-      "volume_ratio": 0.76
+      "price": 305.35,
+      "change_pct": 4.15,
+      "change_pct_7d": 12.25,
+      "volume_ratio": 0.93
     },
     {
       "symbol": "LITE",
       "name": "Lumentum Holdings",
-      "price": 938.695,
-      "change_pct": 0.32,
-      "change_pct_7d": 8.03,
-      "volume_ratio": 0.5
+      "price": 928.725,
+      "change_pct": -0.75,
+      "change_pct_7d": 6.88,
+      "volume_ratio": 0.63
     },
     {
       "symbol": "IPGP",
       "name": "IPG Photonics",
-      "price": 81.255,
-      "change_pct": 3.73,
-      "change_pct_7d": 8.05,
-      "volume_ratio": 0.27
+      "price": 81.315,
+      "change_pct": 3.81,
+      "change_pct_7d": 8.13,
+      "volume_ratio": 0.38
     },
     {
       "symbol": "NOVT",
       "name": "Novanta Inc.",
-      "price": 147.035,
-      "change_pct": 2.17,
-      "change_pct_7d": 2.34,
-      "volume_ratio": 0.22
+      "price": 147.64,
+      "change_pct": 2.59,
+      "change_pct_7d": 2.76,
+      "volume_ratio": 0.35
     },
     {
       "symbol": "AMS",
       "name": "ams OSRAM AG",
-      "price": 1.4376,
-      "change_pct": -2.2,
-      "change_pct_7d": -1.53,
-      "volume_ratio": 0.58
+      "price": 1.4745,
+      "change_pct": 0.31,
+      "change_pct_7d": 0.99,
+      "volume_ratio": 0.63
     },
     {
       "symbol": "ASML",
       "name": "ASML Holding",
-      "price": 1713.6,
-      "change_pct": 1.55,
-      "change_pct_7d": 2.91,
-      "volume_ratio": 0.4
+      "price": 1708.96,
+      "change_pct": 1.28,
+      "change_pct_7d": 2.63,
+      "volume_ratio": 0.49
     },
     {
       "symbol": "TSM",
       "name": "Taiwan Semiconductor",
-      "price": 435.05,
-      "change_pct": 1.64,
-      "change_pct_7d": 5.08,
-      "volume_ratio": 0.53
+      "price": 433.11,
+      "change_pct": 1.19,
+      "change_pct_7d": 4.62,
+      "volume_ratio": 0.66
     },
     {
       "symbol": "AMD",
       "name": "Advanced Micro Devices",
-      "price": 516.03,
-      "change_pct": 2.47,
-      "change_pct_7d": 12.28,
-      "volume_ratio": 0.58
+      "price": 516.7512,
+      "change_pct": 2.61,
+      "change_pct_7d": 12.43,
+      "volume_ratio": 0.76
     },
     {
       "symbol": "LMT",
       "name": "Lockheed Martin",
-      "price": 525.01,
-      "change_pct": -0.96,
-      "change_pct_7d": -3.58,
-      "volume_ratio": 0.32
+      "price": 525.61,
+      "change_pct": -0.85,
+      "change_pct_7d": -3.47,
+      "volume_ratio": 0.44
     },
     {
       "symbol": "RTX",
       "name": "RTX Corporation",
-      "price": 197.77,
-      "change_pct": -0.18,
-      "change_pct_7d": -3.6,
-      "volume_ratio": 0.27
+      "price": 198.39,
+      "change_pct": 0.14,
+      "change_pct_7d": -3.3,
+      "volume_ratio": 0.37
     },
     {
       "symbol": "NOC",
       "name": "Northrop Grumman",
-      "price": 518.51,
-      "change_pct": -0.08,
-      "change_pct_7d": -2.7,
-      "volume_ratio": 0.23
+      "price": 522.0371,
+      "change_pct": 0.59,
+      "change_pct_7d": -2.04,
+      "volume_ratio": 0.38
     },
     {
       "symbol": "BA",
       "name": "Boeing Co.",
-      "price": 210.09,
-      "change_pct": 2.58,
-      "change_pct_7d": 2.15,
-      "volume_ratio": 0.36
+      "price": 211.105,
+      "change_pct": 3.08,
+      "change_pct_7d": 2.65,
+      "volume_ratio": 0.55
     },
     {
       "symbol": "PLTR",
       "name": "Palantir Technologies",
-      "price": 166.85,
-      "change_pct": 0.6,
-      "change_pct_7d": -7.26,
-      "volume_ratio": 0.28
+      "price": 167.23,
+      "change_pct": 0.83,
+      "change_pct_7d": -7.05,
+      "volume_ratio": 0.35
     },
     {
       "symbol": "CRWD",
       "name": "CrowdStrike Holdings",
-      "price": 206.325,
-      "change_pct": -1.21,
-      "change_pct_7d": -4.07,
-      "volume_ratio": 0.31
+      "price": 205.5,
+      "change_pct": -1.61,
+      "change_pct_7d": -4.45,
+      "volume_ratio": 0.41
     },
     {
       "symbol": "NEE",
       "name": "NextEra Energy",
-      "price": 82.445,
-      "change_pct": 0.01,
-      "change_pct_7d": -0.58,
-      "volume_ratio": 0.22
+      "price": 82.81,
+      "change_pct": 0.45,
+      "change_pct_7d": -0.14,
+      "volume_ratio": 0.47
     },
     {
       "symbol": "ENPH",
       "name": "Enphase Energy",
-      "price": 37.3,
-      "change_pct": 1.19,
-      "change_pct_7d": 4.95,
-      "volume_ratio": 0.29
+      "price": 36.85,
+      "change_pct": -0.03,
+      "change_pct_7d": 3.69,
+      "volume_ratio": 0.44
     },
     {
       "symbol": "ORSTED.CO",
@@ -302,10 +302,10 @@
     {
       "symbol": "NVO",
       "name": "Novo Nordisk",
-      "price": 42.955,
-      "change_pct": -2.4,
-      "change_pct_7d": -4.8,
-      "volume_ratio": 0.7
+      "price": 42.94,
+      "change_pct": -2.43,
+      "change_pct_7d": -4.83,
+      "volume_ratio": 0.83
     }
   ],
   "funds": [
@@ -346,115 +346,115 @@
     {
       "symbol": "GC=F",
       "name": "Gold",
-      "price": 4413.7998,
-      "change_pct": 1.13,
-      "change_pct_7d": 1.09,
-      "volume_ratio": 6.97
+      "price": 4402.0,
+      "change_pct": 0.86,
+      "change_pct_7d": 0.82,
+      "volume_ratio": 6.98
     },
     {
       "symbol": "SI=F",
       "name": "Silver",
-      "price": 65.015,
-      "change_pct": 1.14,
-      "change_pct_7d": 0.45,
-      "volume_ratio": 6.91
+      "price": 65.04,
+      "change_pct": 1.18,
+      "change_pct_7d": 0.49,
+      "volume_ratio": 6.92
     },
     {
       "symbol": "CL=F",
       "name": "WTI Crude Oil",
-      "price": 99.45,
-      "change_pct": -2.96,
-      "change_pct_7d": 9.27,
-      "volume_ratio": 0.84
+      "price": 99.57,
+      "change_pct": -2.84,
+      "change_pct_7d": 9.41,
+      "volume_ratio": 0.98
     },
     {
       "symbol": "BZ=F",
       "name": "Brent Crude Oil",
-      "price": 104.74,
-      "change_pct": -2.69,
-      "change_pct_7d": 9.53,
-      "volume_ratio": 0.83
+      "price": 104.33,
+      "change_pct": -3.07,
+      "change_pct_7d": 9.1,
+      "volume_ratio": 1.04
     },
     {
       "symbol": "NG=F",
       "name": "Natural Gas",
-      "price": 2.814,
-      "change_pct": -0.71,
-      "change_pct_7d": -4.8,
-      "volume_ratio": 0.46
+      "price": 2.809,
+      "change_pct": -0.88,
+      "change_pct_7d": -4.97,
+      "volume_ratio": 0.59
     },
     {
       "symbol": "HG=F",
       "name": "Copper",
-      "price": 6.5515,
-      "change_pct": 1.31,
-      "change_pct_7d": 0.78,
-      "volume_ratio": 5.96
+      "price": 6.551,
+      "change_pct": 1.3,
+      "change_pct_7d": 0.77,
+      "volume_ratio": 6.1
     },
     {
       "symbol": "ZW=F",
       "name": "Wheat",
-      "price": 722.5,
-      "change_pct": -0.1,
-      "change_pct_7d": -4.27,
-      "volume_ratio": 6.93
+      "price": 722.25,
+      "change_pct": -0.14,
+      "change_pct_7d": -4.31,
+      "volume_ratio": 6.96
     },
     {
       "symbol": "ZC=F",
       "name": "Corn",
-      "price": 527.0,
-      "change_pct": 2.53,
-      "change_pct_7d": 1.59,
-      "volume_ratio": 6.83
+      "price": 529.25,
+      "change_pct": 2.97,
+      "change_pct_7d": 2.02,
+      "volume_ratio": 6.93
     }
   ],
   "forex": [
     {
       "symbol": "EURUSD=X",
       "name": "EUR/USD",
-      "price": 1.1606,
-      "change_pct": -0.24,
-      "change_pct_7d": 0.09,
+      "price": 1.1602,
+      "change_pct": -0.27,
+      "change_pct_7d": 0.06,
       "volume_ratio": null
     },
     {
       "symbol": "USDJPY=X",
       "name": "USD/JPY",
-      "price": 153.721,
-      "change_pct": 0.1,
-      "change_pct_7d": -4.04,
+      "price": 153.696,
+      "change_pct": 0.08,
+      "change_pct_7d": -4.06,
       "volume_ratio": null
     },
     {
       "symbol": "GBPUSD=X",
       "name": "GBP/USD",
-      "price": 1.3522,
-      "change_pct": -0.22,
-      "change_pct_7d": 0.05,
+      "price": 1.3526,
+      "change_pct": -0.19,
+      "change_pct_7d": 0.08,
       "volume_ratio": null
     },
     {
       "symbol": "DX-Y.NYB",
       "name": "Dollar Index",
-      "price": 99.081,
-      "change_pct": -0.01,
-      "change_pct_7d": -0.48,
+      "price": 99.094,
+      "change_pct": 0.0,
+      "change_pct_7d": -0.47,
       "volume_ratio": null
     },
     {
       "symbol": "AUDUSD=X",
       "name": "AUD/USD",
-      "price": 0.7176,
-      "change_pct": -0.62,
+      "price": 0.7177,
+      "change_pct": -0.61,
       "change_pct_7d": 0.41,
       "volume_ratio": null
     },
     {
       "symbol": "USDCHF=X",
       "name": "USD/CHF",
-      "price": 0.8159,
-      "change_pct": 0.73,
-      "change_pct_7d": 0.52,
+      "price": 0.8162,
+      "change_pct": 0.77,
+      "change_pct_7d": 0.56,
       "volume_ratio": null
     }
   ],
@@ -499,260 +499,260 @@
     {
       "symbol": "SPY",
       "name": "United States",
-      "price": 766.0,
-      "change_pct": 1.08,
-      "change_pct_7d": 0.55,
-      "volume_ratio": 0.5,
+      "price": 765.6,
+      "change_pct": 1.03,
+      "change_pct_7d": 0.5,
+      "volume_ratio": 0.71,
       "region": "Americas"
     },
     {
       "symbol": "EWC",
       "name": "Canada",
-      "price": 60.565,
-      "change_pct": 0.46,
-      "change_pct_7d": -0.06,
-      "volume_ratio": 0.24,
+      "price": 60.575,
+      "change_pct": 0.47,
+      "change_pct_7d": -0.04,
+      "volume_ratio": 0.34,
       "region": "Americas"
     },
     {
       "symbol": "EWZ",
       "name": "Brazil",
-      "price": 38.36,
-      "change_pct": -0.52,
-      "change_pct_7d": 4.89,
-      "volume_ratio": 0.2,
+      "price": 38.025,
+      "change_pct": -1.39,
+      "change_pct_7d": 3.98,
+      "volume_ratio": 0.37,
       "region": "Americas"
     },
     {
       "symbol": "EWW",
       "name": "Mexico",
-      "price": 75.395,
-      "change_pct": 0.19,
-      "change_pct_7d": -0.35,
-      "volume_ratio": 0.33,
+      "price": 75.16,
+      "change_pct": -0.12,
+      "change_pct_7d": -0.66,
+      "volume_ratio": 0.44,
       "region": "Americas"
     },
     {
       "symbol": "EWU",
       "name": "United Kingdom",
-      "price": 47.865,
-      "change_pct": 0.7,
-      "change_pct_7d": -0.67,
-      "volume_ratio": 0.17,
+      "price": 47.9,
+      "change_pct": 0.78,
+      "change_pct_7d": -0.6,
+      "volume_ratio": 0.25,
       "region": "Europe"
     },
     {
       "symbol": "EWQ",
       "name": "France",
-      "price": 44.95,
-      "change_pct": 0.74,
-      "change_pct_7d": -1.08,
-      "volume_ratio": 0.17,
+      "price": 44.98,
+      "change_pct": 0.81,
+      "change_pct_7d": -1.01,
+      "volume_ratio": 0.23,
       "region": "Europe"
     },
     {
       "symbol": "EWG",
       "name": "Germany",
-      "price": 42.9301,
-      "change_pct": 0.73,
-      "change_pct_7d": -1.17,
-      "volume_ratio": 0.26,
+      "price": 42.965,
+      "change_pct": 0.81,
+      "change_pct_7d": -1.09,
+      "volume_ratio": 0.42,
       "region": "Europe"
     },
     {
       "symbol": "EWL",
       "name": "Switzerland",
-      "price": 60.38,
-      "change_pct": 0.13,
-      "change_pct_7d": -3.44,
-      "volume_ratio": 0.13,
+      "price": 60.385,
+      "change_pct": 0.14,
+      "change_pct_7d": -3.43,
+      "volume_ratio": 0.17,
       "region": "Europe"
     },
     {
       "symbol": "EWI",
       "name": "Italy",
-      "price": 61.915,
-      "change_pct": 1.48,
-      "change_pct_7d": 1.17,
-      "volume_ratio": 0.38,
+      "price": 61.995,
+      "change_pct": 1.61,
+      "change_pct_7d": 1.3,
+      "volume_ratio": 0.61,
       "region": "Europe"
     },
     {
       "symbol": "EWP",
       "name": "Spain",
-      "price": 62.185,
-      "change_pct": 1.25,
-      "change_pct_7d": 1.02,
-      "volume_ratio": 0.12,
+      "price": 62.23,
+      "change_pct": 1.32,
+      "change_pct_7d": 1.09,
+      "volume_ratio": 0.16,
       "region": "Europe"
     },
     {
       "symbol": "MCHI",
       "name": "China",
-      "price": 53.035,
-      "change_pct": 0.45,
-      "change_pct_7d": -2.53,
-      "volume_ratio": 0.4,
+      "price": 53.005,
+      "change_pct": 0.39,
+      "change_pct_7d": -2.58,
+      "volume_ratio": 0.62,
       "region": "Asia-Pacific"
     },
     {
       "symbol": "EWJ",
       "name": "Japan",
-      "price": 98.67,
-      "change_pct": 2.31,
-      "change_pct_7d": 3.62,
-      "volume_ratio": 0.51,
+      "price": 98.63,
+      "change_pct": 2.27,
+      "change_pct_7d": 3.58,
+      "volume_ratio": 0.65,
       "region": "Asia-Pacific"
     },
     {
       "symbol": "INDA",
       "name": "India",
-      "price": 48.425,
-      "change_pct": 0.65,
-      "change_pct_7d": -2.33,
-      "volume_ratio": 0.34,
+      "price": 48.52,
+      "change_pct": 0.85,
+      "change_pct_7d": -2.14,
+      "volume_ratio": 0.6,
       "region": "Asia-Pacific"
     },
     {
       "symbol": "EWH",
       "name": "Hong Kong",
-      "price": 22.545,
-      "change_pct": 0.33,
-      "change_pct_7d": -0.02,
-      "volume_ratio": 0.53,
+      "price": 22.54,
+      "change_pct": 0.31,
+      "change_pct_7d": -0.04,
+      "volume_ratio": 0.77,
       "region": "Asia-Pacific"
     },
     {
       "symbol": "EWT",
       "name": "Taiwan",
-      "price": 110.98,
-      "change_pct": 1.89,
-      "change_pct_7d": 1.13,
-      "volume_ratio": 0.31,
+      "price": 111.0,
+      "change_pct": 1.91,
+      "change_pct_7d": 1.15,
+      "volume_ratio": 0.42,
       "region": "Asia-Pacific"
     },
     {
       "symbol": "EWY",
       "name": "South Korea",
-      "price": 189.285,
-      "change_pct": 3.56,
-      "change_pct_7d": 7.67,
-      "volume_ratio": 0.35,
+      "price": 189.35,
+      "change_pct": 3.59,
+      "change_pct_7d": 7.71,
+      "volume_ratio": 0.54,
       "region": "Asia-Pacific"
     },
     {
       "symbol": "EWA",
       "name": "Australia",
-      "price": 29.305,
-      "change_pct": 0.77,
-      "change_pct_7d": -1.26,
-      "volume_ratio": 0.54,
+      "price": 29.3001,
+      "change_pct": 0.76,
+      "change_pct_7d": -1.28,
+      "volume_ratio": 0.73,
       "region": "Asia-Pacific"
     }
   ],
   "news": {
     "general": [
       {
-        "title": "Fed Rate Hike Close To A Lock; Clarity Act Vote Looms: Week Ahead",
-        "link": "https://finance.yahoo.com/m/9b4ff609-719c-3027-923f-c22efc31d58f/fed-rate-hike-close-to-a.html?.tsrc=rss",
+        "title": "3 S&P 500 Stocks with Warning Signs",
+        "link": "https://finance.yahoo.com/markets/stocks/articles/3-p-500-stocks-warning-170705317.html?.tsrc=rss",
         "source": "Yahoo! Finance: ^GSPC News",
-        "published": "Fri, 11 Sep 2026 15:39:54 +0000"
+        "published": "Fri, 11 Sep 2026 17:07:05 +0000"
       },
       {
-        "title": "2 Industrials Stocks for Long-Term Investors and 1 Facing Headwinds",
-        "link": "https://finance.yahoo.com/markets/stocks/articles/2-industrials-stocks-long-term-153105681.html?.tsrc=rss",
+        "title": "Update: Communication Services, Technology Push US Equity Indexes Higher in Midday Trading",
+        "link": "https://finance.yahoo.com/markets/world-indices/articles/communication-services-technology-push-us-165138083.html?.tsrc=rss",
         "source": "Yahoo! Finance: ^GSPC News",
-        "published": "Fri, 11 Sep 2026 15:31:05 +0000"
+        "published": "Fri, 11 Sep 2026 16:51:38 +0000"
       },
       {
-        "title": "If a Market Crash Is Coming, Here's the 1 Exact Move You Should Be Making Today, According to History",
-        "link": "https://www.fool.com/investing/2026/09/11/if-a-market-crash-is-coming-heres-the-1-exact-move/?.tsrc=rss",
+        "title": "What Will Stocks Do If the Fed Raises Rates?",
+        "link": "https://www.investopedia.com/market-update-what-will-stocks-do-if-the-fed-raises-rates-12116055?.tsrc=rss",
         "source": "Yahoo! Finance: ^GSPC News",
-        "published": "Fri, 11 Sep 2026 15:20:00 +0000"
+        "published": "Fri, 11 Sep 2026 16:43:52 +0000"
       },
       {
-        "title": "BigBear.ai Stock Dives 29% in the Past 3 Months: Hold or Fold?",
-        "link": "https://finance.yahoo.com/markets/stocks/articles/bigbear-ai-stock-dives-29-153300767.html?.tsrc=rss",
+        "title": "3 Reasons CALY is Risky and 1 Stock to Buy Instead",
+        "link": "https://finance.yahoo.com/markets/stocks/articles/3-reasons-caly-risky-1-175505516.html?.tsrc=rss",
         "source": "Yahoo! Finance: ^GSPC News",
-        "published": "Fri, 11 Sep 2026 15:33:00 +0000"
+        "published": "Fri, 11 Sep 2026 17:55:05 +0000"
       },
       {
-        "title": "Red Robin (RRGB) Down 23.6% Since Last Earnings Report: Can It Rebound?",
-        "link": "https://finance.yahoo.com/markets/stocks/articles/red-robin-rrgb-down-23-153004754.html?.tsrc=rss",
+        "title": "RKLB Stock: What's Behind The 39% Drop?",
+        "link": "https://www.trefis.com/articles/615056/rklb-stock-whats-behind-the-39-drop/2026-09-11?.tsrc=rss",
         "source": "Yahoo! Finance: ^GSPC News",
-        "published": "Fri, 11 Sep 2026 15:30:04 +0000"
+        "published": "Fri, 11 Sep 2026 17:41:26 +0000"
       },
       {
-        "title": "EnerSys (ENS) Down 9.3% Since Last Earnings Report: Can It Rebound?",
-        "link": "https://finance.yahoo.com/markets/stocks/articles/enersys-ens-down-9-3-153004677.html?.tsrc=rss",
+        "title": "Primerica (PRI): Buy, Sell, or Hold Post Q2 Earnings?",
+        "link": "https://finance.yahoo.com/markets/stocks/articles/primerica-pri-buy-sell-hold-173105184.html?.tsrc=rss",
         "source": "Yahoo! Finance: ^GSPC News",
-        "published": "Fri, 11 Sep 2026 15:30:04 +0000"
+        "published": "Fri, 11 Sep 2026 17:31:05 +0000"
       },
       {
-        "title": "Why Is National Vision (EYE) Down 10.1% Since Last Earnings Report?",
-        "link": "https://finance.yahoo.com/markets/stocks/articles/why-national-vision-eye-down-153004501.html?.tsrc=rss",
+        "title": "Is UiPath Stock A Buy After Falling Despite A Raised Outlook?",
+        "link": "https://www.trefis.com/articles/615065/is-uipath-stock-a-buy-after-falling-despite-a-raised-outlook/2026-09-11?.tsrc=rss",
         "source": "Yahoo! Finance: ^GSPC News",
-        "published": "Fri, 11 Sep 2026 15:30:04 +0000"
+        "published": "Fri, 11 Sep 2026 17:28:28 +0000"
       },
       {
-        "title": "Why Is Grocery Outlet (GO) Up 2.6% Since Last Earnings Report?",
-        "link": "https://finance.yahoo.com/markets/stocks/articles/why-grocery-outlet-2-6-153004685.html?.tsrc=rss",
+        "title": "Stock Market Midday, Sept. 11: Stocks Rise as Falling Oil Prices Outweigh Sticky Inflation",
+        "link": "https://www.fool.com/coverage/stock-market-today/2026/09/11/stock-market-midday-sept-11-stocks-rise-as-falling-oil-prices-outweigh-sticky-inflation/?.tsrc=rss",
         "source": "Yahoo! Finance: ^GSPC News",
-        "published": "Fri, 11 Sep 2026 15:30:04 +0000"
+        "published": "Fri, 11 Sep 2026 16:53:19 +0000"
       },
       {
-        "title": "Investors are all wrong about demography",
+        "title": "The Fed could raise interest rates three times. Here\u2019s where the market could face the stiffest test.",
+        "link": "https://www.marketwatch.com/story/the-fed-could-raise-interest-rates-three-times-heres-where-the-market-could-face-the-stiffest-test-757872a1?mod=mw_rss_topstories",
+        "source": "MarketWatch.com - Top Stories",
+        "published": "Fri, 11 Sep 2026 18:09:00 GMT"
+      },
+      {
+        "title": "Tesla could transform the trucking business \u2014 and capitalize on high diesel prices",
+        "link": "https://www.marketwatch.com/story/tesla-could-transform-the-trucking-business-and-capitalize-on-high-diesel-prices-e4c48d79?mod=mw_rss_topstories",
+        "source": "MarketWatch.com - Top Stories",
+        "published": "Fri, 11 Sep 2026 17:41:00 GMT"
+      },
+      {
+        "title": "I went to a dinner party, brought an appetizer and wine \u2014 and the host charged me $60. Should I cut ties with her?",
+        "link": "https://www.marketwatch.com/story/i-went-to-a-dinner-party-brought-an-appetizer-and-wine-and-the-host-charged-me-60-should-i-cut-ties-with-her-5a1c5261?mod=mw_rss_topstories",
+        "source": "MarketWatch.com - Top Stories",
+        "published": "Fri, 11 Sep 2026 17:31:00 GMT"
+      },
+      {
+        "title": "Why a shrinking population doesn\u2019t have to be the kiss of death for an economy or stock market",
         "link": "https://www.marketwatch.com/story/investors-are-all-wrong-about-demography-ebfb5f2f?mod=mw_rss_topstories",
         "source": "MarketWatch.com - Top Stories",
-        "published": "Fri, 11 Sep 2026 15:31:00 GMT"
+        "published": "Fri, 11 Sep 2026 17:09:00 GMT"
       },
       {
-        "title": "Forget the Fed. The Bank of Japan could deliver next week\u2019s market shock.",
-        "link": "https://www.marketwatch.com/story/forget-the-fed-the-bank-of-japan-could-deliver-next-weeks-market-shock-bd8d56d7?mod=mw_rss_topstories",
+        "title": "The traditional paths to building wealth are becoming less accessible for young Americans. Here\u2019s what happened.",
+        "link": "https://www.marketwatch.com/story/the-traditional-paths-to-building-wealth-are-becoming-less-accessible-for-young-americans-80112c08?mod=mw_rss_topstories",
         "source": "MarketWatch.com - Top Stories",
-        "published": "Fri, 11 Sep 2026 15:23:00 GMT"
+        "published": "Fri, 11 Sep 2026 17:01:00 GMT"
       },
       {
-        "title": "\u2018I\u2019m the executor\u2019: My two siblings and I inherited an IRA. Can we just cash it out?",
-        "link": "https://www.marketwatch.com/story/im-the-executor-my-two-siblings-and-i-inherited-an-ira-can-we-just-cash-it-out-dafc5b8d?mod=mw_rss_topstories",
+        "title": "This investment is safe from both Trump and the Democrats \u2014 and it pays 4.7%",
+        "link": "https://www.marketwatch.com/story/this-investment-is-safe-from-both-trump-and-the-democrats-and-it-pays-4-7-4b76c2f3?mod=mw_rss_topstories",
         "source": "MarketWatch.com - Top Stories",
-        "published": "Fri, 11 Sep 2026 14:30:00 GMT"
+        "published": "Fri, 11 Sep 2026 16:45:00 GMT"
       },
       {
-        "title": "All the ways $6 diesel and rising gas prices are about to make your life more expensive \u2014 from commuting to grocery shopping",
-        "link": "https://www.marketwatch.com/story/all-the-ways-record-high-diesel-and-rising-gas-prices-are-about-to-make-your-life-more-expensive-from-commuting-to-grocery-shopping-2083fec3?mod=mw_rss_topstories",
+        "title": "I\u2019m locked into a 10-year annuity and now I\u2019m strapped for cash. What are my options?",
+        "link": "https://www.marketwatch.com/story/im-locked-into-a-10-year-annuity-and-now-im-strapped-for-cash-what-are-my-options-e6463c91?mod=mw_rss_topstories",
         "source": "MarketWatch.com - Top Stories",
-        "published": "Fri, 11 Sep 2026 14:22:00 GMT"
+        "published": "Fri, 11 Sep 2026 16:34:00 GMT"
       },
       {
-        "title": "On my late husband\u2019s birthday, I want to pay for every customer at his favorite restaurant. Is this a good idea?",
-        "link": "https://www.marketwatch.com/story/on-my-late-husbands-birthday-i-want-to-pay-for-every-customer-at-his-favorite-restaurant-is-this-a-good-idea-a2748ccc?mod=mw_rss_topstories",
+        "title": "Your Social Security check could go up another $71 next year. That\u2019s not necessarily good news.",
+        "link": "https://www.marketwatch.com/story/your-social-security-check-could-go-up-another-71-next-year-thats-not-necessarily-good-news-f952c08a?mod=mw_rss_topstories",
         "source": "MarketWatch.com - Top Stories",
-        "published": "Fri, 11 Sep 2026 14:16:00 GMT"
-      },
-      {
-        "title": "Home sales are the lowest they\u2019ve been all year even though inventory is at a 7-year high",
-        "link": "https://www.marketwatch.com/story/home-sales-are-the-lowest-theyve-been-all-year-even-though-inventory-is-at-a-7-year-high-16ae55a4?mod=mw_rss_topstories",
-        "source": "MarketWatch.com - Top Stories",
-        "published": "Fri, 11 Sep 2026 14:04:00 GMT"
-      },
-      {
-        "title": "The 30-year mortgage rate just crossed 7% for the first time in over a year",
-        "link": "https://www.marketwatch.com/story/the-30-year-mortgage-rate-just-crossed-7-for-the-first-time-in-over-a-year-a3fba38f?mod=mw_rss_topstories",
-        "source": "MarketWatch.com - Top Stories",
-        "published": "Fri, 11 Sep 2026 14:01:00 GMT"
-      },
-      {
-        "title": "I\u2019m a single 58-year-old veteran in California with $1.5 million and a VA pension. Can I retire?",
-        "link": "https://www.marketwatch.com/story/im-a-single-58-year-old-veteran-with-1-5-million-in-assets-and-a-va-pension-can-i-afford-to-retire-9fadfd41?mod=mw_rss_topstories",
-        "source": "MarketWatch.com - Top Stories",
-        "published": "Fri, 11 Sep 2026 14:00:00 GMT"
+        "published": "Fri, 11 Sep 2026 16:32:00 GMT"
       },
       {
         "title": "Consumer outlook plunges in September as inflation outlook worsens",
         "link": "https://www.cnbc.com/2026/09/11/consumer-outlook-plunges-in-september-as-inflation-outlook-worsens.html",
         "source": "Economy",
-        "published": "Fri, 11 Sep 2026 14:28:54 GMT"
+        "published": "Fri, 11 Sep 2026 16:53:23 GMT"
       },
       {
         "title": "Record U.S. cyclosporiasis outbreak is over, CDC says",
@@ -775,50 +775,50 @@
     ],
     "positions": [
       {
-        "title": "What a Republican 'wipeout' in the midterm elections means for investors",
-        "link": "https://finance.yahoo.com/video/republican-wipeout-midterm-elections-means-120000609.html?.tsrc=rss",
+        "title": "Apple Stock Has Returned Nearly 1,200% in 10 Years. How High Can AAPL Go From Here?",
+        "link": "https://247wallst.com/investing/2026/09/11/apple-stock-has-returned-nearly-1200-in-10-years-how-high-can-aapl-go-from-here/?.tsrc=rss",
         "source": "Yahoo! Finance: AAPL News",
-        "published": "Fri, 11 Sep 2026 12:00:00 +0000",
+        "published": "Fri, 11 Sep 2026 17:30:40 +0000",
         "symbol": "AAPL",
         "asset_name": "Apple"
       },
       {
-        "title": "Samsung Gets $250 For Every iPhone Duo You Buy",
-        "link": "https://beincrypto.com/apple-samsung-iphone-duo-folding-screen-deal/?.tsrc=rss",
+        "title": "\u2018Apple and Microsoft Look Like Value Stocks\u2019: Morningstar on SanDisk\u2019s 2,107% Year",
+        "link": "https://247wallst.com/investing/2026/09/11/apple-and-microsoft-look-like-value-stocks-morningstar-on-sandisks-2107-year/?.tsrc=rss",
         "source": "Yahoo! Finance: AAPL News",
-        "published": "Fri, 11 Sep 2026 15:45:16 +0000",
+        "published": "Fri, 11 Sep 2026 17:17:12 +0000",
         "symbol": "AAPL",
         "asset_name": "Apple"
       },
       {
-        "title": "Microsoft Vs. Alphabet: The Enterprise Fight No One Saw Coming",
-        "link": "https://247wallst.com/investing/2026/09/11/microsoft-vs-alphabet-the-enterprise-fight-no-one-saw-coming/?.tsrc=rss",
+        "title": "Update: Market Chatter: Microsoft Plans to More Than Triple Data Center Capacity",
+        "link": "https://finance.yahoo.com/technology/articles/market-chatter-microsoft-plans-more-174020764.html?.tsrc=rss",
         "source": "Yahoo! Finance: MSFT News",
-        "published": "Fri, 11 Sep 2026 15:45:43 +0000",
+        "published": "Fri, 11 Sep 2026 17:40:20 +0000",
         "symbol": "MSFT",
         "asset_name": "Microsoft"
       },
       {
-        "title": "Microsoft Targets 38GW Data Center Buildout as AI Capacity Crunch Bites",
-        "link": "https://finance.yahoo.com/technology/ai/articles/microsoft-targets-38gw-data-center-150904165.html?.tsrc=rss",
+        "title": "Sector Update: Tech Stocks Rise Friday Afternoon",
+        "link": "https://finance.yahoo.com/markets/stocks/articles/sector-tech-stocks-rise-friday-173848739.html?.tsrc=rss",
         "source": "Yahoo! Finance: MSFT News",
-        "published": "Fri, 11 Sep 2026 15:09:04 +0000",
+        "published": "Fri, 11 Sep 2026 17:38:48 +0000",
         "symbol": "MSFT",
         "asset_name": "Microsoft"
       },
       {
-        "title": "Tech stocks rally as oil prices fall, inflation remains sticky: AlphaCheck",
-        "link": "https://finance.yahoo.com/markets/article/tech-stocks-rally-as-oil-prices-fall-inflation-remains-sticky-alphacheck-140509850.html?.tsrc=rss",
+        "title": "Palantir Wants the AI Work OpenAI Cannot Touch. Nvidia Just Helped It Make the Pitch.",
+        "link": "https://247wallst.com/investing/2026/09/11/palantir-wants-the-ai-work-openai-cannot-touch-nvidia-just-helped-it-make-the-pitch/?.tsrc=rss",
         "source": "Yahoo! Finance: NVDA News",
-        "published": "Fri, 11 Sep 2026 14:05:09 +0000",
+        "published": "Fri, 11 Sep 2026 17:40:06 +0000",
         "symbol": "NVDA",
         "asset_name": "NVIDIA"
       },
       {
-        "title": "Morningstar Says Your Emerging Markets Fund and Your Value ETF Are Both AI Bets Now",
-        "link": "https://247wallst.com/investing/2026/09/11/morningstar-says-your-emerging-markets-fund-and-your-value-etf-are-both-ai-bets-now/?.tsrc=rss",
+        "title": "TSMC Just Delivered Fantastic News for Nvidia Shareholders",
+        "link": "https://www.fool.com/investing/2026/09/11/tsmc-just-delivered-fantastic-news-for-nvidia-shareholders/?.tsrc=rss",
         "source": "Yahoo! Finance: NVDA News",
-        "published": "Fri, 11 Sep 2026 15:15:13 +0000",
+        "published": "Fri, 11 Sep 2026 17:30:01 +0000",
         "symbol": "NVDA",
         "asset_name": "NVIDIA"
       },
@@ -839,6 +839,14 @@
         "asset_name": "Alphabet"
       },
       {
+        "title": "\u2018The Largest IPO Ever, Surpassing SpaceX\u2019: Anthropic Is Up Next",
+        "link": "https://247wallst.com/investing/2026/09/11/the-largest-ipo-ever-surpassing-spacex-anthropic-is-up-next/?.tsrc=rss",
+        "source": "Yahoo! Finance: AMZN News",
+        "published": "Fri, 11 Sep 2026 17:43:31 +0000",
+        "symbol": "AMZN",
+        "asset_name": "Amazon"
+      },
+      {
         "title": "Qualcomm\u2019s AI Ambitions Get a Boost From Amazon Partnership",
         "link": "https://finance.yahoo.com/technology/ai/articles/qualcomm-ai-ambitions-boost-amazon-151217166.html?.tsrc=rss",
         "source": "Yahoo! Finance: AMZN News",
@@ -847,58 +855,50 @@
         "asset_name": "Amazon"
       },
       {
-        "title": "Amazon to invest $230m in Whole Foods staff benefits",
-        "link": "https://www.retail-insight-network.com/news/amazon-230m-whole-foods-staff-benefits/?.tsrc=rss",
-        "source": "Yahoo! Finance: AMZN News",
-        "published": "Fri, 11 Sep 2026 14:34:20 +0000",
-        "symbol": "AMZN",
-        "asset_name": "Amazon"
-      },
-      {
-        "title": "Mark Zuckerberg May Have Found Meta\u2019s Next Hit. Would You Hand It Your Email and Passwords?",
-        "link": "https://247wallst.com/investing/2026/09/11/mark-zuckerberg-may-have-found-metas-next-hit-would-you-hand-it-your-email-and-passwords/?.tsrc=rss",
+        "title": "AppLovin vs. Meta Platforms: Which Technology Stock Is a Better Buy in 2026?",
+        "link": "https://www.fool.com/coverage/better-buy/2026/09/11/applovin-vs-meta-platforms-which-technology-stock-is-a-better-buy-in-2026/?.tsrc=rss",
         "source": "Yahoo! Finance: META News",
-        "published": "Fri, 11 Sep 2026 14:45:57 +0000",
+        "published": "Fri, 11 Sep 2026 17:18:14 +0000",
         "symbol": "META",
         "asset_name": "Meta"
       },
       {
-        "title": "Alphabet vs. Meta: One Magnificent Seven Stock Is the Better Buy",
-        "link": "https://247wallst.com/investing/2026/09/11/alphabet-vs-meta-one-magnificent-seven-stock-is-the-better-buy/?.tsrc=rss",
+        "title": "Nscale adds former OpenAI exec Fidji Simo to its board ahead of potential IPO",
+        "link": "https://finance.yahoo.com/technology/ai/articles/nscale-adds-former-openai-exec-164625951.html?.tsrc=rss",
         "source": "Yahoo! Finance: META News",
-        "published": "Fri, 11 Sep 2026 14:30:03 +0000",
+        "published": "Fri, 11 Sep 2026 16:46:25 +0000",
         "symbol": "META",
         "asset_name": "Meta"
       },
       {
-        "title": "Tesla Semi Gets Boost From $6 Diesel; Morgan Stanley Says Earnings Potential 'Underappreciated'",
-        "link": "https://finance.yahoo.com/m/e551843f-d93d-39fe-b295-9ab2b072765c/tesla-semi-gets-boost-from-%246.html?.tsrc=rss",
+        "title": "Morgan Stanley Sees $80 Billion Tesla Semi Opportunity as Diesel Hits Record $6.06",
+        "link": "https://www.benzinga.com/markets/prediction-markets/26/09/61747603/tesla-semi-80-billion-morgan-stanley?utm_source=yahooFinance&utm_campaign=partner_feed&utm_medium=referral&.tsrc=rss",
         "source": "Yahoo! Finance: TSLA News",
-        "published": "Fri, 11 Sep 2026 15:16:19 +0000",
+        "published": "Fri, 11 Sep 2026 18:03:04 +0000",
         "symbol": "TSLA",
         "asset_name": "Tesla"
       },
       {
-        "title": "Tesla\u2019s Trucking Business Could Unlock A $17B Software Opportunity, Morgan Stanley Says",
-        "link": "https://stocktwits.com/news-articles/markets/equity/tesla-s-trucking-business-could-unlock-a-17-b-software-opportunity-morgan-stanley-says/cZtXjwlRBGH?.tsrc=rss",
+        "title": "Tesla to introduce Semi electric truck in Europe",
+        "link": "https://finance.yahoo.com/energy/articles/tesla-introduce-semi-electric-truck-172338307.html?.tsrc=rss",
         "source": "Yahoo! Finance: TSLA News",
-        "published": "Fri, 11 Sep 2026 13:43:58 +0000",
+        "published": "Fri, 11 Sep 2026 17:23:38 +0000",
         "symbol": "TSLA",
         "asset_name": "Tesla"
       },
       {
-        "title": "Prediction: Broadcom and Nvidia Will Be 2027's Best Performing AI Stocks",
-        "link": "https://www.fool.com/investing/2026/09/11/prediction-broadcom-and-nvidia-will-be-2027s-best/?.tsrc=rss",
+        "title": "What's Going On With Broadcom Stock Friday",
+        "link": "https://finance.yahoo.com/markets/stocks/articles/whats-going-broadcom-stock-friday-174335036.html?.tsrc=rss",
         "source": "Yahoo! Finance: AVGO News",
-        "published": "Fri, 11 Sep 2026 10:50:00 +0000",
+        "published": "Fri, 11 Sep 2026 17:43:35 +0000",
         "symbol": "AVGO",
         "asset_name": "Broadcom"
       },
       {
-        "title": "Prediction: This Unstoppable Stock Will Rejoin the $2 Trillion Club by 2027",
-        "link": "https://www.fool.com/investing/2026/09/10/prediction-this-stock-will-rejoin-2-trillion-2027/?.tsrc=rss",
+        "title": "Do You Have the Guts to Buy the AI Stocks Right Now?",
+        "link": "https://finance.yahoo.com/markets/stocks/articles/guts-buy-ai-stocks-now-173900651.html?.tsrc=rss",
         "source": "Yahoo! Finance: AVGO News",
-        "published": "Fri, 11 Sep 2026 02:20:00 +0000",
+        "published": "Fri, 11 Sep 2026 17:39:00 +0000",
         "symbol": "AVGO",
         "asset_name": "Broadcom"
       },
@@ -1376,7 +1376,7 @@
       },
       {
         "date": "2026-09-11",
-        "close": 7674.5898
+        "close": 7669.0898
       }
     ],
     "msci_world": [
@@ -1738,7 +1738,7 @@
       },
       {
         "date": "2026-09-11",
-        "close": 208.035
+        "close": 208.02
       }
     ]
   }
