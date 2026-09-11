@@ -37,6 +37,22 @@ STOCKS = [
     ("AAPL", "Apple"), ("MSFT", "Microsoft"), ("NVDA", "NVIDIA"), ("GOOGL", "Alphabet"),
     ("AMZN", "Amazon"), ("META", "Meta"), ("TSLA", "Tesla"), ("AVGO", "Broadcom"),
     ("JPM", "JPMorgan Chase"), ("LLY", "Eli Lilly"),
+    # Explore tab universe -- keep in sync with EXPLORE_UNIVERSE in the dashboard HTML
+    ("COHR", "Coherent Corp."), ("LITE", "Lumentum Holdings"), ("IPGP", "IPG Photonics"),
+    ("NOVT", "Novanta Inc."), ("AMS", "ams OSRAM AG"),
+    ("ASML", "ASML Holding"), ("TSM", "Taiwan Semiconductor"), ("AMD", "Advanced Micro Devices"),
+    ("LMT", "Lockheed Martin"), ("RTX", "RTX Corporation"), ("NOC", "Northrop Grumman"), ("BA", "Boeing Co."),
+    ("PLTR", "Palantir Technologies"), ("CRWD", "CrowdStrike Holdings"),
+    ("NEE", "NextEra Energy"), ("ENPH", "Enphase Energy"), ("ORSTED.CO", "Ørsted A/S"),
+    ("NVO", "Novo Nordisk"),
+]
+
+# UCITS index funds -- Yahoo Finance tickers (not ISINs; yfinance needs an exchange ticker).
+FUNDS = [
+    ("SWDA.L", "iShares Core MSCI World UCITS ETF"),
+    ("EIMI.L", "iShares Core MSCI EM IMI UCITS ETF"),
+    ("IMEU.L", "iShares Core MSCI Europe UCITS ETF"),
+    ("SGLN.L", "iShares Physical Gold ETC"),
 ]
 
 COMMODITIES = [
@@ -151,6 +167,8 @@ def main():
     indices = build_list(INDICES)
     print("Fetching stocks...")
     stocks = build_list(STOCKS)
+    print("Fetching funds...")
+    funds = build_list(FUNDS)
     print("Fetching commodities...")
     commodities = build_list(COMMODITIES)
     print("Fetching forex...")
@@ -164,6 +182,7 @@ def main():
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "indices": indices,
         "stocks": stocks,
+        "funds": funds,
         "commodities": commodities,
         "forex": forex,
         "rates": rates,
@@ -174,7 +193,7 @@ def main():
         json.dump(data, f, indent=2)
 
     print(
-        f"Wrote data.json: {len(indices)} indices, {len(stocks)} stocks, "
+        f"Wrote data.json: {len(indices)} indices, {len(stocks)} stocks, {len(funds)} funds, "
         f"{len(commodities)} commodities, {len(forex)} forex, {len(rates)} rates, "
         f"{len(heatmap)} heatmap entries."
     )
