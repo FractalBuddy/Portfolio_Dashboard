@@ -15,13 +15,32 @@ fetches generic public market data (index/ETF/commodity/forex prices).
 """
 import json
 import os
+import re
 import sys
 from datetime import datetime, timezone
 
 import requests
 import yfinance as yf
+import feedparser
 
 FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
+
+# ---------------------------------------------------------------------------
+# News sources -- all free RSS feeds, no API key needed.
+# ---------------------------------------------------------------------------
+GENERAL_NEWS_FEEDS = [
+    "https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EGSPC&region=US&lang=en-US",
+    "https://www.marketwatch.com/rss/topstories",
+    "https://www.cnbc.com/id/20910258/device/rss/rss.html",  # CNBC Markets
+    "https://www.investing.com/rss/news_25.rss",  # Investing.com economic news
+]
+CRYPTO_NEWS_FEEDS = [
+    "https://www.coindesk.com/arc/outboundfeeds/rss/",
+    "https://cointelegraph.com/rss",
+]
+# Watched crypto keywords, used to filter CRYPTO_NEWS_FEEDS into position-relevant items.
+CRYPTO_WATCHLIST = ["bitcoin", "btc", "ethereum", "eth", "chainlink", "link",
+                     "polkadot", "dot", "mina", "rocket pool", "rpl", "tezos", "xtz", "unibright"]
 
 # ---------------------------------------------------------------------------
 # Watchlists -- edit these lists to change what shows up on the dashboard.
@@ -162,6 +181,96 @@ def build_rates():
     return out
 
 
+def parse_feed(url, limit=8):
+    try:
+        parsed = feedparser.parse(url)
+        items = []
+        for entry in parsed.entries[:limit]:
+            items.append({
+                "title": entry.get("title", "").strip(),
+                "link": entry.get("link", ""),
+                "source": parsed.feed.get("title", url),
+                "published": entry.get("published", entry.get("updated", "")),
+            })
+        return items
+    except Exception as e:
+        print(f"  ! failed feed {url}: {e}", file=sys.stderr)
+        return []
+
+
+def build_general_news():
+    """Top general market/finance headlines from a few free RSS feeds."""
+    items = []
+    for url in GENERAL_NEWS_FEEDS:
+        items.extend(parse_feed(url, limit=8))
+    # de-dupe by title, keep first 20
+    seen = set()
+    deduped = []
+    for it in items:
+        key = it["title"].lower()
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(it)
+    return deduped[:20]
+
+
+def build_position_news():
+    """
+    Headlines relevant to the tracked stocks/funds (via per-ticker Yahoo Finance RSS)
+    and tracked cryptocurrencies (via keyword-filtering general crypto news feeds).
+    """
+    items = []
+    # Stocks & funds: Yahoo Finance has a per-symbol RSS feed.
+    watched_symbols = STOCKS + FUNDS
+    for symbol, name in watched_symbols:
+        url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US"
+        entries = parse_feed(url, limit=2)
+        for e in entries:
+            e["symbol"] = symbol
+            e["asset_name"] = name
+        items.extend(entries)
+
+    # Crypto: filter general crypto news feeds by keyword match against our watchlist.
+    crypto_items = []
+    for url in CRYPTO_NEWS_FEEDS:
+        crypto_items.extend(parse_feed(url, limit=15))
+    for it in crypto_items:
+        title_lower = it["title"].lower()
+        # Word-boundary match to avoid short tickers (link, dot, eth...) matching inside
+        # unrelated words like "linking", "adopt", "weather".
+        matched = [kw for kw in CRYPTO_WATCHLIST if re.search(r'\b' + re.escape(kw) + r'\b', title_lower)]
+        if matched:
+            it["symbol"] = matched[0].upper()
+            it["asset_name"] = matched[0].title()
+            items.append(it)
+
+    # de-dupe by title, cap at 30
+    seen = set()
+    deduped = []
+    for it in items:
+        key = it["title"].lower()
+        if key and key not in seen:
+            seen.add(key)
+            deduped.append(it)
+    return deduped[:30]
+
+
+def build_benchmarks():
+    """90-day daily closes for S&P 500 and an MSCI World proxy, for portfolio comparison charts."""
+    benchmarks = {}
+    for key, symbol in [("sp500", "^GSPC"), ("msci_world", "URTH")]:
+        try:
+            hist = yf.Ticker(symbol).history(period="90d", interval="1d")
+            benchmarks[key] = [
+                {"date": idx.strftime("%Y-%m-%d"), "close": round(float(row["Close"]), 4)}
+                for idx, row in hist.iterrows()
+            ]
+        except Exception as e:
+            print(f"  ! benchmark {symbol} failed: {e}", file=sys.stderr)
+            benchmarks[key] = []
+    return benchmarks
+
+
 def main():
     print("Fetching indices...")
     indices = build_list(INDICES)
@@ -177,6 +286,12 @@ def main():
     heatmap = build_list(COUNTRY_HEATMAP)
     print("Fetching FRED rates...")
     rates = build_rates()
+    print("Fetching general news...")
+    general_news = build_general_news()
+    print("Fetching position news...")
+    position_news = build_position_news()
+    print("Fetching benchmark history...")
+    benchmarks = build_benchmarks()
 
     data = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -187,6 +302,11 @@ def main():
         "forex": forex,
         "rates": rates,
         "heatmap": heatmap,
+        "news": {
+            "general": general_news,
+            "positions": position_news,
+        },
+        "benchmarks": benchmarks,
     }
 
     with open("data.json", "w") as f:
@@ -195,7 +315,9 @@ def main():
     print(
         f"Wrote data.json: {len(indices)} indices, {len(stocks)} stocks, {len(funds)} funds, "
         f"{len(commodities)} commodities, {len(forex)} forex, {len(rates)} rates, "
-        f"{len(heatmap)} heatmap entries."
+        f"{len(heatmap)} heatmap entries, {len(general_news)} general news, "
+        f"{len(position_news)} position news, "
+        f"{len(benchmarks.get('sp500',[]))} sp500 / {len(benchmarks.get('msci_world',[]))} msci_world benchmark points."
     )
 
 
