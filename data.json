@@ -1,0 +1,475 @@
+{
+  "generated_at": "2026-09-11T15:05:17.258296+00:00",
+  "indices": [
+    {
+      "symbol": "^GSPC",
+      "name": "S&P 500",
+      "price": 7659.9902,
+      "change_pct": 0.9,
+      "change_pct_7d": 0.37,
+      "volume_ratio": 0.17
+    },
+    {
+      "symbol": "^IXIC",
+      "name": "Nasdaq Composite",
+      "price": 26359.9062,
+      "change_pct": 1.07,
+      "change_pct_7d": 1.0,
+      "volume_ratio": 0.3
+    },
+    {
+      "symbol": "^DJI",
+      "name": "Dow Jones",
+      "price": 52506.0703,
+      "change_pct": 0.85,
+      "change_pct_7d": -0.49,
+      "volume_ratio": 0.31
+    },
+    {
+      "symbol": "^RUT",
+      "name": "Russell 2000",
+      "price": 2909.1521,
+      "change_pct": 0.63,
+      "change_pct_7d": -0.38,
+      "volume_ratio": null
+    },
+    {
+      "symbol": "^FTSE",
+      "name": "UK 100",
+      "price": 10650.1299,
+      "change_pct": 0.39,
+      "change_pct_7d": -0.99,
+      "volume_ratio": null
+    },
+    {
+      "symbol": "^GDAXI",
+      "name": "DAX 40",
+      "price": 25531.9199,
+      "change_pct": 0.67,
+      "change_pct_7d": -1.19,
+      "volume_ratio": null
+    },
+    {
+      "symbol": "^FCHI",
+      "name": "CAC 40",
+      "price": 8173.5098,
+      "change_pct": 0.7,
+      "change_pct_7d": -1.29,
+      "volume_ratio": null
+    },
+    {
+      "symbol": "^N225",
+      "name": "Nikkei 225",
+      "price": 65270.9492,
+      "change_pct": 0.2,
+      "change_pct_7d": 1.47,
+      "volume_ratio": 0.99
+    },
+    {
+      "symbol": "^HSI",
+      "name": "Hang Seng",
+      "price": 24805.6309,
+      "change_pct": -0.6,
+      "change_pct_7d": -2.0,
+      "volume_ratio": null
+    },
+    {
+      "symbol": "^STOXX50E",
+      "name": "Euro Stoxx 50",
+      "price": 6316.0801,
+      "change_pct": 0.75,
+      "change_pct_7d": -0.72,
+      "volume_ratio": null
+    }
+  ],
+  "stocks": [
+    {
+      "symbol": "AAPL",
+      "name": "Apple",
+      "price": 335.63,
+      "change_pct": 2.77,
+      "change_pct_7d": 3.23,
+      "volume_ratio": 0.47
+    },
+    {
+      "symbol": "MSFT",
+      "name": "Microsoft",
+      "price": 492.9501,
+      "change_pct": 0.1,
+      "change_pct_7d": -1.61,
+      "volume_ratio": 0.26
+    },
+    {
+      "symbol": "NVDA",
+      "name": "NVIDIA",
+      "price": 220.08,
+      "change_pct": 0.79,
+      "change_pct_7d": 1.33,
+      "volume_ratio": 0.32
+    },
+    {
+      "symbol": "GOOGL",
+      "name": "Alphabet",
+      "price": 341.185,
+      "change_pct": 2.58,
+      "change_pct_7d": 1.91,
+      "volume_ratio": 0.35
+    },
+    {
+      "symbol": "AMZN",
+      "name": "Amazon",
+      "price": 255.29,
+      "change_pct": 1.35,
+      "change_pct_7d": 0.15,
+      "volume_ratio": 0.28
+    },
+    {
+      "symbol": "META",
+      "name": "Meta",
+      "price": 650.445,
+      "change_pct": 0.94,
+      "change_pct_7d": 12.43,
+      "volume_ratio": 0.3
+    },
+    {
+      "symbol": "TSLA",
+      "name": "Tesla",
+      "price": 365.2064,
+      "change_pct": 0.45,
+      "change_pct_7d": 2.56,
+      "volume_ratio": 0.32
+    },
+    {
+      "symbol": "AVGO",
+      "name": "Broadcom",
+      "price": 363.94,
+      "change_pct": 0.86,
+      "change_pct_7d": -1.55,
+      "volume_ratio": 0.18
+    },
+    {
+      "symbol": "JPM",
+      "name": "JPMorgan Chase",
+      "price": 355.92,
+      "change_pct": 0.67,
+      "change_pct_7d": 0.27,
+      "volume_ratio": 0.3
+    },
+    {
+      "symbol": "LLY",
+      "name": "Eli Lilly",
+      "price": 1120.7,
+      "change_pct": -0.2,
+      "change_pct_7d": -3.39,
+      "volume_ratio": 0.18
+    }
+  ],
+  "commodities": [
+    {
+      "symbol": "GC=F",
+      "name": "Gold",
+      "price": 4418.2998,
+      "change_pct": 1.23,
+      "change_pct_7d": 1.19,
+      "volume_ratio": 6.97
+    },
+    {
+      "symbol": "SI=F",
+      "name": "Silver",
+      "price": 65.23,
+      "change_pct": 1.47,
+      "change_pct_7d": 0.78,
+      "volume_ratio": 6.9
+    },
+    {
+      "symbol": "CL=F",
+      "name": "WTI Crude Oil",
+      "price": 99.26,
+      "change_pct": -3.14,
+      "change_pct_7d": 9.06,
+      "volume_ratio": 0.77
+    },
+    {
+      "symbol": "BZ=F",
+      "name": "Brent Crude Oil",
+      "price": 104.62,
+      "change_pct": -2.8,
+      "change_pct_7d": 9.4,
+      "volume_ratio": 0.78
+    },
+    {
+      "symbol": "NG=F",
+      "name": "Natural Gas",
+      "price": 2.821,
+      "change_pct": -0.46,
+      "change_pct_7d": -4.57,
+      "volume_ratio": 0.42
+    },
+    {
+      "symbol": "HG=F",
+      "name": "Copper",
+      "price": 6.561,
+      "change_pct": 1.45,
+      "change_pct_7d": 0.92,
+      "volume_ratio": 5.91
+    },
+    {
+      "symbol": "ZW=F",
+      "name": "Wheat",
+      "price": 720.5,
+      "change_pct": -0.38,
+      "change_pct_7d": -4.54,
+      "volume_ratio": 6.92
+    },
+    {
+      "symbol": "ZC=F",
+      "name": "Corn",
+      "price": 525.5,
+      "change_pct": 2.24,
+      "change_pct_7d": 1.3,
+      "volume_ratio": 6.79
+    }
+  ],
+  "forex": [
+    {
+      "symbol": "EURUSD=X",
+      "name": "EUR/USD",
+      "price": 1.1614,
+      "change_pct": -0.17,
+      "change_pct_7d": 0.16,
+      "volume_ratio": null
+    },
+    {
+      "symbol": "USDJPY=X",
+      "name": "USD/JPY",
+      "price": 153.542,
+      "change_pct": -0.02,
+      "change_pct_7d": -4.15,
+      "volume_ratio": null
+    },
+    {
+      "symbol": "GBPUSD=X",
+      "name": "GBP/USD",
+      "price": 1.3529,
+      "change_pct": -0.17,
+      "change_pct_7d": 0.1,
+      "volume_ratio": null
+    },
+    {
+      "symbol": "DX-Y.NYB",
+      "name": "Dollar Index",
+      "price": 99.015,
+      "change_pct": -0.08,
+      "change_pct_7d": -0.55,
+      "volume_ratio": null
+    },
+    {
+      "symbol": "AUDUSD=X",
+      "name": "AUD/USD",
+      "price": 0.7176,
+      "change_pct": -0.63,
+      "change_pct_7d": 0.4,
+      "volume_ratio": null
+    },
+    {
+      "symbol": "USDCHF=X",
+      "name": "USD/CHF",
+      "price": 0.8153,
+      "change_pct": 0.66,
+      "change_pct_7d": 0.45,
+      "volume_ratio": null
+    }
+  ],
+  "rates": [
+    {
+      "series": "DGS10",
+      "name": "US 10-Year Treasury",
+      "value": 4.83,
+      "prev": 4.8,
+      "date": "2026-09-09"
+    },
+    {
+      "series": "DGS2",
+      "name": "US 2-Year Treasury",
+      "value": 4.43,
+      "prev": 4.39,
+      "date": "2026-09-09"
+    },
+    {
+      "series": "DGS30",
+      "name": "US 30-Year Treasury",
+      "value": 5.28,
+      "prev": 5.25,
+      "date": "2026-09-09"
+    },
+    {
+      "series": "FEDFUNDS",
+      "name": "Fed Funds Rate (monthly)",
+      "value": 3.63,
+      "prev": 3.63,
+      "date": "2026-08-01"
+    },
+    {
+      "series": "DFF",
+      "name": "Fed Funds Rate (daily)",
+      "value": 3.63,
+      "prev": 3.63,
+      "date": "2026-09-09"
+    }
+  ],
+  "heatmap": [
+    {
+      "symbol": "SPY",
+      "name": "United States",
+      "price": 764.6034,
+      "change_pct": 0.89,
+      "change_pct_7d": 0.37,
+      "volume_ratio": 0.38,
+      "region": "Americas"
+    },
+    {
+      "symbol": "EWC",
+      "name": "Canada",
+      "price": 60.42,
+      "change_pct": 0.22,
+      "change_pct_7d": -0.3,
+      "volume_ratio": 0.19,
+      "region": "Americas"
+    },
+    {
+      "symbol": "EWZ",
+      "name": "Brazil",
+      "price": 38.36,
+      "change_pct": -0.52,
+      "change_pct_7d": 4.89,
+      "volume_ratio": 0.16,
+      "region": "Americas"
+    },
+    {
+      "symbol": "EWW",
+      "name": "Mexico",
+      "price": 75.225,
+      "change_pct": -0.03,
+      "change_pct_7d": -0.57,
+      "volume_ratio": 0.22,
+      "region": "Americas"
+    },
+    {
+      "symbol": "EWU",
+      "name": "United Kingdom",
+      "price": 47.8,
+      "change_pct": 0.57,
+      "change_pct_7d": -0.81,
+      "volume_ratio": 0.13,
+      "region": "Europe"
+    },
+    {
+      "symbol": "EWQ",
+      "name": "France",
+      "price": 44.96,
+      "change_pct": 0.76,
+      "change_pct_7d": -1.06,
+      "volume_ratio": 0.1,
+      "region": "Europe"
+    },
+    {
+      "symbol": "EWG",
+      "name": "Germany",
+      "price": 42.92,
+      "change_pct": 0.7,
+      "change_pct_7d": -1.2,
+      "volume_ratio": 0.22,
+      "region": "Europe"
+    },
+    {
+      "symbol": "EWL",
+      "name": "Switzerland",
+      "price": 60.43,
+      "change_pct": 0.22,
+      "change_pct_7d": -3.36,
+      "volume_ratio": 0.1,
+      "region": "Europe"
+    },
+    {
+      "symbol": "EWI",
+      "name": "Italy",
+      "price": 61.83,
+      "change_pct": 1.34,
+      "change_pct_7d": 1.03,
+      "volume_ratio": 0.25,
+      "region": "Europe"
+    },
+    {
+      "symbol": "EWP",
+      "name": "Spain",
+      "price": 62.13,
+      "change_pct": 1.16,
+      "change_pct_7d": 0.93,
+      "volume_ratio": 0.09,
+      "region": "Europe"
+    },
+    {
+      "symbol": "MCHI",
+      "name": "China",
+      "price": 53.08,
+      "change_pct": 0.53,
+      "change_pct_7d": -2.44,
+      "volume_ratio": 0.35,
+      "region": "Asia-Pacific"
+    },
+    {
+      "symbol": "EWJ",
+      "name": "Japan",
+      "price": 98.58,
+      "change_pct": 2.22,
+      "change_pct_7d": 3.53,
+      "volume_ratio": 0.44,
+      "region": "Asia-Pacific"
+    },
+    {
+      "symbol": "INDA",
+      "name": "India",
+      "price": 48.41,
+      "change_pct": 0.62,
+      "change_pct_7d": -2.36,
+      "volume_ratio": 0.25,
+      "region": "Asia-Pacific"
+    },
+    {
+      "symbol": "EWH",
+      "name": "Hong Kong",
+      "price": 22.555,
+      "change_pct": 0.38,
+      "change_pct_7d": 0.02,
+      "volume_ratio": 0.35,
+      "region": "Asia-Pacific"
+    },
+    {
+      "symbol": "EWT",
+      "name": "Taiwan",
+      "price": 110.61,
+      "change_pct": 1.55,
+      "change_pct_7d": 0.79,
+      "volume_ratio": 0.27,
+      "region": "Asia-Pacific"
+    },
+    {
+      "symbol": "EWY",
+      "name": "South Korea",
+      "price": 189.05,
+      "change_pct": 3.43,
+      "change_pct_7d": 7.54,
+      "volume_ratio": 0.26,
+      "region": "Asia-Pacific"
+    },
+    {
+      "symbol": "EWA",
+      "name": "Australia",
+      "price": 29.295,
+      "change_pct": 0.74,
+      "change_pct_7d": -1.3,
+      "volume_ratio": 0.4,
+      "region": "Asia-Pacific"
+    }
+  ]
+}
