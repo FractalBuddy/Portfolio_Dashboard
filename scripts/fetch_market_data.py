@@ -188,11 +188,13 @@ def fetch_intraday_history(symbol):
         return []
 
 
-def attach_stock_histories(stocks):
-    for s in stocks:
+def attach_histories(items):
+    """Attaches 5-year daily history + intraday 5-min bars to any list of items
+    that have a 'symbol' key (stocks, indices, forex, commodities)."""
+    for s in items:
         s["history"] = fetch_full_history(s["symbol"])
         s["intraday"] = fetch_intraday_history(s["symbol"])
-    return stocks
+    return items
 
 
 def fetch_fred_series(series_id):
@@ -421,18 +423,24 @@ def sanitize_for_json(obj):
 def main():
     print("Fetching indices...")
     indices = build_list(INDICES)
+    print("Fetching 5-year + intraday history for each index...")
+    indices = attach_histories(indices)
     print("Fetching stocks...")
     stocks = build_list(STOCKS)
     print("Fetching 5-year + intraday history for each stock (for the detail chart)...")
-    stocks = attach_stock_histories(stocks)
+    stocks = attach_histories(stocks)
     print("Fetching funds...")
     funds = build_list(FUNDS)
     print("Fetching your actual fund holdings (NAV scrape + fallback)...")
     your_funds = build_your_funds()
     print("Fetching commodities...")
     commodities = build_list(COMMODITIES)
+    print("Fetching 5-year + intraday history for each commodity...")
+    commodities = attach_histories(commodities)
     print("Fetching forex...")
     forex = build_list(FOREX)
+    print("Fetching 5-year + intraday history for each forex pair...")
+    forex = attach_histories(forex)
     print("Fetching country heatmap...")
     heatmap = build_list(COUNTRY_HEATMAP)
     print("Fetching FRED rates...")
