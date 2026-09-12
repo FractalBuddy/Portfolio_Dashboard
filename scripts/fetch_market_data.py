@@ -335,36 +335,165 @@ def fetch_ishares_nav(product_url, isin):
         return None
 
 
+def fetch_ishares_fund_facts(product_url):
+    """
+    Scrapes the 'Key Facts' block of the fund's ishares.com product page: management
+    company, benchmark, Morningstar category, fund/class size, launch date, and fees.
+    Best-effort and resilient -- any field that isn't found (or if the page structure
+    changes) is simply left out, never raises.
+    """
+    facts = {}
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
+        res = requests.get(product_url, headers=headers, timeout=20)
+        res.raise_for_status()
+        plain = re.sub(r'<[^>]+>', ' ', res.text)
+        plain = re.sub(r'\s+', ' ', plain)
+
+        m = re.search(r'Inception Date\s+([\d/A-Za-z]+)', plain)
+        if m: facts["class_inception_date"] = m.group(1)
+
+        m = re.search(r'Fund Launch Date\s+([\d/A-Za-z]+)', plain)
+        if m: facts["fund_launch_date"] = m.group(1)
+
+        m = re.search(r'Net Assets\s+as of\s+[\d/A-Za-z]+\s+([A-Z]{3})\s*([\d,]+)', plain)
+        if m: facts["class_aum"] = f"{m.group(1)} {int(m.group(2).replace(',', '')):,}"
+
+        m = re.search(r'Net Assets of Fund\s+as of\s+[\d/A-Za-z]+\s+([A-Z]{3})\s*([\d,]+)', plain)
+        if m: facts["fund_aum"] = f"{m.group(1)} {int(m.group(2).replace(',', '')):,}"
+
+        m = re.search(r'Benchmark Index\s+([A-Za-z0-9 ,()%.\-]+?)\s+(?:Initial Charge|Management Fee)', plain)
+        if m: facts["benchmark"] = m.group(1).strip()
+
+        m = re.search(r'Management Company\s+([A-Za-z0-9 .,()]+?)\s+(?:Dealing Settlement|Bloomberg Ticker)', plain)
+        if m: facts["management_company"] = m.group(1).strip()
+
+        m = re.search(r'Morningstar Category\s+([A-Za-z0-9 &\-]+?)\s+Dealing Frequency', plain)
+        if m: facts["morningstar_category"] = m.group(1).strip()
+
+        m = re.search(r'Ongoing Charges Figures\s+([\d.]+)\s*%', plain)
+        if m: facts["ongoing_charges_pct"] = float(m.group(1))
+
+        m = re.search(r'Management Fee\s+([\d.]+)\s*%', plain)
+        if m: facts["management_fee_pct"] = float(m.group(1))
+
+        m = re.search(r'Performance Fee\s+([\d.]+)\s*%', plain)
+        if m: facts["performance_fee_pct"] = float(m.group(1))
+
+        m = re.search(r'Initial Charge\s+([\d.]+)\s*%', plain)
+        if m: facts["initial_charge_pct"] = float(m.group(1))
+
+    except Exception as e:
+        print(f"  ! fund facts scrape failed for {product_url}: {e}", file=sys.stderr)
+    return facts
+
+
+def compute_fund_analytics(proxy_symbol):
+    """
+    Computes annual returns (per calendar year), period returns (YTD/1Y/2Y/3Y/5Y/10Y),
+    and annualized volatility (12m/3y/5y) from the proxy ETF's own long-term daily
+    price history. This is an approximation of your actual Class S fund (same index,
+    slightly different fee drag), used because the exact fund has no yfinance ticker
+    and iShares doesn't publish these tables in scrapable form (their site renders
+    them client-side via JS, empty in the raw HTML).
+    """
+    try:
+        hist = yf.Ticker(proxy_symbol).history(period="10y", interval="1d")
+        if hist.empty or len(hist) < 30:
+            return {}
+        dates = [d.date() for d in hist.index]
+        closes = [float(c) for c in hist["Close"].tolist()]
+
+        annual_returns = {}
+        for y in sorted(set(d.year for d in dates)):
+            idxs = [i for i, d in enumerate(dates) if d.year == y]
+            if len(idxs) < 2:
+                continue
+            annual_returns[str(y)] = round((closes[idxs[-1]] / closes[idxs[0]] - 1) * 100, 2)
+
+        last_price = closes[-1]
+        last_date = dates[-1]
+
+        def nearest_price_on_or_before(target_date):
+            best = None
+            for i, d in enumerate(dates):
+                if d <= target_date:
+                    best = i
+                else:
+                    break
+            return closes[best] if best is not None else None
+
+        period_returns = {}
+        from datetime import date as _date
+        jan1 = _date(last_date.year, 1, 1)
+        p = nearest_price_on_or_before(jan1) or closes[0]
+        period_returns["ytd"] = round((last_price / p - 1) * 100, 2)
+        for label, n in [("1y", 1), ("2y", 2), ("3y", 3), ("5y", 5), ("10y", 10)]:
+            try:
+                target = last_date.replace(year=last_date.year - n)
+            except ValueError:
+                target = last_date.replace(year=last_date.year - n, day=28)
+            p = nearest_price_on_or_before(target)
+            if p:
+                period_returns[label] = round((last_price / p - 1) * 100, 2)
+
+        def volatility_over(days_back):
+            sub = closes[-days_back:] if len(closes) > days_back else closes
+            if len(sub) < 10:
+                return None
+            rets = [math.log(sub[i] / sub[i-1]) for i in range(1, len(sub))]
+            mean = sum(rets) / len(rets)
+            variance = sum((r - mean) ** 2 for r in rets) / (len(rets) - 1)
+            return round((variance ** 0.5) * (252 ** 0.5) * 100, 2)
+
+        volatility = {"12m": volatility_over(252), "3y": volatility_over(252*3), "5y": volatility_over(252*5)}
+
+        return {"annual_returns": annual_returns, "period_returns": period_returns, "volatility": volatility}
+    except Exception as e:
+        print(f"  ! fund analytics failed for {proxy_symbol}: {e}", file=sys.stderr)
+        return {}
+
+
 def build_your_funds():
     """
     Your actual fund holdings. Tries the exact scraped Class S NAV first; if that
     fails for any reason, falls back to applying the proxy ETF's daily % change to
-    the last scraped/known NAV, so the dashboard never just breaks silently.
+    the last scraped/known NAV, so the dashboard never just breaks silently. Also
+    attaches fund facts (scraped) and computed analytics (annual/period returns,
+    volatility -- from the proxy ETF's history, see compute_fund_analytics).
     """
     out = []
     for fund in YOUR_FUNDS:
         scraped = fetch_ishares_nav(fund["product_url"], fund["isin"])
+        facts = fetch_ishares_fund_facts(fund["product_url"])
+        analytics = compute_fund_analytics(fund["proxy_symbol"])
+        entry = {
+            "isin": fund["isin"],
+            "name": fund["name"],
+            "facts": facts,
+            "analytics": analytics,
+            "history": fetch_full_history(fund["proxy_symbol"]),  # approximate price chart via the proxy ETF
+        }
         if scraped:
-            out.append({
-                "isin": fund["isin"],
-                "name": fund["name"],
+            entry.update({
                 "price": scraped["price"],
                 "change_pct": scraped.get("change_pct"),
                 "nav_date": scraped.get("nav_date"),
                 "wk52_low": scraped.get("wk52_low"),
                 "wk52_high": scraped.get("wk52_high"),
+                "proxy_symbol": fund["proxy_symbol"],
                 "source": "ishares_nav_scrape",
             })
         else:
+            # Fallback: approximate using the proxy ETF's daily % change.
             proxy_data = fetch_symbol(fund["proxy_symbol"])
-            out.append({
-                "isin": fund["isin"],
-                "name": fund["name"],
-                "price": None,
+            entry.update({
+                "price": None,  # dashboard keeps the user's last manual NAV and applies change_pct itself
                 "change_pct": proxy_data["change_pct"] if proxy_data else None,
                 "proxy_symbol": fund["proxy_symbol"],
                 "source": "proxy_approx",
             })
+        out.append(entry)
     return out
 
 
