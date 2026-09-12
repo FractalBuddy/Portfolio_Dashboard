@@ -1,4 +1,4 @@
-name: Update market data
+name: Update market datak
 
 on:
   schedule:
