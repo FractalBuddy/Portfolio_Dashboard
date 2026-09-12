@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-12T10:02:33.459339+00:00",
+  "generated_at": "2026-09-12T10:45:32.940206+00:00",
   "indices": [
     {
       "symbol": "^GSPC",
@@ -691,9 +691,9 @@
     {
       "symbol": "SWDA.L",
       "name": "iShares Core MSCI World UCITS ETF",
-      "price": NaN,
-      "change_pct": NaN,
-      "change_pct_7d": NaN,
+      "price": null,
+      "change_pct": null,
+      "change_pct_7d": null,
       "volume_ratio": 0.68,
       "sparkline": [
         10888.0,
@@ -703,15 +703,15 @@
         10919.0,
         10820.0,
         10781.0,
-        NaN
+        null
       ]
     },
     {
       "symbol": "EIMI.L",
       "name": "iShares Core MSCI EM IMI UCITS ETF",
-      "price": NaN,
-      "change_pct": NaN,
-      "change_pct_7d": NaN,
+      "price": null,
+      "change_pct": null,
+      "change_pct_7d": null,
       "volume_ratio": 0.61,
       "sparkline": [
         55.07,
@@ -721,15 +721,15 @@
         56.45,
         56.17,
         55.21,
-        NaN
+        null
       ]
     },
     {
       "symbol": "IMEU.L",
       "name": "iShares Core MSCI Europe UCITS ETF",
-      "price": NaN,
-      "change_pct": NaN,
-      "change_pct_7d": NaN,
+      "price": null,
+      "change_pct": null,
+      "change_pct_7d": null,
       "volume_ratio": 0.27,
       "sparkline": [
         3445.0,
@@ -739,15 +739,15 @@
         3465.5,
         3415.0,
         3397.0,
-        NaN
+        null
       ]
     },
     {
       "symbol": "SGLN.L",
       "name": "iShares Physical Gold ETC",
-      "price": NaN,
-      "change_pct": NaN,
-      "change_pct_7d": NaN,
+      "price": null,
+      "change_pct": null,
+      "change_pct_7d": null,
       "volume_ratio": 0.96,
       "sparkline": [
         6281.0,
@@ -757,7 +757,7 @@
         6306.0,
         6300.0,
         6262.0,
-        NaN
+        null
       ]
     }
   ],
@@ -766,7 +766,7 @@
       "isin": "IE000ZYRH0Q7",
       "name": "iShares Developed World Index (IE) Acc EUR \u2014 Class S",
       "price": null,
-      "change_pct": NaN,
+      "change_pct": null,
       "proxy_symbol": "SWDA.L",
       "source": "proxy_approx"
     },
@@ -1031,6 +1031,13 @@
     }
   ],
   "rates": [
+    {
+      "series": "DGS10",
+      "name": "US 10-Year Treasury",
+      "value": 4.95,
+      "prev": 4.83,
+      "date": "2026-09-10"
+    },
     {
       "series": "DGS2",
       "name": "US 2-Year Treasury",
@@ -1388,6 +1395,12 @@
   "news": {
     "general": [
       {
+        "title": "Meet the Value Stock That's Crushing the S&P 500. Here's Why It's Still a Great Buy in September.",
+        "link": "https://www.fool.com/investing/2026/09/12/meet-the-value-stock-thats-crushing-the-sp-500-her/?.tsrc=rss",
+        "source": "Yahoo! Finance: ^GSPC News",
+        "published": "Sat, 12 Sep 2026 10:20:00 +0000"
+      },
+      {
         "title": "What a Rare Market Pattern Signals for Investors",
         "link": "https://www.fool.com/investing/2026/09/12/what-a-rare-market-pattern-signals-for-investors/?.tsrc=rss",
         "source": "Yahoo! Finance: ^GSPC News",
@@ -1426,12 +1439,6 @@
       {
         "title": "Innovative Industrial Properties (IIPR) Laps the Stock Market: Here's Why",
         "link": "https://finance.yahoo.com/markets/stocks/articles/innovative-industrial-properties-iipr-laps-221503479.html?.tsrc=rss",
-        "source": "Yahoo! Finance: ^GSPC News",
-        "published": "Fri, 11 Sep 2026 22:15:03 +0000"
-      },
-      {
-        "title": "Dow Inc. (DOW) Stock Sinks As Market Gains: Here's Why",
-        "link": "https://finance.yahoo.com/markets/stocks/articles/dow-inc-dow-stock-sinks-221503726.html?.tsrc=rss",
         "source": "Yahoo! Finance: ^GSPC News",
         "published": "Fri, 11 Sep 2026 22:15:03 +0000"
       },
@@ -1518,10 +1525,10 @@
         "asset_name": "Apple"
       },
       {
-        "title": "Apple\u2019s Foldable iPhone Could Trigger a Massive 'Upgrade Cycle,' Says Gary Black \u2014 But This One Problem Could Cap 'Incremental Earnings' for 6 Months",
-        "link": "https://finance.yahoo.com/markets/stocks/articles/apple-foldable-iphone-could-trigger-013031814.html?.tsrc=rss",
+        "title": "Prediction: Nvidia Will Overtake Apple in Stock Buybacks and Dividends Under New Apple CEO John Ternus",
+        "link": "https://www.fool.com/investing/2026/09/12/predict-nvidia-overtake-apple-stock-buyback/?.tsrc=rss",
         "source": "Yahoo! Finance: AAPL News",
-        "published": "Sat, 12 Sep 2026 01:30:31 +0000",
+        "published": "Sat, 12 Sep 2026 10:36:00 +0000",
         "symbol": "AAPL",
         "asset_name": "Apple"
       },
@@ -1542,18 +1549,18 @@
         "asset_name": "Microsoft"
       },
       {
-        "title": "Nike Is Being Deleted From the S&P 100. Is Its Seat in the Dow Jones Industrial Average in Jeopardy?",
-        "link": "https://www.fool.com/investing/2026/09/12/nike-just-got-deleted-from-the-sp-100-is-its-seat/?.tsrc=rss",
+        "title": "Shell Just Sold a $715 Million Stake in a Major New England Asset to Constellation Energy. Here's What Investors Need to Know.",
+        "link": "https://www.fool.com/investing/2026/09/12/shell-just-sold-a-usd715-million-stake-in-a-major-new-england-asset-to-constellation-energy-here-s-what-investors-need-to-know/?.tsrc=rss",
         "source": "Yahoo! Finance: NVDA News",
-        "published": "Sat, 12 Sep 2026 09:35:00 +0000",
+        "published": "Sat, 12 Sep 2026 10:12:51 +0000",
         "symbol": "NVDA",
         "asset_name": "NVIDIA"
       },
       {
-        "title": "Nvidia Stock Could Reach $490 by End of 2027 Based on Current Growth Projections",
-        "link": "https://www.fool.com/investing/2026/09/12/nvidia-stock-could-reach-x-by-end-of-2027-based-on/?.tsrc=rss",
+        "title": "Nike Is Being Deleted From the S&P 100. Is Its Seat in the Dow Jones Industrial Average in Jeopardy?",
+        "link": "https://www.fool.com/investing/2026/09/12/nike-just-got-deleted-from-the-sp-100-is-its-seat/?.tsrc=rss",
         "source": "Yahoo! Finance: NVDA News",
-        "published": "Sat, 12 Sep 2026 09:23:00 +0000",
+        "published": "Sat, 12 Sep 2026 09:35:00 +0000",
         "symbol": "NVDA",
         "asset_name": "NVIDIA"
       },
