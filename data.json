@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-09-12T02:21:26.873773+00:00",
+  "generated_at": "2026-09-12T02:39:01.683140+00:00",
   "indices": [
     {
       "symbol": "^GSPC",
@@ -1516,6 +1516,14 @@
     ],
     "positions": [
       {
+        "title": "Apple\u2019s Foldable iPhone Could Trigger a Massive 'Upgrade Cycle,' Says Gary Black \u2014 But This One Problem Could Cap 'Incremental Earnings' for 6 Months",
+        "link": "https://finance.yahoo.com/markets/stocks/articles/apple-foldable-iphone-could-trigger-013031814.html?.tsrc=rss",
+        "source": "Yahoo! Finance: AAPL News",
+        "published": "Sat, 12 Sep 2026 01:30:31 +0000",
+        "symbol": "AAPL",
+        "asset_name": "Apple"
+      },
+      {
         "title": "Cook Hands Ternus Apple (AAPL) that Still has to Prove itself on AI",
         "link": "https://finance.yahoo.com/technology/ai/articles/cook-hands-ternus-apple-aapl-011445859.html?.tsrc=rss",
         "source": "Yahoo! Finance: AAPL News",
@@ -1524,18 +1532,18 @@
         "asset_name": "Apple"
       },
       {
-        "title": "Apple, Microsoft, and Nvidia Top the List of Largest Companies by Market Cap. Here's the One I'm Buying Now.",
-        "link": "https://www.fool.com/investing/2026/09/11/apple-microsoft-and-nvidia-top-the-list-of-largest/?.tsrc=rss",
-        "source": "Yahoo! Finance: AAPL News",
-        "published": "Fri, 11 Sep 2026 23:20:00 +0000",
-        "symbol": "AAPL",
-        "asset_name": "Apple"
-      },
-      {
         "title": "Microsoft Stock Is Flat So Far in 2026. Is a Rally Coming to End the Year?",
         "link": "https://www.fool.com/investing/2026/09/11/microsoft-stock-is-flat-for-2026-is-a-rally-coming/?.tsrc=rss",
         "source": "Yahoo! Finance: MSFT News",
         "published": "Sat, 12 Sep 2026 00:34:00 +0000",
+        "symbol": "MSFT",
+        "asset_name": "Microsoft"
+      },
+      {
+        "title": "Apple, Microsoft, and Nvidia Top the List of Largest Companies by Market Cap. Here's the One I'm Buying Now.",
+        "link": "https://www.fool.com/investing/2026/09/11/apple-microsoft-and-nvidia-top-the-list-of-largest/?.tsrc=rss",
+        "source": "Yahoo! Finance: MSFT News",
+        "published": "Fri, 11 Sep 2026 23:20:00 +0000",
         "symbol": "MSFT",
         "asset_name": "Microsoft"
       },
@@ -1744,14 +1752,6 @@
         "link": "https://qz.com/what-is-asml?.tsrc=rss",
         "source": "Yahoo! Finance: ASML News",
         "published": "Thu, 10 Sep 2026 21:00:49 +0000",
-        "symbol": "ASML",
-        "asset_name": "ASML Holding"
-      },
-      {
-        "title": "ASML Expands High-NA Ties With Samsung and Intel as AI Demand Builds",
-        "link": "https://finance.yahoo.com/technology/articles/asml-expands-high-na-ties-143900733.html?.tsrc=rss",
-        "source": "Yahoo! Finance: ASML News",
-        "published": "Thu, 10 Sep 2026 14:39:00 +0000",
         "symbol": "ASML",
         "asset_name": "ASML Holding"
       }
