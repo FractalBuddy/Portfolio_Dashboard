@@ -152,6 +152,49 @@ def build_list(items):
     return out
 
 
+def fetch_full_history(symbol, period="5y"):
+    """Multi-year daily closes for the interactive stock-detail chart (1M/6M/YTD/1Y/5Y/ALL
+    are sliced client-side from this single series)."""
+    try:
+        hist = yf.Ticker(symbol).history(period=period, interval="1d")
+        if hist.empty:
+            return []
+        return [
+            {"date": idx.strftime("%Y-%m-%d"), "close": round(float(row["Close"]), 4)}
+            for idx, row in hist.iterrows()
+        ]
+    except Exception as e:
+        print(f"  ! full history failed for {symbol}: {e}", file=sys.stderr)
+        return []
+
+
+def fetch_intraday_history(symbol):
+    """
+    Real intraday bars for the 1D chart (5-minute bars, including pre/post market),
+    the same kind of data Yahoo Finance's own 1D chart uses. Yahoo only keeps this
+    granularity for a short window, so we ask for the last 2 days and keep whatever
+    comes back (usually just the most recent session).
+    """
+    try:
+        hist = yf.Ticker(symbol).history(period="2d", interval="5m", prepost=True)
+        if hist.empty:
+            return []
+        return [
+            {"time": idx.strftime("%Y-%m-%d %H:%M"), "close": round(float(row["Close"]), 4)}
+            for idx, row in hist.iterrows()
+        ]
+    except Exception as e:
+        print(f"  ! intraday history failed for {symbol}: {e}", file=sys.stderr)
+        return []
+
+
+def attach_stock_histories(stocks):
+    for s in stocks:
+        s["history"] = fetch_full_history(s["symbol"])
+        s["intraday"] = fetch_intraday_history(s["symbol"])
+    return stocks
+
+
 def fetch_fred_series(series_id):
     if not FRED_API_KEY:
         return None
@@ -255,6 +298,11 @@ def build_position_news():
 
 
 def fetch_ishares_nav(product_url, isin):
+    """
+    Scrapes the exact Class S NAV straight off the fund's public ishares.com product
+    page. Returns None (never raises) if the page layout doesn't match what we expect,
+    so callers can fall back to the proxy-ETF approximation instead of crashing.
+    """
     try:
         headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
         res = requests.get(product_url, headers=headers, timeout=20)
@@ -286,6 +334,11 @@ def fetch_ishares_nav(product_url, isin):
 
 
 def build_your_funds():
+    """
+    Your actual fund holdings. Tries the exact scraped Class S NAV first; if that
+    fails for any reason, falls back to applying the proxy ETF's daily % change to
+    the last scraped/known NAV, so the dashboard never just breaks silently.
+    """
     out = []
     for fund in YOUR_FUNDS:
         scraped = fetch_ishares_nav(fund["product_url"], fund["isin"])
@@ -332,6 +385,7 @@ def build_market_mood():
 
 
 def build_benchmarks():
+    """90-day daily closes for S&P 500 and an MSCI World proxy, for portfolio comparison charts."""
     benchmarks = {}
     for key, symbol in [("sp500", "^GSPC"), ("msci_world", "URTH")]:
         try:
@@ -369,6 +423,8 @@ def main():
     indices = build_list(INDICES)
     print("Fetching stocks...")
     stocks = build_list(STOCKS)
+    print("Fetching 5-year + intraday history for each stock (for the detail chart)...")
+    stocks = attach_stock_histories(stocks)
     print("Fetching funds...")
     funds = build_list(FUNDS)
     print("Fetching your actual fund holdings (NAV scrape + fallback)...")
