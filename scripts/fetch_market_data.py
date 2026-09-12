@@ -70,7 +70,7 @@ YOUR_FUNDS = [
     {
         "isin": "IE000ZYRH0Q7",
         "name": "iShares Developed World Index (IE) Acc EUR — Class S",
-        "product_url": "https://www.ishares.com/ch/individual/en/products/229050/ishares-developed-world-index-fund-ie",
+        "product_url": "https://www.ishares.com/ch/individual/en/products/345277/ishares-developed-world-index-fund-ie",
         "proxy_symbol": "SWDA.L",
     },
     {
@@ -159,9 +159,12 @@ def build_list(items):
     return out
 
 
-def fetch_full_history(symbol, period="5y"):
-    """Multi-year daily closes for the interactive stock-detail chart (1M/6M/YTD/1Y/5Y/ALL
-    are sliced client-side from this single series)."""
+def fetch_full_history(symbol, period="max"):
+    """Full available daily history for the interactive stock-detail chart (1M/6M/YTD/1Y/
+    5Y/ALL are sliced client-side from this single series). "max" -- the same span Yahoo
+    Finance's own "Max" button shows -- not a fixed window, so "ALL" is genuinely all of
+    it (was capped at 5y, then 10y, both of which could silently equal "5Y"/"10Y" for
+    long-listed symbols; "max" has no such ceiling)."""
     try:
         hist = yf.Ticker(symbol).history(period=period, interval="1d")
         if hist.empty:
@@ -196,7 +199,7 @@ def fetch_intraday_history(symbol):
 
 
 def attach_histories(items):
-    """Attaches 5-year daily history + intraday 5-min bars to any list of items
+    """Attaches full ('max') daily history + intraday 5-min bars to any list of items
     that have a 'symbol' key (stocks, indices, forex, commodities, funds)."""
     for s in items:
         s["history"] = fetch_full_history(s["symbol"])
@@ -598,25 +601,25 @@ def sanitize_for_json(obj):
 def main():
     print("Fetching indices...")
     indices = build_list(INDICES)
-    print("Fetching 5-year + intraday history for each index...")
+    print("Fetching full ('max') + intraday history for each index...")
     indices = attach_histories(indices)
     print("Fetching stocks...")
     stocks = build_list(STOCKS)
-    print("Fetching 5-year + intraday history for each stock (for the detail chart)...")
+    print("Fetching full ('max') + intraday history for each stock (for the detail chart)...")
     stocks = attach_histories(stocks)
     print("Fetching funds...")
     funds = build_list(FUNDS)
-    print("Fetching 5-year + intraday history for each fund (Explore detail chart)...")
+    print("Fetching full ('max') + intraday history for each fund (Explore detail chart)...")
     funds = attach_histories(funds)
     print("Fetching your actual fund holdings (NAV scrape + fallback)...")
     your_funds = build_your_funds()
     print("Fetching commodities...")
     commodities = build_list(COMMODITIES)
-    print("Fetching 5-year + intraday history for each commodity...")
+    print("Fetching full ('max') + intraday history for each commodity...")
     commodities = attach_histories(commodities)
     print("Fetching forex...")
     forex = build_list(FOREX)
-    print("Fetching 5-year + intraday history for each forex pair...")
+    print("Fetching full ('max') + intraday history for each forex pair...")
     forex = attach_histories(forex)
     print("Fetching country heatmap...")
     heatmap = build_list(COUNTRY_HEATMAP)
