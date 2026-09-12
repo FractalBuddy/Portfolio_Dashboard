@@ -74,6 +74,26 @@ FUNDS = [
     ("SGLN.L", "iShares Physical Gold ETC"),
 ]
 
+# Your two actual MyInvestor holdings (Class S index mutual funds -- not exchange-traded,
+# so yfinance has no ticker for them). We scrape the exact Class S NAV directly off their
+# ishares.com product page (public, no login, no API -- just the same page a human would
+# read). If the page layout ever changes and scraping fails, we fall back automatically to
+# a proxy ETF that tracks the same index, applying its % change to your last known NAV.
+YOUR_FUNDS = [
+    {
+        "isin": "IE000ZYRH0Q7",
+        "name": "iShares Developed World Index (IE) Acc EUR — Class S",
+        "product_url": "https://www.ishares.com/ch/individual/en/products/229050/ishares-developed-world-index-fund-ie",
+        "proxy_symbol": "SWDA.L",
+    },
+    {
+        "isin": "IE000QAZP7L2",
+        "name": "iShares Emerging Markets Index Fund (IE) Acc EUR — Class S",
+        "product_url": "https://www.ishares.com/ch/individual/en/products/345276/ishares-emerging-markets-index-fund-ie",
+        "proxy_symbol": "EIMI.L",
+    },
+]
+
 COMMODITIES = [
     ("GC=F", "Gold"), ("SI=F", "Silver"), ("CL=F", "WTI Crude Oil"), ("BZ=F", "Brent Crude Oil"),
     ("NG=F", "Natural Gas"), ("HG=F", "Copper"), ("ZW=F", "Wheat"), ("ZC=F", "Corn"),
@@ -127,6 +147,7 @@ def fetch_symbol(symbol):
             "change_pct": round(change_pct, 2),
             "change_pct_7d": round(change_pct_7d, 2),
             "volume_ratio": round(vol_ratio, 2) if vol_ratio else None,
+            "sparkline": [round(float(c), 4) for c in hist["Close"].tolist()],
         }
     except Exception as e:
         print(f"  ! failed {symbol}: {e}", file=sys.stderr)
@@ -203,7 +224,6 @@ def build_general_news():
     items = []
     for url in GENERAL_NEWS_FEEDS:
         items.extend(parse_feed(url, limit=8))
-    # de-dupe by title, keep first 20
     seen = set()
     deduped = []
     for it in items:
@@ -220,7 +240,6 @@ def build_position_news():
     and tracked cryptocurrencies (via keyword-filtering general crypto news feeds).
     """
     items = []
-    # Stocks & funds: Yahoo Finance has a per-symbol RSS feed.
     watched_symbols = STOCKS + FUNDS
     for symbol, name in watched_symbols:
         url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US"
@@ -230,21 +249,17 @@ def build_position_news():
             e["asset_name"] = name
         items.extend(entries)
 
-    # Crypto: filter general crypto news feeds by keyword match against our watchlist.
     crypto_items = []
     for url in CRYPTO_NEWS_FEEDS:
         crypto_items.extend(parse_feed(url, limit=15))
     for it in crypto_items:
         title_lower = it["title"].lower()
-        # Word-boundary match to avoid short tickers (link, dot, eth...) matching inside
-        # unrelated words like "linking", "adopt", "weather".
         matched = [kw for kw in CRYPTO_WATCHLIST if re.search(r'\b' + re.escape(kw) + r'\b', title_lower)]
         if matched:
             it["symbol"] = matched[0].upper()
             it["asset_name"] = matched[0].title()
             items.append(it)
 
-    # de-dupe by title, cap at 30
     seen = set()
     deduped = []
     for it in items:
@@ -253,6 +268,75 @@ def build_position_news():
             seen.add(key)
             deduped.append(it)
     return deduped[:30]
+
+
+def fetch_ishares_nav(product_url, isin):
+    """
+    Scrapes the exact Class S NAV straight off the fund's public ishares.com product
+    page. Returns None (never raises) if the page layout doesn't match what we expect,
+    so callers can fall back to the proxy-ETF approximation instead of crashing.
+    """
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
+        res = requests.get(product_url, headers=headers, timeout=20)
+        res.raise_for_status()
+        text = res.text
+        plain = re.sub(r'<[^>]+>', ' ', text)
+        plain = re.sub(r'\s+', ' ', plain)
+
+        nav_match = re.search(r'NAV as of\s+([\d/A-Za-z]+)\s+EUR\s*([\d.,]+)', plain)
+        change_match = re.search(r'1 Day NAV Change.*?EUR\s*(-?[\d.,]+)\s*\(?\s*(-?[\d.,]+)%\s*\)?', plain)
+        wk_match = re.search(r'52\s*WK:\s*([\d.,]+)\s*-\s*([\d.,]+)', plain)
+        isin_present = isin in plain
+
+        if not (nav_match and isin_present):
+            print(f"  ! could not find expected NAV pattern for {isin} -- falling back to proxy", file=sys.stderr)
+            return None
+
+        price = float(nav_match.group(2).replace(',', ''))
+        result = {"price": round(price, 4), "nav_date": nav_match.group(1)}
+        if change_match:
+            result["change_pct"] = float(change_match.group(2).replace(',', ''))
+        if wk_match:
+            result["wk52_low"] = float(wk_match.group(1).replace(',', ''))
+            result["wk52_high"] = float(wk_match.group(2).replace(',', ''))
+        return result
+    except Exception as e:
+        print(f"  ! ishares scrape failed for {isin}: {e} -- falling back to proxy", file=sys.stderr)
+        return None
+
+
+def build_your_funds():
+    """
+    Your actual fund holdings. Tries the exact scraped Class S NAV first; if that
+    fails for any reason, falls back to applying the proxy ETF's daily % change to
+    the last scraped/known NAV, so the dashboard never just breaks silently.
+    """
+    out = []
+    for fund in YOUR_FUNDS:
+        scraped = fetch_ishares_nav(fund["product_url"], fund["isin"])
+        if scraped:
+            out.append({
+                "isin": fund["isin"],
+                "name": fund["name"],
+                "price": scraped["price"],
+                "change_pct": scraped.get("change_pct"),
+                "nav_date": scraped.get("nav_date"),
+                "wk52_low": scraped.get("wk52_low"),
+                "wk52_high": scraped.get("wk52_high"),
+                "source": "ishares_nav_scrape",
+            })
+        else:
+            proxy_data = fetch_symbol(fund["proxy_symbol"])
+            out.append({
+                "isin": fund["isin"],
+                "name": fund["name"],
+                "price": None,
+                "change_pct": proxy_data["change_pct"] if proxy_data else None,
+                "proxy_symbol": fund["proxy_symbol"],
+                "source": "proxy_approx",
+            })
+    return out
 
 
 def build_benchmarks():
@@ -278,6 +362,8 @@ def main():
     stocks = build_list(STOCKS)
     print("Fetching funds...")
     funds = build_list(FUNDS)
+    print("Fetching your actual fund holdings (NAV scrape + fallback)...")
+    your_funds = build_your_funds()
     print("Fetching commodities...")
     commodities = build_list(COMMODITIES)
     print("Fetching forex...")
@@ -298,6 +384,7 @@ def main():
         "indices": indices,
         "stocks": stocks,
         "funds": funds,
+        "your_funds": your_funds,
         "commodities": commodities,
         "forex": forex,
         "rates": rates,
@@ -314,6 +401,8 @@ def main():
 
     print(
         f"Wrote data.json: {len(indices)} indices, {len(stocks)} stocks, {len(funds)} funds, "
+        f"{len(your_funds)} of your own funds ({sum(1 for f in your_funds if f['source']=='ishares_nav_scrape')} scraped exact, "
+        f"{sum(1 for f in your_funds if f['source']=='proxy_approx')} fell back to proxy approx), "
         f"{len(commodities)} commodities, {len(forex)} forex, {len(rates)} rates, "
         f"{len(heatmap)} heatmap entries, {len(general_news)} general news, "
         f"{len(position_news)} position news, "
