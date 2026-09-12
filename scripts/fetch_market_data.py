@@ -190,7 +190,7 @@ def fetch_intraday_history(symbol):
 
 def attach_histories(items):
     """Attaches 5-year daily history + intraday 5-min bars to any list of items
-    that have a 'symbol' key (stocks, indices, forex, commodities)."""
+    that have a 'symbol' key (stocks, indices, forex, commodities, funds)."""
     for s in items:
         s["history"] = fetch_full_history(s["symbol"])
         s["intraday"] = fetch_intraday_history(s["symbol"])
@@ -560,6 +560,8 @@ def main():
     stocks = attach_histories(stocks)
     print("Fetching funds...")
     funds = build_list(FUNDS)
+    print("Fetching 5-year + intraday history for each fund (Explore detail chart)...")
+    funds = attach_histories(funds)
     print("Fetching your actual fund holdings (NAV scrape + fallback)...")
     your_funds = build_your_funds()
     print("Fetching commodities...")
