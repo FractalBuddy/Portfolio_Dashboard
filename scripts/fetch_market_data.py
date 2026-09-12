@@ -25,26 +25,19 @@ import feedparser
 
 FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
 
-# ---------------------------------------------------------------------------
-# News sources -- all free RSS feeds, no API key needed.
-# ---------------------------------------------------------------------------
 GENERAL_NEWS_FEEDS = [
     "https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EGSPC&region=US&lang=en-US",
     "https://www.marketwatch.com/rss/topstories",
-    "https://www.cnbc.com/id/20910258/device/rss/rss.html",  # CNBC Markets
-    "https://www.investing.com/rss/news_25.rss",  # Investing.com economic news
+    "https://www.cnbc.com/id/20910258/device/rss/rss.html",
+    "https://www.investing.com/rss/news_25.rss",
 ]
 CRYPTO_NEWS_FEEDS = [
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "https://cointelegraph.com/rss",
 ]
-# Watched crypto keywords, used to filter CRYPTO_NEWS_FEEDS into position-relevant items.
 CRYPTO_WATCHLIST = ["bitcoin", "btc", "ethereum", "eth", "chainlink", "link",
                      "polkadot", "dot", "mina", "rocket pool", "rpl", "tezos", "xtz", "unibright"]
 
-# ---------------------------------------------------------------------------
-# Watchlists -- edit these lists to change what shows up on the dashboard.
-# ---------------------------------------------------------------------------
 INDICES = [
     ("^GSPC", "S&P 500"), ("^IXIC", "Nasdaq Composite"), ("^DJI", "Dow Jones"),
     ("^RUT", "Russell 2000"), ("^FTSE", "UK 100"), ("^GDAXI", "DAX 40"),
@@ -56,7 +49,6 @@ STOCKS = [
     ("AAPL", "Apple"), ("MSFT", "Microsoft"), ("NVDA", "NVIDIA"), ("GOOGL", "Alphabet"),
     ("AMZN", "Amazon"), ("META", "Meta"), ("TSLA", "Tesla"), ("AVGO", "Broadcom"),
     ("JPM", "JPMorgan Chase"), ("LLY", "Eli Lilly"),
-    # Explore tab universe -- keep in sync with EXPLORE_UNIVERSE in the dashboard HTML
     ("COHR", "Coherent Corp."), ("LITE", "Lumentum Holdings"), ("IPGP", "IPG Photonics"),
     ("NOVT", "Novanta Inc."), ("AMS", "ams OSRAM AG"),
     ("ASML", "ASML Holding"), ("TSM", "Taiwan Semiconductor"), ("AMD", "Advanced Micro Devices"),
@@ -66,7 +58,6 @@ STOCKS = [
     ("NVO", "Novo Nordisk"),
 ]
 
-# UCITS index funds -- Yahoo Finance tickers (not ISINs; yfinance needs an exchange ticker).
 FUNDS = [
     ("SWDA.L", "iShares Core MSCI World UCITS ETF"),
     ("EIMI.L", "iShares Core MSCI EM IMI UCITS ETF"),
@@ -74,11 +65,6 @@ FUNDS = [
     ("SGLN.L", "iShares Physical Gold ETC"),
 ]
 
-# Your two actual MyInvestor holdings (Class S index mutual funds -- not exchange-traded,
-# so yfinance has no ticker for them). We scrape the exact Class S NAV directly off their
-# ishares.com product page (public, no login, no API -- just the same page a human would
-# read). If the page layout ever changes and scraping fails, we fall back automatically to
-# a proxy ETF that tracks the same index, applying its % change to your last known NAV.
 YOUR_FUNDS = [
     {
         "isin": "IE000ZYRH0Q7",
@@ -104,8 +90,6 @@ FOREX = [
     ("DX-Y.NYB", "Dollar Index"), ("AUDUSD=X", "AUD/USD"), ("USDCHF=X", "USD/CHF"),
 ]
 
-# Country ETFs used as proxies for a per-country heatmap (mirrors the
-# gmdmarkets.com-style mosaic: symbol, display name, region).
 COUNTRY_HEATMAP = [
     ("SPY", "United States", "Americas"), ("EWC", "Canada", "Americas"),
     ("EWZ", "Brazil", "Americas"), ("EWW", "Mexico", "Americas"),
@@ -118,7 +102,6 @@ COUNTRY_HEATMAP = [
     ("EWA", "Australia", "Asia-Pacific"),
 ]
 
-# FRED series id -> display name (rates/bonds). Only fetched if FRED_API_KEY is set.
 RATES = [
     ("DGS10", "US 10-Year Treasury"), ("DGS2", "US 2-Year Treasury"),
     ("DGS30", "US 30-Year Treasury"), ("FEDFUNDS", "Fed Funds Rate (monthly)"),
@@ -127,7 +110,6 @@ RATES = [
 
 
 def fetch_symbol(symbol):
-    """Returns price / 1-day change / 7-day change / volume ratio for a yfinance symbol."""
     try:
         t = yf.Ticker(symbol)
         hist = t.history(period="8d", interval="1d")
@@ -220,7 +202,6 @@ def parse_feed(url, limit=8):
 
 
 def build_general_news():
-    """Top general market/finance headlines from a few free RSS feeds."""
     items = []
     for url in GENERAL_NEWS_FEEDS:
         items.extend(parse_feed(url, limit=8))
@@ -235,10 +216,6 @@ def build_general_news():
 
 
 def build_position_news():
-    """
-    Headlines relevant to the tracked stocks/funds (via per-ticker Yahoo Finance RSS)
-    and tracked cryptocurrencies (via keyword-filtering general crypto news feeds).
-    """
     items = []
     watched_symbols = STOCKS + FUNDS
     for symbol, name in watched_symbols:
@@ -271,11 +248,6 @@ def build_position_news():
 
 
 def fetch_ishares_nav(product_url, isin):
-    """
-    Scrapes the exact Class S NAV straight off the fund's public ishares.com product
-    page. Returns None (never raises) if the page layout doesn't match what we expect,
-    so callers can fall back to the proxy-ETF approximation instead of crashing.
-    """
     try:
         headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
         res = requests.get(product_url, headers=headers, timeout=20)
@@ -307,11 +279,6 @@ def fetch_ishares_nav(product_url, isin):
 
 
 def build_your_funds():
-    """
-    Your actual fund holdings. Tries the exact scraped Class S NAV first; if that
-    fails for any reason, falls back to applying the proxy ETF's daily % change to
-    the last scraped/known NAV, so the dashboard never just breaks silently.
-    """
     out = []
     for fund in YOUR_FUNDS:
         scraped = fetch_ishares_nav(fund["product_url"], fund["isin"])
@@ -339,8 +306,25 @@ def build_your_funds():
     return out
 
 
+def build_market_mood():
+    """VIX via yfinance, and the crypto Fear & Greed Index via alternative.me (free,
+    public, no key -- this is the crypto-specific index, not CNN's stock-market
+    version, since CNN doesn't publish a public API)."""
+    mood = {}
+    vix = fetch_symbol("^VIX")
+    if vix:
+        mood["vix"] = {"value": vix["price"], "change_pct": vix["change_pct"]}
+    try:
+        res = requests.get("https://api.alternative.me/fng/?limit=1", timeout=15)
+        res.raise_for_status()
+        d = res.json()["data"][0]
+        mood["crypto_fear_greed"] = {"value": int(d["value"]), "classification": d["value_classification"]}
+    except Exception as e:
+        print(f"  ! fear & greed fetch failed: {e}", file=sys.stderr)
+    return mood
+
+
 def build_benchmarks():
-    """90-day daily closes for S&P 500 and an MSCI World proxy, for portfolio comparison charts."""
     benchmarks = {}
     for key, symbol in [("sp500", "^GSPC"), ("msci_world", "URTH")]:
         try:
@@ -378,6 +362,8 @@ def main():
     position_news = build_position_news()
     print("Fetching benchmark history...")
     benchmarks = build_benchmarks()
+    print("Fetching market mood (VIX, Fear & Greed)...")
+    market_mood = build_market_mood()
 
     data = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -394,6 +380,7 @@ def main():
             "positions": position_news,
         },
         "benchmarks": benchmarks,
+        "market_mood": market_mood,
     }
 
     with open("data.json", "w") as f:
