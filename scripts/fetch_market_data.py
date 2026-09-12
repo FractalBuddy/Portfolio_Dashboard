@@ -14,6 +14,7 @@ This script never touches anything about your personal portfolio -- it only
 fetches generic public market data (index/ETF/commodity/forex prices).
 """
 import json
+import math
 import os
 import re
 import sys
@@ -110,6 +111,7 @@ RATES = [
 
 
 def fetch_symbol(symbol):
+    """Returns price / 1-day change / 7-day change / volume ratio for a yfinance symbol."""
     try:
         t = yf.Ticker(symbol)
         hist = t.history(period="8d", interval="1d")
@@ -202,6 +204,7 @@ def parse_feed(url, limit=8):
 
 
 def build_general_news():
+    """Top general market/finance headlines from a few free RSS feeds."""
     items = []
     for url in GENERAL_NEWS_FEEDS:
         items.extend(parse_feed(url, limit=8))
@@ -216,6 +219,10 @@ def build_general_news():
 
 
 def build_position_news():
+    """
+    Headlines relevant to the tracked stocks/funds (via per-ticker Yahoo Finance RSS)
+    and tracked cryptocurrencies (via keyword-filtering general crypto news feeds).
+    """
     items = []
     watched_symbols = STOCKS + FUNDS
     for symbol, name in watched_symbols:
@@ -339,6 +346,24 @@ def build_benchmarks():
     return benchmarks
 
 
+def sanitize_for_json(obj):
+    """
+    Recursively replaces NaN/Infinity floats with None (JSON null).
+    Python's json.dump writes bare NaN/Infinity tokens by default, which is
+    NOT valid JSON per spec -- browsers' JSON.parse() rejects it outright,
+    silently breaking the whole feed for a single bad value anywhere in it.
+    """
+    if isinstance(obj, float):
+        if math.isnan(obj) or math.isinf(obj):
+            return None
+        return obj
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize_for_json(v) for v in obj]
+    return obj
+
+
 def main():
     print("Fetching indices...")
     indices = build_list(INDICES)
@@ -382,6 +407,7 @@ def main():
         "benchmarks": benchmarks,
         "market_mood": market_mood,
     }
+    data = sanitize_for_json(data)
 
     with open("data.json", "w") as f:
         json.dump(data, f, indent=2)
