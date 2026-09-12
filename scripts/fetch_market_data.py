@@ -103,6 +103,13 @@ COUNTRY_HEATMAP = [
     ("EWA", "Australia", "Asia-Pacific"),
 ]
 
+SECTOR_HEATMAP = [
+    ("XLK", "Technology"), ("XLI", "Industrials"), ("XLC", "Communication Services"),
+    ("XLY", "Consumer Discretionary"), ("XLRE", "Real Estate"), ("XLF", "Financials"),
+    ("XLB", "Materials"), ("XLP", "Consumer Staples"), ("XLE", "Energy"),
+    ("XLV", "Health Care"), ("XLU", "Utilities"),
+]
+
 RATES = [
     ("DGS10", "US 10-Year Treasury"), ("DGS2", "US 2-Year Treasury"),
     ("DGS30", "US 30-Year Treasury"), ("FEDFUNDS", "Fed Funds Rate (monthly)"),
@@ -498,13 +505,27 @@ def build_your_funds():
 
 
 def build_market_mood():
-    """VIX via yfinance, and the crypto Fear & Greed Index via alternative.me (free,
-    public, no key -- this is the crypto-specific index, not CNN's stock-market
-    version, since CNN doesn't publish a public API)."""
+    """VIX (volatility) + its 50-day moving average via yfinance, the crypto Fear & Greed
+    Index via alternative.me (free, public, no key), and CNN's stock-market Fear & Greed
+    Index (including its sub-components: momentum, breadth/strength, put/call, junk bond
+    and safe-haven demand) via CNN's own public dataviz endpoint that powers their site's
+    widget. That last one is undocumented/unofficial -- best-effort, and simply omitted
+    if CNN ever changes it, same as everything else scraped in this script."""
     mood = {}
-    vix = fetch_symbol("^VIX")
-    if vix:
-        mood["vix"] = {"value": vix["price"], "change_pct": vix["change_pct"]}
+    try:
+        hist = yf.Ticker("^VIX").history(period="3mo", interval="1d")
+        if not hist.empty:
+            closes = hist["Close"].tolist()
+            last = float(closes[-1])
+            prev = float(closes[-2]) if len(closes) > 1 else last
+            change_pct = (last / prev - 1) * 100 if prev else 0.0
+            sma_window = closes[-50:] if len(closes) >= 50 else closes
+            sma50 = sum(float(c) for c in sma_window) / len(sma_window)
+            mood["vix"] = {"value": round(last, 2), "change_pct": round(change_pct, 2)}
+            mood["vix_50ma"] = {"value": round(sma50, 2)}
+    except Exception as e:
+        print(f"  ! VIX fetch failed: {e}", file=sys.stderr)
+
     try:
         res = requests.get("https://api.alternative.me/fng/?limit=1", timeout=15)
         res.raise_for_status()
@@ -512,6 +533,31 @@ def build_market_mood():
         mood["crypto_fear_greed"] = {"value": int(d["value"]), "classification": d["value_classification"]}
     except Exception as e:
         print(f"  ! fear & greed fetch failed: {e}", file=sys.stderr)
+
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
+        res = requests.get("https://production.dataviz.cnn.io/index/fearandgreed/graphdata", headers=headers, timeout=15)
+        res.raise_for_status()
+        d = res.json()
+        def sub(key):
+            try:
+                v = d[key]
+                return {"value": round(float(v.get("score")), 1), "rating": v.get("rating")}
+            except Exception:
+                return None
+        fg = sub("fear_and_greed")
+        if fg: mood["stock_fear_greed"] = fg
+        mom = sub("market_momentum_sp500")
+        if mom: mood["market_momentum"] = mom
+        pc = sub("put_call_options")
+        if pc: mood["put_call"] = pc
+        junk = sub("junk_bond_demand")
+        if junk: mood["junk_bond_demand"] = junk
+        safe = sub("safe_haven_demand")
+        if safe: mood["safe_haven_demand"] = safe
+    except Exception as e:
+        print(f"  ! CNN fear & greed fetch failed (unofficial endpoint, best-effort): {e}", file=sys.stderr)
+
     return mood
 
 
@@ -574,6 +620,8 @@ def main():
     forex = attach_histories(forex)
     print("Fetching country heatmap...")
     heatmap = build_list(COUNTRY_HEATMAP)
+    print("Fetching sector heatmap...")
+    sector_heatmap = build_list(SECTOR_HEATMAP)
     print("Fetching FRED rates...")
     rates = build_rates()
     print("Fetching general news...")
@@ -595,6 +643,7 @@ def main():
         "forex": forex,
         "rates": rates,
         "heatmap": heatmap,
+        "sector_heatmap": sector_heatmap,
         "news": {
             "general": general_news,
             "positions": position_news,
