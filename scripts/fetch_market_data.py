@@ -18,7 +18,7 @@ import math
 import os
 import re
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import requests
 import yfinance as yf
@@ -26,19 +26,26 @@ import feedparser
 
 FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
 
+# ---------------------------------------------------------------------------
+# News sources -- all free RSS feeds, no API key needed.
+# ---------------------------------------------------------------------------
 GENERAL_NEWS_FEEDS = [
     "https://feeds.finance.yahoo.com/rss/2.0/headline?s=%5EGSPC&region=US&lang=en-US",
     "https://www.marketwatch.com/rss/topstories",
-    "https://www.cnbc.com/id/20910258/device/rss/rss.html",
-    "https://www.investing.com/rss/news_25.rss",
+    "https://www.cnbc.com/id/20910258/device/rss/rss.html",  # CNBC Markets
+    "https://www.investing.com/rss/news_25.rss",  # Investing.com economic news
 ]
 CRYPTO_NEWS_FEEDS = [
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "https://cointelegraph.com/rss",
 ]
+# Watched crypto keywords, used to filter CRYPTO_NEWS_FEEDS into position-relevant items.
 CRYPTO_WATCHLIST = ["bitcoin", "btc", "ethereum", "eth", "chainlink", "link",
                      "polkadot", "dot", "mina", "rocket pool", "rpl", "tezos", "xtz", "unibright"]
 
+# ---------------------------------------------------------------------------
+# Watchlists -- edit these lists to change what shows up on the dashboard.
+# ---------------------------------------------------------------------------
 INDICES = [
     ("^GSPC", "S&P 500"), ("^IXIC", "Nasdaq Composite"), ("^DJI", "Dow Jones"),
     ("^RUT", "Russell 2000"), ("^FTSE", "UK 100"), ("^GDAXI", "DAX 40"),
@@ -50,6 +57,7 @@ STOCKS = [
     ("AAPL", "Apple"), ("MSFT", "Microsoft"), ("NVDA", "NVIDIA"), ("GOOGL", "Alphabet"),
     ("AMZN", "Amazon"), ("META", "Meta"), ("TSLA", "Tesla"), ("AVGO", "Broadcom"),
     ("JPM", "JPMorgan Chase"), ("LLY", "Eli Lilly"),
+    # Explore tab universe -- keep in sync with EXPLORE_UNIVERSE in the dashboard HTML
     ("COHR", "Coherent Corp."), ("LITE", "Lumentum Holdings"), ("IPGP", "IPG Photonics"),
     ("NOVT", "Novanta Inc."), ("AMS", "ams OSRAM AG"),
     ("ASML", "ASML Holding"), ("TSM", "Taiwan Semiconductor"), ("AMD", "Advanced Micro Devices"),
@@ -59,6 +67,7 @@ STOCKS = [
     ("NVO", "Novo Nordisk"),
 ]
 
+# UCITS index funds -- Yahoo Finance tickers (not ISINs; yfinance needs an exchange ticker).
 FUNDS = [
     ("SWDA.L", "iShares Core MSCI World UCITS ETF"),
     ("EIMI.L", "iShares Core MSCI EM IMI UCITS ETF"),
@@ -66,6 +75,11 @@ FUNDS = [
     ("SGLN.L", "iShares Physical Gold ETC"),
 ]
 
+# Your two actual MyInvestor holdings (Class S index mutual funds -- not exchange-traded,
+# so yfinance has no ticker for them). We scrape the exact Class S NAV directly off their
+# ishares.com product page (public, no login, no API -- just the same page a human would
+# read). If the page layout ever changes and scraping fails, we fall back automatically to
+# a proxy ETF that tracks the same index, applying its % change to your last known NAV.
 YOUR_FUNDS = [
     {
         "isin": "IE000ZYRH0Q7",
@@ -91,6 +105,8 @@ FOREX = [
     ("DX-Y.NYB", "Dollar Index"), ("AUDUSD=X", "AUD/USD"), ("USDCHF=X", "USD/CHF"),
 ]
 
+# Country ETFs used as proxies for a per-country heatmap (mirrors the
+# gmdmarkets.com-style mosaic: symbol, display name, region).
 COUNTRY_HEATMAP = [
     ("SPY", "United States", "Americas"), ("EWC", "Canada", "Americas"),
     ("EWZ", "Brazil", "Americas"), ("EWW", "Mexico", "Americas"),
@@ -103,6 +119,8 @@ COUNTRY_HEATMAP = [
     ("EWA", "Australia", "Asia-Pacific"),
 ]
 
+# SPDR Select Sector ETFs -- the standard 11 GICS sectors (mirrors gmdmarkets.com's
+# sector heatmap: symbol, display name, region left blank since it's not geographic).
 SECTOR_HEATMAP = [
     ("XLK", "Technology"), ("XLI", "Industrials"), ("XLC", "Communication Services"),
     ("XLY", "Consumer Discretionary"), ("XLRE", "Real Estate"), ("XLF", "Financials"),
@@ -110,6 +128,7 @@ SECTOR_HEATMAP = [
     ("XLV", "Health Care"), ("XLU", "Utilities"),
 ]
 
+# FRED series id -> display name (rates/bonds). Only fetched if FRED_API_KEY is set.
 RATES = [
     ("DGS10", "US 10-Year Treasury"), ("DGS2", "US 2-Year Treasury"),
     ("DGS30", "US 30-Year Treasury"), ("FEDFUNDS", "Fed Funds Rate (monthly)"),
@@ -159,20 +178,45 @@ def build_list(items):
     return out
 
 
+def downsample_history(history, daily_years=5):
+    """
+    Keeps true daily resolution for the most recent `daily_years` years (enough for
+    every client-side range up to and including 5Y), and collapses anything older than
+    that to one point per calendar month (the last trading day of that month) for the
+    ALL/MAX range. A 60-year-old daily point is visually indistinguishable from a
+    monthly one on a chart that wide, but costs 20x+ more bytes -- this is what keeps
+    data.json under jsDelivr's 20MB hard serving limit as "max" period history
+    accumulates decades of data for long-listed symbols (added 14/Sep/2026, see the
+    commit message for the size numbers that prompted this).
+    """
+    if not history:
+        return history
+    hist = sorted(history, key=lambda h: h["date"])
+    cutoff = (datetime.now() - timedelta(days=daily_years * 365)).strftime("%Y-%m-%d")
+    older = [h for h in hist if h["date"] < cutoff]
+    recent = [h for h in hist if h["date"] >= cutoff]
+    monthly = {}
+    for h in older:
+        monthly[h["date"][:7]] = h  # last date seen per YYYY-MM wins (hist is date-sorted)
+    return list(monthly.values()) + recent
+
+
 def fetch_full_history(symbol, period="max"):
     """Full available daily history for the interactive stock-detail chart (1M/6M/YTD/1Y/
     5Y/ALL are sliced client-side from this single series). "max" -- the same span Yahoo
     Finance's own "Max" button shows -- not a fixed window, so "ALL" is genuinely all of
     it (was capped at 5y, then 10y, both of which could silently equal "5Y"/"10Y" for
-    long-listed symbols; "max" has no such ceiling)."""
+    long-listed symbols; "max" has no such ceiling). The raw "max" series is downsampled
+    via downsample_history() before being returned -- see that function's docstring."""
     try:
         hist = yf.Ticker(symbol).history(period=period, interval="1d")
         if hist.empty:
             return []
-        return [
+        points = [
             {"date": idx.strftime("%Y-%m-%d"), "close": round(float(row["Close"]), 4)}
             for idx, row in hist.iterrows()
         ]
+        return downsample_history(points)
     except Exception as e:
         print(f"  ! full history failed for {symbol}: {e}", file=sys.stderr)
         return []
@@ -263,6 +307,7 @@ def build_general_news():
     items = []
     for url in GENERAL_NEWS_FEEDS:
         items.extend(parse_feed(url, limit=8))
+    # de-dupe by title, keep first 20
     seen = set()
     deduped = []
     for it in items:
@@ -279,6 +324,7 @@ def build_position_news():
     and tracked cryptocurrencies (via keyword-filtering general crypto news feeds).
     """
     items = []
+    # Stocks & funds: Yahoo Finance has a per-symbol RSS feed.
     watched_symbols = STOCKS + FUNDS
     for symbol, name in watched_symbols:
         url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={symbol}&region=US&lang=en-US"
@@ -288,17 +334,21 @@ def build_position_news():
             e["asset_name"] = name
         items.extend(entries)
 
+    # Crypto: filter general crypto news feeds by keyword match against our watchlist.
     crypto_items = []
     for url in CRYPTO_NEWS_FEEDS:
         crypto_items.extend(parse_feed(url, limit=15))
     for it in crypto_items:
         title_lower = it["title"].lower()
+        # Word-boundary match to avoid short tickers (link, dot, eth...) matching inside
+        # unrelated words like "linking", "adopt", "weather".
         matched = [kw for kw in CRYPTO_WATCHLIST if re.search(r'\b' + re.escape(kw) + r'\b', title_lower)]
         if matched:
             it["symbol"] = matched[0].upper()
             it["asset_name"] = matched[0].title()
             items.append(it)
 
+    # de-dupe by title, cap at 30
     seen = set()
     deduped = []
     for it in items:
@@ -320,6 +370,7 @@ def fetch_ishares_nav(product_url, isin):
         res = requests.get(product_url, headers=headers, timeout=20)
         res.raise_for_status()
         text = res.text
+        # Strip tags to plain text so we don't depend on exact HTML structure/classes.
         plain = re.sub(r'<[^>]+>', ' ', text)
         plain = re.sub(r'\s+', ' ', plain)
 
@@ -657,7 +708,11 @@ def main():
     data = sanitize_for_json(data)
 
     with open("data.json", "w") as f:
-        json.dump(data, f, indent=2)
+        # Minified (no indent): with "max"-period history for ~40 symbols this is the
+        # difference between a file jsDelivr will serve and one it silently rejects for
+        # being over its 20MB cap. Paste into any JSON formatter if you need to read it
+        # by eye -- see downsample_history()'s docstring for the other half of the fix.
+        json.dump(data, f, separators=(",", ":"))
 
     print(
         f"Wrote data.json: {len(indices)} indices, {len(stocks)} stocks, {len(funds)} funds, "
