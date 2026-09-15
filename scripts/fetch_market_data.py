@@ -65,6 +65,7 @@ STOCKS = [
     ("PLTR", "Palantir Technologies"), ("CRWD", "CrowdStrike Holdings"),
     ("NEE", "NextEra Energy"), ("ENPH", "Enphase Energy"), ("ORSTED.CO", "Ørsted A/S"),
     ("NVO", "Novo Nordisk"),
+    ("AMP.MC", "Amper, S.A."), ("NXT.MC", "Nueva Expresión Textil (Nextil)"),
 ]
 
 # UCITS index funds -- Yahoo Finance tickers (not ISINs; yfinance needs an exchange ticker).
