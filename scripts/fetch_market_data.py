@@ -208,13 +208,26 @@ def fetch_full_history(symbol, period="max"):
     Finance's own "Max" button shows -- not a fixed window, so "ALL" is genuinely all of
     it (was capped at 5y, then 10y, both of which could silently equal "5Y"/"10Y" for
     long-listed symbols; "max" has no such ceiling). The raw "max" series is downsampled
-    via downsample_history() before being returned -- see that function's docstring."""
+    via downsample_history() before being returned -- see that function's docstring.
+
+    Each point also carries open/high/low/volume alongside close (added so the
+    dashboard's chart tooltip can show a real OHLC breakdown instead of just the
+    close) -- purely additive, so older code that only reads `close` is unaffected.
+    Volume is occasionally NaN for some symbols/venues; left as-is and cleaned up by
+    sanitize_for_json() below rather than special-cased here."""
     try:
         hist = yf.Ticker(symbol).history(period=period, interval="1d")
         if hist.empty:
             return []
         points = [
-            {"date": idx.strftime("%Y-%m-%d"), "close": round(float(row["Close"]), 4)}
+            {
+                "date": idx.strftime("%Y-%m-%d"),
+                "close": round(float(row["Close"]), 4),
+                "open": round(float(row["Open"]), 4),
+                "high": round(float(row["High"]), 4),
+                "low": round(float(row["Low"]), 4),
+                "volume": float(row["Volume"]) if row.get("Volume") is not None else None,
+            }
             for idx, row in hist.iterrows()
         ]
         return downsample_history(points)
