@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Fetches market data (indices, stocks, commodities, forex, US rates, and a
-country-level heatmap) and writes it to data.json at the repo root.
+Fetches market data (indices, stocks, commodities, forex, US rates, a
+country-level heatmap, and Spain CPI) and writes it to data.json at the repo
+root.
 
 Run automatically by the GitHub Actions workflow on a schedule. Can also be
 run locally for testing:
 
     pip install -r requirements.txt
-    export FRED_API_KEY=your_key_here   # optional, only needed for the rates section
+    export FRED_API_KEY=your_key_here   # optional, needed for rates + CPI
     python scripts/fetch_market_data.py
 
 This script never touches anything about your personal portfolio -- it only
@@ -135,6 +136,12 @@ RATES = [
     ("DGS30", "US 30-Year Treasury"), ("FEDFUNDS", "Fed Funds Rate (monthly)"),
     ("DFF", "Fed Funds Rate (daily)"),
 ]
+
+# FRED series for Spain's official CPI (index level, 2015=100, monthly, not seasonally
+# adjusted -- "ESPCPIALLMINMEI"). Used by the dashboard to show net worth adjusted for
+# inflation ("today's euros") on the Overview chart. Only fetched if FRED_API_KEY is set
+# (same secret already used for the Rates & Bonds section above).
+CPI_SERIES_ID = "ESPCPIALLMINMEI"
 
 
 def fetch_symbol(symbol):
@@ -297,6 +304,32 @@ def build_rates():
         if d:
             out.append({"series": series_id, "name": name, **d})
     return out
+
+
+def fetch_cpi_history():
+    """Full monthly history of Spain's official CPI index (FRED series ESPCPIALLMINMEI,
+    base 2015=100), used to show net worth in inflation-adjusted ("today's euros") terms
+    on the dashboard's Overview chart. Only fetched if FRED_API_KEY is set -- returns []
+    otherwise, same graceful-degradation pattern as the Rates & Bonds section above."""
+    if not FRED_API_KEY:
+        print("  (FRED_API_KEY not set -- skipping CPI/inflation section)", file=sys.stderr)
+        return []
+    try:
+        url = (
+            "https://api.stlouisfed.org/fred/series/observations"
+            f"?series_id={CPI_SERIES_ID}&api_key={FRED_API_KEY}&file_type=json"
+            "&sort_order=asc"
+        )
+        res = requests.get(url, timeout=15)
+        res.raise_for_status()
+        obs = res.json().get("observations", [])
+        return [
+            {"date": o["date"], "value": float(o["value"])}
+            for o in obs if o["value"] not in (".", "")
+        ]
+    except Exception as e:
+        print(f"  ! CPI history fetch failed: {e}", file=sys.stderr)
+        return []
 
 
 def parse_feed(url, limit=8):
@@ -692,6 +725,8 @@ def main():
     sector_heatmap = build_list(SECTOR_HEATMAP)
     print("Fetching FRED rates...")
     rates = build_rates()
+    print("Fetching Spain CPI (inflation) history...")
+    cpi = fetch_cpi_history()
     print("Fetching general news...")
     general_news = build_general_news()
     print("Fetching position news...")
@@ -710,6 +745,7 @@ def main():
         "commodities": commodities,
         "forex": forex,
         "rates": rates,
+        "cpi": cpi,
         "heatmap": heatmap,
         "sector_heatmap": sector_heatmap,
         "news": {
@@ -732,7 +768,7 @@ def main():
         f"Wrote data.json: {len(indices)} indices, {len(stocks)} stocks, {len(funds)} funds, "
         f"{len(your_funds)} of your own funds ({sum(1 for f in your_funds if f['source']=='ishares_nav_scrape')} scraped exact, "
         f"{sum(1 for f in your_funds if f['source']=='proxy_approx')} fell back to proxy approx), "
-        f"{len(commodities)} commodities, {len(forex)} forex, {len(rates)} rates, "
+        f"{len(commodities)} commodities, {len(forex)} forex, {len(rates)} rates, {len(cpi)} CPI points, "
         f"{len(heatmap)} heatmap entries, {len(general_news)} general news, "
         f"{len(position_news)} position news, "
         f"{len(benchmarks.get('sp500',[]))} sp500 / {len(benchmarks.get('msci_world',[]))} msci_world benchmark points."
