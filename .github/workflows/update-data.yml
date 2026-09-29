@@ -1,0 +1,84 @@
+name: Update market data
+
+on:
+  schedule:
+    # 4x/day (UTC): 06:00, 11:00, 15:00, 20:00.
+    - cron: '0 6,11,15,20 * * *'
+  workflow_dispatch: {}   # manual run from the Actions tab
+
+# Needed so the job can force-push the dedicated `data` branch (see "Publish" step).
+permissions:
+  contents: write
+
+# Never let two runs overlap (a manual run during a scheduled one, or a slow run still
+# going when the next cron fires): they'd race on the same branch. Queue instead of cancel
+# so a half-finished run is never killed mid-publish.
+concurrency:
+  group: update-market-data
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20   # a hung Yahoo/FRED request can't burn Actions minutes forever
+    steps:
+      # Third-party actions are pinned to a full commit SHA (the tag in the comment is only
+      # for humans). Dependabot (.github/dependabot.yml) opens a PR when a new one is out.
+      - name: Check out repo
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch market data
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+        run: python scripts/fetch_market_data.py
+
+      # Refuse to publish anything that isn't a sane data.json: a run that "succeeds" but
+      # produced an empty/partial file must never overwrite the last good data.
+      - name: Sanity-check output
+        run: |
+          python - <<'PY'
+          import json
+          d = json.load(open("data.json"))
+          m = json.load(open("meta.json"))
+          assert len(d.get("indices", [])) >= 5, "too few indices"
+          assert len(d.get("stocks", [])) >= 10, "too few stocks"
+          assert m["generated_at"] == d["generated_at"], "meta/data mismatch"
+          print("OK:", len(d["indices"]), "indices,", len(d["stocks"]), "stocks,", m["data_bytes"], "bytes")
+          PY
+
+      # The feed lives on its OWN orphan branch (`data`) that is replaced by a single fresh
+      # commit on every run, instead of adding a ~0.4MB commit to `main` 4x/day forever.
+      # Result: the repo never grows (main = code only; `data` = always exactly 1 commit),
+      # and there is nothing to `git pull --rebase` because nobody else ever pushes there
+      # (and the concurrency group above already serialises runs).
+      - name: Publish to data branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir /tmp/publish
+          cp data.json meta.json /tmp/publish/
+          cd /tmp/publish
+          git init -q -b data
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data.json meta.json
+          git commit -q -m "Market data $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
+
+      - name: Purge jsDelivr CDN cache
+        run: |
+          for f in data.json meta.json; do
+            curl -s --max-time 30 "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@data/${f}" || true
+          done
