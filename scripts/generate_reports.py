@@ -14,14 +14,26 @@ Nada de lo descifrado se escribe en el log. Requiere: cryptography, playwright (
 """
 import base64, datetime as dt, gzip, json, os, re, sys, tempfile, urllib.request, urllib.error
 from zoneinfo import ZoneInfo
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 API = os.environ.get("GIST_API", "https://api.github.com").rstrip("/")
-GIST_ID = os.environ["GIST_ID"].strip()
-TOKEN = os.environ["GIST_TOKEN"].strip()
-PASS = os.environ["SYNC_PASSPHRASE"]
+
+
+def _need(name: str) -> str:
+    v = os.environ.get(name, "")
+    if not v.strip():
+        print(f"ERROR: el secret {name} está vacío o no existe. Créalo en Settings > Secrets and variables > "
+              f"Actions > Repository secrets (el nombre debe ser exactamente {name}).", flush=True)
+        sys.exit(3)
+    return v
+
+
+GIST_ID = _need("GIST_ID").strip()
+TOKEN = _need("GIST_TOKEN").strip()
+PASS = _need("SYNC_PASSPHRASE")
 TZ = ZoneInfo(os.environ.get("REPORT_TZ", "Europe/Madrid"))
 FORCE_DATE = os.environ.get("FORCE_DATE", "").strip()          # solo para pruebas: AAAA-MM-DD
 ALLOW_STALE_FEED = os.environ.get("ALLOW_STALE_FEED") == "1"    # solo para pruebas
@@ -203,4 +215,12 @@ if __name__ == "__main__":
         sys.exit(main())
     except urllib.error.HTTPError as e:
         log("Error HTTP con GitHub:", e.code)   # sin cuerpo: podría eco de datos
+        log({401: "-> GIST_TOKEN no es válido o ha caducado (usa un token *classic* con permiso 'gist').",
+             403: "-> GIST_TOKEN sin permisos o límite de peticiones alcanzado.",
+             404: "-> GIST_ID incorrecto, o el token es de otra cuenta/sin permiso 'gist' "
+                  "(un Gist secreto solo se ve con el token de su dueño)."}.get(e.code, "-> Reintenta más tarde."))
         sys.exit(2)
+    except InvalidTag:
+        log("ERROR: no se puede descifrar. SYNC_PASSPHRASE no coincide con la contraseña usada en el "
+            "dashboard (o el Gist está corrupto). Comprueba mayúsculas, espacios y símbolos.")
+        sys.exit(4)
