@@ -1,2 +1,2 @@
-cryptography>=42
-playwright>=1.45
+cryptography==46.0.7
+playwright==1.56.0
