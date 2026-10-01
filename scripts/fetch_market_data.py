@@ -21,9 +21,13 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 
+import socket
 import requests
 import yfinance as yf
 import feedparser
+
+# feedparser.parse(url) no admite timeout propio: sin esto, un host colgado bloquea todo el job.
+socket.setdefaulttimeout(25)
 
 FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
 
@@ -60,7 +64,7 @@ STOCKS = [
     ("JPM", "JPMorgan Chase"), ("LLY", "Eli Lilly"),
     # Explore tab universe -- keep in sync with EXPLORE_UNIVERSE in the dashboard HTML
     ("COHR", "Coherent Corp."), ("LITE", "Lumentum Holdings"), ("IPGP", "IPG Photonics"),
-    ("NOVT", "Novanta Inc."), ("AMS", "ams OSRAM AG"),
+    ("NOVT", "Novanta Inc."), ("AMS.SW", "ams OSRAM AG"),
     ("ASML", "ASML Holding"), ("TSM", "Taiwan Semiconductor"), ("AMD", "Advanced Micro Devices"),
     ("LMT", "Lockheed Martin"), ("RTX", "RTX Corporation"), ("NOC", "Northrop Grumman"), ("BA", "Boeing Co."),
     ("PLTR", "Palantir Technologies"), ("CRWD", "CrowdStrike Holdings"),
@@ -149,6 +153,7 @@ def fetch_symbol(symbol):
     try:
         t = yf.Ticker(symbol)
         hist = t.history(period="8d", interval="1d")
+        hist = hist.dropna(subset=["Close"])  # a NaN last close would become null in the feed and break the charts
         if hist.empty or len(hist) < 2:
             print(f"  ! no data for {symbol}", file=sys.stderr)
             return None
@@ -224,6 +229,7 @@ def fetch_full_history(symbol, period="max"):
     sanitize_for_json() below rather than special-cased here."""
     try:
         hist = yf.Ticker(symbol).history(period=period, interval="1d")
+        hist = hist.dropna(subset=["Close"])
         if hist.empty:
             return []
         points = [
@@ -252,6 +258,7 @@ def fetch_intraday_history(symbol):
     """
     try:
         hist = yf.Ticker(symbol).history(period="2d", interval="5m", prepost=True)
+        hist = hist.dropna(subset=["Close"])
         if hist.empty:
             return []
         return [
@@ -276,12 +283,11 @@ def fetch_fred_series(series_id):
     if not FRED_API_KEY:
         return None
     try:
-        url = (
-            "https://api.stlouisfed.org/fred/series/observations"
-            f"?series_id={series_id}&api_key={FRED_API_KEY}&file_type=json"
-            "&sort_order=desc&limit=2"
+        res = requests.get(
+            "https://api.stlouisfed.org/fred/series/observations",
+            params={"series_id": series_id, "api_key": FRED_API_KEY, "file_type": "json", "sort_order": "desc", "limit": 10},
+            timeout=15,
         )
-        res = requests.get(url, timeout=15)
         res.raise_for_status()
         obs = [o for o in res.json().get("observations", []) if o["value"] not in (".", "")]
         if not obs:
@@ -290,7 +296,7 @@ def fetch_fred_series(series_id):
         prev = float(obs[1]["value"]) if len(obs) > 1 else latest
         return {"value": latest, "prev": prev, "date": obs[0]["date"]}
     except Exception as e:
-        print(f"  ! FRED {series_id} failed: {e}", file=sys.stderr)
+        print(f"  ! FRED {series_id} failed: {type(e).__name__}", file=sys.stderr)  # sin {e}: la URL de la excepción lleva la api_key
         return None
 
 
@@ -328,7 +334,7 @@ def fetch_cpi_history():
             for o in obs if o["value"] not in (".", "")
         ]
     except Exception as e:
-        print(f"  ! CPI history fetch failed: {e}", file=sys.stderr)
+        print(f"  ! CPI history fetch failed: {type(e).__name__}", file=sys.stderr)  # sin {e}: la URL lleva la api_key
         return []
 
 
@@ -443,6 +449,17 @@ def fetch_ishares_nav(product_url, isin):
         return None
 
 
+def _fmt_aum(m):
+    """'EUR', '809.12', 'm' -> 'EUR 809.12 m'; without unit the raw number is grouped ('EUR 1,234,567')."""
+    ccy, num, unit = m.group(1), m.group(2), m.group(3)
+    if unit:
+        return f"{ccy} {num} {unit}"
+    try:
+        return f"{ccy} {int(float(num.replace(',', ''))):,}"
+    except ValueError:
+        return f"{ccy} {num}"
+
+
 def fetch_ishares_fund_facts(product_url):
     """
     Scrapes the 'Key Facts' block of the fund's ishares.com product page: management
@@ -464,11 +481,12 @@ def fetch_ishares_fund_facts(product_url):
         m = re.search(r'Fund Launch Date\s+([\d/A-Za-z]+)', plain)
         if m: facts["fund_launch_date"] = m.group(1)
 
-        m = re.search(r'Net Assets\s+as of\s+[\d/A-Za-z]+\s+([A-Z]{3})\s*([\d,]+)', plain)
-        if m: facts["class_aum"] = f"{m.group(1)} {int(m.group(2).replace(',', '')):,}"
+        # number WITH decimals and its unit (k / m / bn): "EUR 809.12 m", not "EUR 809"
+        m = re.search(r'Net Assets\s+as of\s+[\d/A-Za-z]+\s+([A-Z]{3})\s*([\d,]+(?:\.\d+)?)\s*(k|m|bn)?\b', plain)
+        if m: facts["class_aum"] = _fmt_aum(m)
 
-        m = re.search(r'Net Assets of Fund\s+as of\s+[\d/A-Za-z]+\s+([A-Z]{3})\s*([\d,]+)', plain)
-        if m: facts["fund_aum"] = f"{m.group(1)} {int(m.group(2).replace(',', '')):,}"
+        m = re.search(r'Net Assets of Fund\s+as of\s+[\d/A-Za-z]+\s+([A-Z]{3})\s*([\d,]+(?:\.\d+)?)\s*(k|m|bn)?\b', plain)
+        if m: facts["fund_aum"] = _fmt_aum(m)
 
         m = re.search(r'Benchmark Index\s+([A-Za-z0-9 ,()%.\-]+?)\s+(?:Initial Charge|Management Fee)', plain)
         if m: facts["benchmark"] = m.group(1).strip()
@@ -507,6 +525,7 @@ def compute_fund_analytics(proxy_symbol):
     """
     try:
         hist = yf.Ticker(proxy_symbol).history(period="10y", interval="1d")
+        hist = hist.dropna(subset=["Close"])
         if hist.empty or len(hist) < 30:
             return {}
         dates = [d.date() for d in hist.index]
@@ -515,9 +534,10 @@ def compute_fund_analytics(proxy_symbol):
         annual_returns = {}
         for y in sorted(set(d.year for d in dates)):
             idxs = [i for i, d in enumerate(dates) if d.year == y]
-            if len(idxs) < 2:
-                continue
-            annual_returns[str(y)] = round((closes[idxs[-1]] / closes[idxs[0]] - 1) * 100, 2)
+            prev = [i for i, d in enumerate(dates) if d.year == y - 1]
+            if not idxs or not prev:
+                continue  # sin cierre del año anterior (primer año parcial) no hay rentabilidad anual real
+            annual_returns[str(y)] = round((closes[idxs[-1]] / closes[prev[-1]] - 1) * 100, 2)
 
         last_price = closes[-1]
         last_date = dates[-1]
@@ -583,6 +603,20 @@ def build_your_funds():
             "history": fetch_full_history(fund["proxy_symbol"]),  # approximate price chart via the proxy ETF
         }
         if scraped:
+            # The history is the PROXY ETF's series (other currency / scale). Rescale it so its last close equals the
+            # scraped NAV: the dashboard labels it EUR and compares it with the NAV, so without this a what-if on the fund
+            # read -69 %. The shape (returns) is unchanged.
+            try:
+                hh = entry["history"]
+                if hh and scraped.get("price") and hh[-1].get("close"):
+                    k = float(scraped["price"]) / float(hh[-1]["close"])
+                    for p_ in hh:
+                        for f_ in ("close", "open", "high", "low"):
+                            if p_.get(f_) is not None:
+                                p_[f_] = round(p_[f_] * k, 4)
+                    entry["history_scaled"] = True
+            except Exception:
+                pass
             entry.update({
                 "price": scraped["price"],
                 "change_pct": scraped.get("change_pct"),
@@ -667,7 +701,7 @@ def build_benchmarks():
     benchmarks = {}
     for key, symbol in [("sp500", "^GSPC"), ("msci_world", "URTH")]:
         try:
-            hist = yf.Ticker(symbol).history(period="90d", interval="1d")
+            hist = yf.Ticker(symbol).history(period="90d", interval="1d").dropna(subset=["Close"])
             benchmarks[key] = [
                 {"date": idx.strftime("%Y-%m-%d"), "close": round(float(row["Close"]), 4)}
                 for idx, row in hist.iterrows()
@@ -762,7 +796,7 @@ def main():
         # difference between a file jsDelivr will serve and one it silently rejects for
         # being over its 20MB cap. Paste into any JSON formatter if you need to read it
         # by eye -- see downsample_history()'s docstring for the other half of the fix.
-        json.dump(data, f, separators=(",", ":"))
+        json.dump(data, f, separators=(",", ":"), allow_nan=False)
 
     # Tiny sidecar the dashboard polls every few minutes instead of re-downloading the
     # whole (~10MB, ~2MB gzipped) data.json: it only fetches the big file when
