@@ -19,7 +19,7 @@ concurrency:
 
 jobs:
   update:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 20   # a hung Yahoo/FRED request can't burn Actions minutes forever
     steps:
       # Third-party actions are pinned to a full commit SHA (the tag in the comment is only
@@ -46,14 +46,39 @@ jobs:
       # Refuse to publish anything that isn't a sane data.json: a run that "succeeds" but
       # produced an empty/partial file must never overwrite the last good data.
       - name: Sanity-check output
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
         run: |
           python - <<'PY'
-          import json
+          import json, os
           d = json.load(open("data.json"))
           m = json.load(open("meta.json"))
+          def with_hist(k):
+              return sum(1 for x in d.get(k, []) if x.get("history"))
           assert len(d.get("indices", [])) >= 5, "too few indices"
           assert len(d.get("stocks", [])) >= 10, "too few stocks"
+          assert with_hist("indices") >= 0.7 * len(d["indices"]), "most indices have no history (Yahoo throttled?)"
+          assert with_hist("stocks") >= 0.7 * len(d["stocks"]), "most stocks have no history (Yahoo throttled?)"
+          priced = sum(1 for x in d["stocks"] if x.get("price") is not None)
+          assert priced >= 0.7 * len(d["stocks"]), "most stocks have no price (%d/%d)" % (priced, len(d["stocks"]))
+          bm = d.get("benchmarks", {})
+          assert len(bm.get("sp500", [])) >= 30, "benchmark S&P 500 too short"
+          assert len(d.get("commodities", [])) >= 3 and len(d.get("forex", [])) >= 3, "commodities/forex too small"
+          assert len(d.get("market_mood", {})) >= 1, "market mood empty"
+          assert any(d.get("news", {}).get(k) for k in ("general", "positions")), "no news at all"
+          assert len(d.get("your_funds", [])) >= 1, "your_funds empty"
+          assert len(d.get("heatmap", [])) >= 10, "country heatmap too small"
+          assert len(d.get("sector_heatmap", [])) >= 8, "sector heatmap too small"
+          if os.environ.get("FRED_API_KEY"):
+              assert len(d.get("rates", [])) >= 1, "FRED key set but no rates"
+              assert len(d.get("cpi", [])) >= 12, "FRED key set but CPI series empty"
+              import datetime as _dt
+              _last = d["cpi"][-1]["date"]
+              if (_dt.date.today() - _dt.date.fromisoformat(_last)).days > 120:
+                  print("::warning::La serie de IPC termina en %s: el modo 'real' del dashboard usa ese último valor para fechas posteriores" % _last)
           assert m["generated_at"] == d["generated_at"], "meta/data mismatch"
+          # jsDelivr no sirve ficheros de GitHub > 20 MB: fallar aquí evita publicar un feed que dejaría de servirse.
+          assert m["data_bytes"] < 18_000_000, "data.json too large for jsDelivr (%s bytes)" % m["data_bytes"]
           print("OK:", len(d["indices"]), "indices,", len(d["stocks"]), "stocks,", m["data_bytes"], "bytes")
           PY
 
@@ -79,6 +104,9 @@ jobs:
 
       - name: Purge jsDelivr CDN cache
         run: |
+          # best-effort (jsDelivr cachea ramas ~12 h y el purge a veces falla): se imprime la respuesta para poder verlo en el log
           for f in data.json meta.json; do
-            curl -s --max-time 30 "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@data/${f}" || true
+            echo "purge $f:"
+            curl -sS --max-time 30 "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@data/${f}" || echo "(purge fallido, no es crítico)"
+            echo
           done
