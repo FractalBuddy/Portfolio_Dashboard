@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Genera informes (fiscal, mensual, anual) y registra el patrimonio diario SIN abrir el dashboard.
 
-Flujo (todo cifrado extremo a extremo; GitHub/Gist solo ven texto cifrado):
+Flujo (la copia va cifrada: GitHub/Gist solo ven texto cifrado; OJO: este proceso recibe SYNC_PASSPHRASE
+ como secreto de Actions para poder descifrar, así que confías en tu repo/GitHub para este paso):
   1. Lee del Gist privado el estado cifrado de la cartera (portfolio-state.enc.json), una copia
      cifrada del propio dashboard (dashboard.enc.json) y el histórico diario del propio proceso
      (job-history.enc.json).
@@ -12,7 +13,7 @@ Flujo (todo cifrado extremo a extremo; GitHub/Gist solo ven texto cifrado):
      los informes que toquen: report-<tipo>-<periodo>.enc.json.
 Nada de lo descifrado se escribe en el log. Requiere: cryptography, playwright (chromium).
 """
-import base64, datetime as dt, gzip, json, os, re, sys, tempfile, urllib.request, urllib.error
+import base64, datetime as dt, gzip, json, os, re, sys, tempfile, time, urllib.request, urllib.error
 from zoneinfo import ZoneInfo
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
@@ -33,7 +34,7 @@ def _need(name: str) -> str:
 
 GIST_ID = _need("GIST_ID").strip()
 TOKEN = _need("GIST_TOKEN").strip()
-PASS = _need("SYNC_PASSPHRASE")
+PASS = _need("SYNC_PASSPHRASE").rstrip("\r\n")   # un salto de línea final al pegar el secret rompería el descifrado
 TZ = ZoneInfo(os.environ.get("REPORT_TZ", "Europe/Madrid"))
 FORCE_DATE = os.environ.get("FORCE_DATE", "").strip()          # solo para pruebas: AAAA-MM-DD
 ALLOW_STALE_FEED = os.environ.get("ALLOW_STALE_FEED") == "1"    # solo para pruebas
@@ -70,14 +71,27 @@ def gh(method: str, path: str, body=None):
     req = urllib.request.Request(API + path, method=method, data=json.dumps(body).encode() if body is not None else None,
                                  headers={"Authorization": "token " + TOKEN, "Accept": "application/vnd.github+json",
                                           "Content-Type": "application/json", "User-Agent": "portfolio-reports"})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        return json.loads(r.read().decode())
+    return json.loads(_open(req).decode())
+
+
+def _open(req) -> bytes:
+    """urlopen con 3 intentos ante 429/5xx y errores de red; los 4xx (token, permisos, 404) fallan a la primera."""
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=60) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            if e.code not in (429, 500, 502, 503, 504) or attempt == 2:
+                raise
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
+            if attempt == 2:
+                raise
+        time.sleep(3 * (attempt + 1))
 
 
 def file_text(f: dict) -> str:
     if f.get("truncated") or f.get("content") is None:
-        with urllib.request.urlopen(urllib.request.Request(f["raw_url"], headers={"Authorization": "token " + TOKEN}), timeout=60) as r:
-            return r.read().decode()
+        return _open(urllib.request.Request(f["raw_url"], headers={"Authorization": "token " + TOKEN})).decode()
     return f["content"]
 
 
@@ -115,11 +129,11 @@ def main():
     gist = gh("GET", f"/gists/{GIST_ID}")
     files = gist.get("files", {})
     if STATE_FILE not in files:
-        log("No hay estado cifrado en el Gist (activa «Cifrar la copia» en el dashboard). Nada que hacer.")
-        return 0
+        log("ERROR: no hay estado cifrado en el Gist (¿GIST_ID equivocado, o falta activar «Cifrar la copia» en el dashboard?).")
+        return 1
     state = json.loads(decrypt_env(json.loads(file_text(files[STATE_FILE]))).decode())
     if DASH_FILE not in files:
-        log("Falta dashboard.enc.json: abre el dashboard una vez con la copia cifrada activada.")
+        log("ERROR: falta dashboard.enc.json: abre el dashboard una vez con la copia cifrada activada y pulsa «Backup ahora».")
         return 1
     dash_env = json.loads(file_text(files[DASH_FILE]))
     dash_html = gzip.decompress(base64.b64decode(decrypt_env(dash_env).decode())).decode()
@@ -127,16 +141,22 @@ def main():
     if HIST_FILE in files:
         try:
             job_hist = json.loads(decrypt_env(json.loads(file_text(files[HIST_FILE]))).decode())
+        except InvalidTag:
+            raise
         except Exception as e:  # noqa: BLE001
-            log("job-history ilegible, se reinicia:", type(e).__name__)
+            # no se reinicia en silencio: sobrescribir el histórico del proceso perdería días ya registrados
+            log("ERROR: job-history ilegible (", type(e).__name__, "): se aborta para no sobrescribirlo.")
+            return 1
 
     existing = {}
     for name, f in files.items():
         if re.match(r"^report-.*\.enc\.json$", name):
             try:
                 existing[name] = json.loads(file_text(f))
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception as e:  # noqa: BLE001
+                # un fallo transitorio aquí haría regenerar y sobrescribir un informe ya generado
+                log("ERROR: no se pudo leer el informe existente", name, "(", type(e).__name__, "): se aborta para no sobrescribirlo.")
+                return 1
 
     # Fusiona los días registrados por este proceso en el histórico (solo fechas que faltan).
     have = {h.get("date") for h in state.get("history", [])}
@@ -170,7 +190,23 @@ def main():
             if FORCE_DATE:
                 page.clock.install(time=FORCE_DATE + "T08:00:00")
             page.goto("file://" + path)
-            page.wait_for_function("typeof state !== 'undefined' && typeof buildTaxReportHTML === 'function'", timeout=60000)
+            # wait_for_function evalúa una cadena con eval() y la CSP del dashboard (sin 'unsafe-eval') lo bloquea:
+            # se consulta con page.evaluate (vía CDP), que sí funciona, y se da un mensaje claro si el dashboard es antiguo.
+            ready = False
+            for _ in range(30):
+                try:
+                    ready = page.evaluate("typeof state !== 'undefined' && typeof buildTaxReportHTML === 'function' && typeof buildPerformanceReportHTML === 'function'")
+                except Exception:  # noqa: BLE001
+                    ready = False
+                if ready:
+                    break
+                page.wait_for_timeout(2000)
+            if not ready:
+                log("ERROR: dashboard.enc.json está desactualizado o no arranca (faltan las funciones de informes). "
+                    "Abre el dashboard actual y pulsa «Backup ahora» para volver a subirlo.")
+                browser.close()
+                return 1
+            t0 = page.evaluate("new Date().toISOString()")
             # espera al feed de mercado (precios) hasta 60 s
             for _ in range(30):
                 if page.evaluate("!marketFeedLoading && !!(state.marketFeed && state.marketFeed.generated_at)"):
@@ -178,14 +214,27 @@ def main():
                 page.wait_for_timeout(2000)
             feed_ok = page.evaluate("""() => { const g = state.marketFeed && state.marketFeed.generated_at; if(!g) return false;
                 return (Date.now() - new Date(g).getTime()) < 36*3600*1000; }""")
+            # Los precios cripto vienen de CoinGecko, no del feed de Yahoo: si hay posiciones cripto se espera a que la
+            # descarga de ESTA ejecución termine; sin ella el patrimonio saldría con precios viejos y se guardaría como bueno.
+            has_crypto = page.evaluate("state.positions.some(p => p.category === 'crypto' && p.coingeckoId)")
+            if has_crypto:
+                crypto_ok = False
+                for _ in range(30):
+                    if page.evaluate("(t0) => !!state.lastPriceFetch && state.lastPriceFetch >= t0", t0):
+                        crypto_ok = True
+                        break
+                    page.wait_for_timeout(2000)
+                if not crypto_ok:
+                    log("Precios cripto no actualizados en esta ejecución (¿CoinGecko limitado?): se trata como datos no frescos.")
+                    feed_ok = False
             if FORCE_DATE:
                 feed_ok = feed_ok or ALLOW_STALE_FEED
             page.evaluate("() => { compoundSavings(); snapshotHistory(); captureYearEndSnapshot(); }")
             snap = page.evaluate("state.history.find(h => h.date === todayISO()) || null")
             if snap and feed_ok:
-                job_hist["snapshots"] = [s for s in job_hist["snapshots"] if s.get("date") != snap["date"]] + [snap]
+                job_hist["snapshots"] = [s for s in job_hist.get("snapshots", []) if s.get("date") != snap["date"]] + [snap]
                 job_hist["snapshots"] = sorted(job_hist["snapshots"], key=lambda s: s["date"])[-900:]
-                out_files[HIST_FILE] = {"content": json.dumps(encrypt_text(json.dumps(job_hist), {"savedAt": dt.datetime.utcnow().isoformat() + "Z"}))}
+                out_files[HIST_FILE] = {"content": json.dumps(encrypt_text(json.dumps(job_hist), {"savedAt": dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + "Z"}))}
                 log("Patrimonio de hoy registrado.")
             elif snap:
                 log("Feed de mercado no fresco: no se registra el patrimonio de hoy (se evita guardar un valor erróneo).")
@@ -198,7 +247,7 @@ def main():
                 else:
                     html = page.evaluate("([t, p]) => buildPerformanceReportHTML(t, p)", [typ, period])
                 name = f"report-{typ}-{period}.enc.json"
-                meta = {"type": typ, "period": period, "kind": kind, "generatedAt": dt.datetime.utcnow().isoformat() + "Z"}
+                meta = {"type": typ, "period": period, "kind": kind, "generatedAt": dt.datetime.now(dt.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f') + "Z"}
                 out_files[name] = {"content": json.dumps(encrypt_text(html, meta))}
                 new_reports.append(name)
                 log("Informe generado:", typ, period)
@@ -220,7 +269,13 @@ if __name__ == "__main__":
              404: "-> GIST_ID incorrecto, o el token es de otra cuenta/sin permiso 'gist' "
                   "(un Gist secreto solo se ve con el token de su dueño)."}.get(e.code, "-> Reintenta más tarde."))
         sys.exit(2)
+    except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
+        log("ERROR de red hablando con GitHub:", type(e).__name__, "-> reintenta más tarde (el próximo cron lo volverá a intentar).")
+        sys.exit(2)
     except InvalidTag:
         log("ERROR: no se puede descifrar. SYNC_PASSPHRASE no coincide con la contraseña usada en el "
             "dashboard (o el Gist está corrupto). Comprueba mayúsculas, espacios y símbolos.")
         sys.exit(4)
+    except Exception as e:  # noqa: BLE001
+        log("ERROR inesperado:", type(e).__name__, "-", str(e)[:200])   # mensaje corto, sin traceback con datos
+        sys.exit(1)
