@@ -13,7 +13,7 @@ Flujo (la copia va cifrada: GitHub/Gist solo ven texto cifrado; OJO: este proces
      los informes que toquen: report-<tipo>-<periodo>.enc.json.
 Nada de lo descifrado se escribe en el log. Requiere: cryptography, playwright (chromium).
 """
-import base64, datetime as dt, gzip, json, os, re, sys, tempfile, time, urllib.request, urllib.error
+import base64, datetime as dt, gzip, json, os, re, sys, tempfile, time, urllib.request, urllib.error, urllib.parse
 from zoneinfo import ZoneInfo
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes
@@ -53,7 +53,13 @@ def _key(salt: bytes, iters: int) -> bytes:
 
 
 def decrypt_env(env: dict) -> bytes:
-    key = _key(base64.b64decode(env["salt"]), int(env.get("iter", ITER)))
+    try:
+        iters = int(env.get("iter", ITER))
+    except (TypeError, ValueError):
+        iters = ITER
+    if not 100_000 <= iters <= 2_000_000:   # el sobre no está autenticado: sin tope, un Gist hostil podría colgar el job o rebajar el KDF
+        iters = ITER
+    key = _key(base64.b64decode(env["salt"]), iters)
     return AESGCM(key).decrypt(base64.b64decode(env["iv"]), base64.b64decode(env["ct"]), None)
 
 
@@ -91,7 +97,11 @@ def _open(req) -> bytes:
 
 def file_text(f: dict) -> str:
     if f.get("truncated") or f.get("content") is None:
-        return _open(urllib.request.Request(f["raw_url"], headers={"Authorization": "token " + TOKEN})).decode()
+        raw = str(f["raw_url"])
+        host = urllib.parse.urlparse(raw).hostname or ""
+        if not (raw.startswith(API + "/") or host == "gist.githubusercontent.com"):   # el token solo viaja a GitHub
+            raise RuntimeError("raw_url con host inesperado: " + host)
+        return _open(urllib.request.Request(raw, headers={"Authorization": "token " + TOKEN})).decode()
     return f["content"]
 
 
@@ -182,7 +192,9 @@ def main():
         path = os.path.join(tmp, "dashboard.html")
         open(path, "w", encoding="utf-8").write(dash_html)
         with sync_playwright() as p:
-            browser = p.chromium.launch()
+            # El dashboard descifrado se ejecuta en Chromium: no hereda los secretos del job (token, contraseña).
+            _drop = {"GIST_TOKEN", "SYNC_PASSPHRASE", "GIST_ID", "GITHUB_TOKEN"}
+            browser = p.chromium.launch(env={k: v for k, v in os.environ.items() if k not in _drop and not k.startswith(("ACTIONS_", "GITHUB_"))})
             ctx = browser.new_context(timezone_id=str(TZ), locale="es-ES", viewport={"width": 1300, "height": 900})
             page = ctx.new_page()
             page.route("**/api.github.com/**", lambda r: r.abort())      # el dashboard no toca GitHub aquí
