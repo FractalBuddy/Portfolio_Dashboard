@@ -21,6 +21,8 @@ import re
 import sys
 from datetime import datetime, timedelta, timezone
 
+import random
+import time
 import socket
 import requests
 import yfinance as yf
@@ -141,18 +143,54 @@ RATES = [
     ("DFF", "Fed Funds Rate (daily)"),
 ]
 
-# FRED series for Spain's official CPI (index level, 2015=100, monthly, not seasonally
-# adjusted -- "ESPCPIALLMINMEI"). Used by the dashboard to show net worth adjusted for
-# inflation ("today's euros") on the Overview chart. Only fetched if FRED_API_KEY is set
-# (same secret already used for the Rates & Bonds section above).
-CPI_SERIES_ID = "ESPCPIALLMINMEI"
+# FRED series for Spain's consumer price index: Eurostat HICP (IPCA), all items, monthly,
+# not seasonally adjusted, "CP0000ESM086NEST" (index 2025=100, history back to 1996).
+# Used by the dashboard to show net worth adjusted for inflation ("today's euros") on the
+# Overview chart. Only fetched if FRED_API_KEY is set (same secret already used for the
+# Rates & Bonds section above).
+# NOTE: the previous series (OECD "ESPCPIALLMINMEI") froze in March 2025 because the OECD
+# stopped feeding it to FRED, so it silently stopped adjusting anything. This one is
+# published by Eurostat ~mid-month for the previous month. HICP differs slightly from INE's
+# national IPC (typically a few tenths of a point per year); the dashboard labels it as such.
+CPI_SERIES_ID = "CP0000ESM086NEST"
+CPI_SOURCE_LABEL = "Eurostat HICP (IPCA) Spain, via FRED"
+CPI_STALE_DAYS = 100   # last observation older than this => flagged as stale in the feed
+
+
+# --- Resilience: transient Yahoo failures (rate limits, timeouts, empty answers) used to turn into
+# "no data for X" straight away, and with enough of them the whole publish was blocked by the
+# workflow's sanity gate. Each history call now retries with jittered exponential backoff, but a
+# circuit breaker stops retrying once Yahoo is clearly down (so the 20-minute job timeout holds).
+_YF_FAIL_STREAK = 0
+
+
+def yf_history(symbol, tries=3, **kw):
+    """yf.Ticker(symbol).history(**kw) with retries on exceptions AND on empty results.
+    Returns a DataFrame (possibly empty); raises only if every attempt raised."""
+    global _YF_FAIL_STREAK
+    last_exc, hist = None, None
+    attempts = 1 if _YF_FAIL_STREAK >= 15 else tries
+    for i in range(attempts):
+        try:
+            hist = yf.Ticker(symbol).history(**kw)
+            hist = hist.dropna(subset=["Close"])
+            if not hist.empty:
+                _YF_FAIL_STREAK = 0
+                return hist
+        except Exception as e:  # network, rate limit, parsing...
+            last_exc = e
+        if i < attempts - 1:
+            time.sleep(random.uniform(0.5, 1.0 * 2 ** (i + 1)))
+    _YF_FAIL_STREAK += 1
+    if last_exc is not None and hist is None:
+        raise last_exc
+    return hist
 
 
 def fetch_symbol(symbol):
     """Returns price / 1-day change / 7-day change / volume ratio for a yfinance symbol."""
     try:
-        t = yf.Ticker(symbol)
-        hist = t.history(period="8d", interval="1d")
+        hist = yf_history(symbol, period="8d", interval="1d")
         hist = hist.dropna(subset=["Close"])  # a NaN last close would become null in the feed and break the charts
         if hist.empty or len(hist) < 2:
             print(f"  ! no data for {symbol}", file=sys.stderr)
@@ -228,7 +266,7 @@ def fetch_full_history(symbol, period="max"):
     Volume is occasionally NaN for some symbols/venues; left as-is and cleaned up by
     sanitize_for_json() below rather than special-cased here."""
     try:
-        hist = yf.Ticker(symbol).history(period=period, interval="1d")
+        hist = yf_history(symbol, period=period, interval="1d")
         hist = hist.dropna(subset=["Close"])
         if hist.empty:
             return []
@@ -257,7 +295,7 @@ def fetch_intraday_history(symbol):
     comes back (usually just the most recent session).
     """
     try:
-        hist = yf.Ticker(symbol).history(period="2d", interval="5m", prepost=True)
+        hist = yf_history(symbol, tries=2, period="2d", interval="5m", prepost=True)
         hist = hist.dropna(subset=["Close"])
         if hist.empty:
             return []
@@ -313,29 +351,45 @@ def build_rates():
 
 
 def fetch_cpi_history():
-    """Full monthly history of Spain's official CPI index (FRED series ESPCPIALLMINMEI,
-    base 2015=100), used to show net worth in inflation-adjusted ("today's euros") terms
-    on the dashboard's Overview chart. Only fetched if FRED_API_KEY is set -- returns []
-    otherwise, same graceful-degradation pattern as the Rates & Bonds section above."""
+    """Full monthly history of Spain's HICP index (FRED series CP0000ESM086NEST, base
+    2025=100), used to show net worth in inflation-adjusted ("today's euros") terms on the
+    dashboard's Overview chart. Only fetched if FRED_API_KEY is set -- returns ([], meta)
+    otherwise, same graceful-degradation pattern as the Rates & Bonds section above.
+
+    Returns (points, meta). meta = {source, series, last_date, stale} so the dashboard can
+    tell the user when the data stops being fresh instead of silently using an old value."""
+    meta = {"source": CPI_SOURCE_LABEL, "series": CPI_SERIES_ID, "last_date": None, "stale": True}
     if not FRED_API_KEY:
         print("  (FRED_API_KEY not set -- skipping CPI/inflation section)", file=sys.stderr)
-        return []
+        return [], meta
     try:
-        url = (
-            "https://api.stlouisfed.org/fred/series/observations"
-            f"?series_id={CPI_SERIES_ID}&api_key={FRED_API_KEY}&file_type=json"
-            "&sort_order=asc"
+        res = requests.get(
+            "https://api.stlouisfed.org/fred/series/observations",
+            params={"series_id": CPI_SERIES_ID, "api_key": FRED_API_KEY, "file_type": "json", "sort_order": "asc"},
+            timeout=15,
         )
-        res = requests.get(url, timeout=15)
         res.raise_for_status()
         obs = res.json().get("observations", [])
-        return [
-            {"date": o["date"], "value": float(o["value"])}
-            for o in obs if o["value"] not in (".", "")
-        ]
+        pts = []
+        for o in obs:
+            v = _parse_num(str(o.get("value") or ""))
+            # plausibility: a consumer price index level; discards "." and junk
+            if v is None or not (10 < v < 1000):
+                continue
+            pts.append({"date": o["date"], "value": v})
+        if pts:
+            meta["last_date"] = pts[-1]["date"]
+            try:
+                age = (datetime.now(timezone.utc).date() - datetime.strptime(pts[-1]["date"], "%Y-%m-%d").date()).days
+                meta["stale"] = age > CPI_STALE_DAYS
+                if meta["stale"]:
+                    print(f"  ! CPI series looks STALE: last observation {pts[-1]['date']} ({age} days old)", file=sys.stderr)
+            except Exception:
+                pass
+        return pts, meta
     except Exception as e:
         print(f"  ! CPI history fetch failed: {type(e).__name__}", file=sys.stderr)  # sin {e}: la URL lleva la api_key
-        return []
+        return [], meta
 
 
 def parse_feed(url, limit=8):
@@ -412,6 +466,18 @@ def build_position_news():
     return deduped[:30]
 
 
+def _parse_num(txt):
+    """'1,234.56' -> 1234.56 ; '12,3000' (decimal comma) -> 12.3 ; '12.30' -> 12.3. None if ambiguous/invalid."""
+    t = txt.strip()
+    if re.fullmatch(r"\d{1,3}(,\d{3})+(\.\d+)?", t):
+        return float(t.replace(",", ""))
+    if re.fullmatch(r"\d+,\d+", t):
+        return float(t.replace(",", "."))
+    if re.fullmatch(r"\d+(\.\d+)?", t):
+        return float(t)
+    return None
+
+
 def fetch_ishares_nav(product_url, isin):
     """
     Scrapes the exact Class S NAV straight off the fund's public ishares.com product
@@ -436,7 +502,11 @@ def fetch_ishares_nav(product_url, isin):
             print(f"  ! could not find expected NAV pattern for {isin} -- falling back to proxy", file=sys.stderr)
             return None
 
-        price = float(nav_match.group(2).replace(',', ''))
+        price = _parse_num(nav_match.group(2))
+        # plausibility: a mis-parsed number (decimal comma read as thousands, 0.0001...) must not reach the dashboard
+        if price is None or not (0.1 < price < 10000):
+            print(f"  ! implausible NAV {nav_match.group(2)!r} for {isin} -- falling back to proxy", file=sys.stderr)
+            return None
         result = {"price": round(price, 4), "nav_date": nav_match.group(1)}
         if change_match:
             result["change_pct"] = float(change_match.group(2).replace(',', ''))
@@ -760,7 +830,7 @@ def main():
     print("Fetching FRED rates...")
     rates = build_rates()
     print("Fetching Spain CPI (inflation) history...")
-    cpi = fetch_cpi_history()
+    cpi, cpi_meta = fetch_cpi_history()
     print("Fetching general news...")
     general_news = build_general_news()
     print("Fetching position news...")
@@ -780,6 +850,7 @@ def main():
         "forex": forex,
         "rates": rates,
         "cpi": cpi,
+        "cpi_meta": cpi_meta,
         "heatmap": heatmap,
         "sector_heatmap": sector_heatmap,
         "news": {
