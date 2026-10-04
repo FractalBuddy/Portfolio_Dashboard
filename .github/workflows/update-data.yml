@@ -102,11 +102,21 @@ jobs:
           git commit -q -m "Market data $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
 
-      - name: Purge jsDelivr CDN cache
+      - name: Purge jsDelivr CDN cache and verify
         run: |
-          # best-effort (jsDelivr cachea ramas ~12 h y el purge a veces falla): se imprime la respuesta para poder verlo en el log
+          # best-effort: NO hace fallar el job (jsDelivr cachea ramas ~12 h y el purge a veces falla), pero comprueba que el CDN
+          # sirve ya el meta.json nuevo y, si no, deja un ::warning:: visible en el resumen del run.
+          set -u
+          want=$(python3 -c 'import json;print(json.load(open("meta.json"))["generated_at"])')
           for f in data.json meta.json; do
             echo "purge $f:"
             curl -sS --max-time 30 "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@data/${f}" || echo "(purge fallido, no es crítico)"
             echo
           done
+          for i in 1 2 3 4 5 6; do
+            got=$(curl -fsS --max-time 20 "https://cdn.jsdelivr.net/gh/${GITHUB_REPOSITORY}@data/meta.json?cb=$RANDOM" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("generated_at",""))' 2>/dev/null || true)
+            if [ "$got" = "$want" ]; then echo "CDN sirve la versión nueva ($want)"; exit 0; fi
+            echo "intento $i: CDN sirve '$got' (esperado '$want')"
+            sleep $((i*20))
+          done
+          echo "::warning::jsDelivr sigue sirviendo un meta.json antiguo tras 6 intentos (la caché de rama puede tardar hasta ~12 h); el dashboard se pondrá al día solo."
