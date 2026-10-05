@@ -2,9 +2,9 @@ name: Generate reports
 
 on:
   schedule:
-    # Todos los días a las 06:20 UTC (08:20 en verano / 07:20 en invierno, hora de Madrid),
-    # después de la primera actualización del feed de mercado (06:00 UTC).
-    - cron: '20 6 * * *'
+    # Todos los días a las 06:43 UTC (08:43 en verano / 07:43 en invierno, hora de Madrid),
+    # después de la primera actualización del feed de mercado (06:17 UTC).
+    - cron: '43 6 * * *'
   workflow_dispatch: {}
 
 permissions:
@@ -42,3 +42,21 @@ jobs:
           GIST_TOKEN: ${{ secrets.GIST_TOKEN }}
           SYNC_PASSPHRASE: ${{ secrets.SYNC_PASSPHRASE }}
         run: python scripts/generate_reports.py
+
+  # Latido para Healthchecks.io (secreto HC_REPORTS_URL): avisa si falla, se cancela, agota el timeout o deja de ejecutarse.
+  heartbeat:
+    needs: reports
+    if: ${{ always() }}
+    permissions: {}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Ping Healthchecks.io
+        env:
+          HC: ${{ secrets.HC_REPORTS_URL }}
+          RESULT: ${{ needs.reports.result }}
+        run: |
+          [ -n "$HC" ] || exit 0
+          HC="${HC%/}"
+          if [ "$RESULT" = "success" ]; then url="$HC"; else url="$HC/fail"; fi
+          curl -fsS -m 10 --retry 5 --retry-all-errors "$url" >/dev/null
