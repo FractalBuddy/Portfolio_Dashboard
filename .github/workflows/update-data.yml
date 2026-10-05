@@ -2,13 +2,13 @@ name: Update market data
 
 on:
   schedule:
-    # 4x/day (UTC): 06:00, 11:00, 15:00, 20:00.
-    - cron: '0 6,11,15,20 * * *'
+    # 4x/day (UTC): 06:17, 11:17, 15:17, 20:17 (minuto «feo» a propósito: los cron en :00 son los que más retrasa GitHub).
+    - cron: '17 6,11,15,20 * * *'
   workflow_dispatch: {}   # manual run from the Actions tab
 
-# Needed so the job can force-push the dedicated `data` branch (see "Publish" step).
+# Por defecto TODO solo lectura. Solo el job `publish` (que no instala ni ejecuta código de terceros) recibe contents: write.
 permissions:
-  contents: write
+  contents: read
 
 # Never let two runs overlap (a manual run during a scheduled one, or a slow run still
 # going when the next cron fires): they'd race on the same branch. Queue instead of cancel
@@ -18,7 +18,10 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  update:
+  fetch:
+    # Instala dependencias flotantes (yfinance...) y ejecuta código de terceros: por eso NO tiene permiso de escritura ni secretos salvo FRED.
+    permissions:
+      contents: read
     runs-on: ubuntu-24.04
     timeout-minutes: 20   # a hung Yahoo/FRED request can't burn Actions minutes forever
     steps:
@@ -76,11 +79,44 @@ jobs:
               _last = d["cpi"][-1]["date"]
               if (_dt.date.today() - _dt.date.fromisoformat(_last)).days > 120:
                   print("::warning::La serie de IPC termina en %s: el modo 'real' del dashboard usa ese último valor para fechas posteriores" % _last)
+          # --- plausibilidad (auditoría 2026-10): Yahoo degradado/congelado no debe pisar el último feed bueno ---
+          import datetime as _dt2
+          _sp = next((x for x in d["indices"] if x.get("symbol") == "^GSPC"), None)
+          assert _sp and _sp.get("history"), "^GSPC missing"
+          assert (_dt2.date.today() - _dt2.date.fromisoformat(_sp["history"][-1]["date"])).days <= 6, "^GSPC history stale (Yahoo frozen?)"
+          _bad = [x.get("symbol") for k in ("indices", "stocks", "commodities", "forex") for x in d.get(k, [])
+                  if not (x.get("price") or 0) > 0 or abs(x.get("change_pct") or 0) > 60]
+          assert len(_bad) <= 2, "implausible price/change: %s" % _bad[:5]
+          assert len(d["stocks"]) >= 25 and len(d.get("funds", [])) >= 3, "universe shrank"
+          assert all(str(n.get("link", "")).startswith(("http://", "https://")) for k in d.get("news", {}) for n in d["news"][k]), "non-http news link"
           assert m["generated_at"] == d["generated_at"], "meta/data mismatch"
           # jsDelivr no sirve ficheros de GitHub > 20 MB: fallar aquí evita publicar un feed que dejaría de servirse.
           assert m["data_bytes"] < 18_000_000, "data.json too large for jsDelivr (%s bytes)" % m["data_bytes"]
           print("OK:", len(d["indices"]), "indices,", len(d["stocks"]), "stocks,", m["data_bytes"], "bytes")
           PY
+
+      - name: Upload feed artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: market-data
+          path: |
+            data.json
+            meta.json
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    needs: fetch
+    # Único job con permiso de escritura. No hace pip install ni ejecuta scripts del repo: solo baja el artefacto ya validado y lo publica.
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download feed artifact
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: market-data
 
       # The feed lives on its OWN orphan branch (`data`) that is replaced by a single fresh
       # commit on every run, instead of adding a ~0.4MB commit to `main` 4x/day forever.
@@ -120,3 +156,23 @@ jobs:
             sleep $((i*20))
           done
           echo "::warning::jsDelivr sigue sirviendo un meta.json antiguo tras 6 intentos (la caché de rama puede tardar hasta ~12 h); el dashboard se pondrá al día solo."
+
+  # Latido para Healthchecks.io: avisa si el workflow FALLA, se CANCELA, agota el timeout o deja de ejecutarse del todo
+  # (cron desactivado, scheduler caído). La URL va en el secreto HC_UPDATE_URL (nunca en el repo, que es público).
+  heartbeat:
+    needs: [fetch, publish]
+    if: ${{ always() }}
+    permissions: {}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Ping Healthchecks.io
+        env:
+          HC: ${{ secrets.HC_UPDATE_URL }}
+          FETCH: ${{ needs.fetch.result }}
+          PUBLISH: ${{ needs.publish.result }}
+        run: |
+          [ -n "$HC" ] || exit 0
+          HC="${HC%/}"
+          if [ "$FETCH" = "success" ] && [ "$PUBLISH" = "success" ]; then url="$HC"; else url="$HC/fail"; fi
+          curl -fsS -m 10 --retry 5 --retry-all-errors "$url" >/dev/null
