@@ -1,0 +1,13 @@
+# Keeps the SHA-pinned GitHub Actions (and the Python deps) current without any manual
+# work: Dependabot opens a PR when a new version exists. You only click "Merge".
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    versioning-strategy: increase   # sin esto no propone PR mientras la última versión cumpla el rango >=
