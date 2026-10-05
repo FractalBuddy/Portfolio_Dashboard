@@ -10,6 +10,7 @@ updates:
     directory: "/"
     schedule:
       interval: "monthly"
+    versioning-strategy: increase   # sin esto no propone PR mientras la última versión cumpla el rango >=
   - package-ecosystem: "pip"
     directory: "/scripts"
     schedule:
