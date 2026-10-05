@@ -197,7 +197,15 @@ def main():
             browser = p.chromium.launch(env={k: v for k, v in os.environ.items() if k not in _drop and not k.startswith(("ACTIONS_", "GITHUB_"))})
             ctx = browser.new_context(timezone_id=str(TZ), locale="es-ES", viewport={"width": 1300, "height": 900})
             page = ctx.new_page()
-            page.route("**/api.github.com/**", lambda r: r.abort())      # el dashboard no toca GitHub aquí
+            # Lista blanca de red: el dashboard descifrado solo puede hablar con los orígenes que necesita para precios/FX/feed
+            # (y file:// para sí mismo). Todo lo demás (GitHub, Google Fonts, imágenes de terceros...) se aborta.
+            _ALLOW = {"cdn.jsdelivr.net", "api.coingecko.com", "open.er-api.com", "api.frankfurter.app"}
+            def _gate(route):
+                u = route.request.url
+                if u.startswith(("file://", "data:", "blob:", "about:")) or urllib.parse.urlparse(u).hostname in _ALLOW:
+                    return route.continue_()
+                return route.abort()
+            page.route("**/*", _gate)
             page.add_init_script("localStorage.setItem(%s, %s);" % (json.dumps(STORAGE_KEY), json.dumps(json.dumps(state))))
             if FORCE_DATE:
                 page.clock.install(time=FORCE_DATE + "T08:00:00")
@@ -289,5 +297,6 @@ if __name__ == "__main__":
             "dashboard (o el Gist está corrupto). Comprueba mayúsculas, espacios y símbolos.")
         sys.exit(4)
     except Exception as e:  # noqa: BLE001
-        log("ERROR inesperado:", type(e).__name__, "-", str(e)[:200])   # mensaje corto, sin traceback con datos
+        # Los logs de un repo público los ve cualquiera: solo el tipo de error (el detalle, únicamente con DEBUG=1 en una ejecución manual).
+        log("ERROR inesperado:", type(e).__name__, ("- " + str(e)[:200]) if os.environ.get("DEBUG") == "1" else "")
         sys.exit(1)
