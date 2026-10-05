@@ -162,18 +162,45 @@ CPI_STALE_DAYS = 100   # last observation older than this => flagged as stale in
 # workflow's sanity gate. Each history call now retries with jittered exponential backoff, but a
 # circuit breaker stops retrying once Yahoo is clearly down (so the 20-minute job timeout holds).
 _YF_FAIL_STREAK = 0
+# Presupuesto de tiempo global (el job tiene timeout de 20 min): pasado este límite se deja de llamar a Yahoo y
+# se falla limpio (sanity-check) en vez de morir por timeout a mitad de publicación.
+_DEADLINE = time.monotonic() + 14 * 60
+
+
+def _drop_phantom_bars(hist, max_dev=0.15):
+    """Yahoo a veces devuelve una barra 'fantasma' (volumen 0, O=H=L=C) con un salto >15 % respecto a AMBOS vecinos
+    (p. ej. SWDA.L 2025-10-24: +34 %/-24 %). Contamina volatilidad y gráficos; se descarta (solo barras interiores)."""
+    try:
+        if hist is None or len(hist) < 3 or not {"Open", "High", "Low", "Close", "Volume"}.issubset(hist.columns):
+            return hist
+        c = hist["Close"].astype(float)
+        keep = []
+        for i in range(len(hist)):
+            row = hist.iloc[i]
+            flat = (float(row["Volume"] or 0) == 0 and float(row["Open"]) == float(row["High"]) == float(row["Low"]) == float(row["Close"]))
+            if flat and 0 < i < len(hist) - 1:
+                a, b = float(c.iloc[i - 1]), float(c.iloc[i + 1])
+                if a and b and abs(float(c.iloc[i]) / a - 1) > max_dev and abs(float(c.iloc[i]) / b - 1) > max_dev:
+                    keep.append(False)
+                    continue
+            keep.append(True)
+        return hist[keep] if not all(keep) else hist
+    except Exception:
+        return hist
 
 
 def yf_history(symbol, tries=3, **kw):
     """yf.Ticker(symbol).history(**kw) with retries on exceptions AND on empty results.
     Returns a DataFrame (possibly empty); raises only if every attempt raised."""
     global _YF_FAIL_STREAK
+    if time.monotonic() > _DEADLINE:
+        raise TimeoutError('presupuesto de tiempo de fetch agotado')
     last_exc, hist = None, None
     attempts = 1 if _YF_FAIL_STREAK >= 15 else tries
     for i in range(attempts):
         try:
             hist = yf.Ticker(symbol).history(**kw)
-            hist = hist.dropna(subset=["Close"])
+            hist = _drop_phantom_bars(hist.dropna(subset=["Close"]))
             if not hist.empty:
                 _YF_FAIL_STREAK = 0
                 return hist
@@ -317,16 +344,28 @@ def attach_histories(items):
     return items
 
 
+def _fred_get(params, tries=3):
+    """GET a FRED observations con reintentos (5xx/429/timeout transitorios). Lanza la última excepción si todos fallan."""
+    last = None
+    for i in range(tries):
+        try:
+            res = requests.get("https://api.stlouisfed.org/fred/series/observations", params=params, timeout=15)
+            if res.status_code in (429, 500, 502, 503, 504) and i < tries - 1:
+                time.sleep(2 * (i + 1)); continue
+            res.raise_for_status()
+            return res
+        except requests.RequestException as e:
+            last = e
+            if i < tries - 1:
+                time.sleep(2 * (i + 1))
+    raise last
+
+
 def fetch_fred_series(series_id):
     if not FRED_API_KEY:
         return None
     try:
-        res = requests.get(
-            "https://api.stlouisfed.org/fred/series/observations",
-            params={"series_id": series_id, "api_key": FRED_API_KEY, "file_type": "json", "sort_order": "desc", "limit": 10},
-            timeout=15,
-        )
-        res.raise_for_status()
+        res = _fred_get({"series_id": series_id, "api_key": FRED_API_KEY, "file_type": "json", "sort_order": "desc", "limit": 10})
         obs = [o for o in res.json().get("observations", []) if o["value"] not in (".", "")]
         if not obs:
             return None
@@ -363,12 +402,7 @@ def fetch_cpi_history():
         print("  (FRED_API_KEY not set -- skipping CPI/inflation section)", file=sys.stderr)
         return [], meta
     try:
-        res = requests.get(
-            "https://api.stlouisfed.org/fred/series/observations",
-            params={"series_id": CPI_SERIES_ID, "api_key": FRED_API_KEY, "file_type": "json", "sort_order": "asc"},
-            timeout=15,
-        )
-        res.raise_for_status()
+        res = _fred_get({"series_id": CPI_SERIES_ID, "api_key": FRED_API_KEY, "file_type": "json", "sort_order": "asc"})
         obs = res.json().get("observations", [])
         pts = []
         for o in obs:
@@ -397,10 +431,13 @@ def parse_feed(url, limit=8):
         parsed = feedparser.parse(url)
         items = []
         for entry in parsed.entries[:limit]:
+            link = str(entry.get("link", "") or "")
+            if not link.lower().startswith(("http://", "https://")):
+                continue  # nunca publicar javascript:/data: etc. (el dashboard ya lo filtra; defensa en profundidad)
             items.append({
-                "title": entry.get("title", "").strip(),
-                "link": entry.get("link", ""),
-                "source": parsed.feed.get("title", url),
+                "title": re.sub(r"<[^>]*>", "", str(entry.get("title", "") or "")).strip()[:300],
+                "link": link[:1000],
+                "source": str(parsed.feed.get("title", url))[:120],
                 "published": entry.get("published", entry.get("updated", "")),
             })
         return items
@@ -519,15 +556,22 @@ def fetch_ishares_nav(product_url, isin):
         return None
 
 
+# La unidad viene en cualquier capitalización ("EUR 1.20 B", "USD 29.5 bn", "EUR 820.50 M"): antes el regex solo aceptaba
+# minúsculas, no capturaba la unidad y _fmt_aum truncaba a "EUR 1" / "EUR 820" (orden de magnitud falso).
+_AUM_RE = r'([A-Z]{3})\s*([\d,]+(?:\.\d+)?)\s*((?i:bn|mn|mm|k|m|b))?\b'
+_AUM_U = {"k": "k", "m": "m", "mn": "m", "mm": "m", "bn": "bn", "b": "bn"}
+
+
 def _fmt_aum(m):
-    """'EUR', '809.12', 'm' -> 'EUR 809.12 m'; without unit the raw number is grouped ('EUR 1,234,567')."""
-    ccy, num, unit = m.group(1), m.group(2), m.group(3)
+    """'EUR', '809.12', 'M' -> 'EUR 809.12 m'; sin unidad se agrupa el número ('EUR 1,234,567'); sin unidad y < 1000 es ambiguo -> None."""
+    ccy, num, unit = m.group(1), m.group(2), (m.group(3) or "").lower()
     if unit:
-        return f"{ccy} {num} {unit}"
+        return f"{ccy} {num} {_AUM_U[unit]}"
     try:
-        return f"{ccy} {int(float(num.replace(',', ''))):,}"
+        v = float(num.replace(',', ''))
     except ValueError:
-        return f"{ccy} {num}"
+        return None
+    return f"{ccy} {v:,.0f}" if v >= 1000 else None
 
 
 def fetch_ishares_fund_facts(product_url):
@@ -552,11 +596,15 @@ def fetch_ishares_fund_facts(product_url):
         if m: facts["fund_launch_date"] = m.group(1)
 
         # number WITH decimals and its unit (k / m / bn): "EUR 809.12 m", not "EUR 809"
-        m = re.search(r'Net Assets\s+as of\s+[\d/A-Za-z]+\s+([A-Z]{3})\s*([\d,]+(?:\.\d+)?)\s*(k|m|bn)?\b', plain)
-        if m: facts["class_aum"] = _fmt_aum(m)
+        m = re.search(r'Net Assets\s+as of\s+[\d/A-Za-z]+\s+' + _AUM_RE, plain)
+        if m:
+            _v = _fmt_aum(m)
+            if _v: facts["class_aum"] = _v
 
-        m = re.search(r'Net Assets of Fund\s+as of\s+[\d/A-Za-z]+\s+([A-Z]{3})\s*([\d,]+(?:\.\d+)?)\s*(k|m|bn)?\b', plain)
-        if m: facts["fund_aum"] = _fmt_aum(m)
+        m = re.search(r'Net Assets of Fund\s+as of\s+[\d/A-Za-z]+\s+' + _AUM_RE, plain)
+        if m:
+            _v = _fmt_aum(m)
+            if _v: facts["fund_aum"] = _v
 
         m = re.search(r'Benchmark Index\s+([A-Za-z0-9 ,()%.\-]+?)\s+(?:Initial Charge|Management Fee)', plain)
         if m: facts["benchmark"] = m.group(1).strip()
@@ -594,7 +642,7 @@ def compute_fund_analytics(proxy_symbol):
     them client-side via JS, empty in the raw HTML).
     """
     try:
-        hist = yf.Ticker(proxy_symbol).history(period="10y", interval="1d")
+        hist = yf_history(proxy_symbol, period="10y", interval="1d")
         hist = hist.dropna(subset=["Close"])
         if hist.empty or len(hist) < 30:
             return {}
@@ -718,7 +766,7 @@ def build_market_mood():
     if CNN ever changes it, same as everything else scraped in this script."""
     mood = {}
     try:
-        hist = yf.Ticker("^VIX").history(period="3mo", interval="1d")
+        hist = yf_history("^VIX", period="3mo", interval="1d")
         if not hist.empty:
             closes = hist["Close"].tolist()
             last = float(closes[-1])
@@ -771,7 +819,7 @@ def build_benchmarks():
     benchmarks = {}
     for key, symbol in [("sp500", "^GSPC"), ("msci_world", "URTH")]:
         try:
-            hist = yf.Ticker(symbol).history(period="90d", interval="1d").dropna(subset=["Close"])
+            hist = yf_history(symbol, period="90d", interval="1d").dropna(subset=["Close"])
             benchmarks[key] = [
                 {"date": idx.strftime("%Y-%m-%d"), "close": round(float(row["Close"]), 4)}
                 for idx, row in hist.iterrows()
