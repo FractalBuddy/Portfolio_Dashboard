@@ -1,0 +1,24 @@
+name: Keepalive
+
+# GitHub desactiva los workflows programados de un repo público tras 60 días sin actividad.
+# Esto los vuelve a habilitar cada semana (no cuenta como commit, pero reinicia el contador de inactividad).
+on:
+  schedule:
+    - cron: '41 5 * * 1'
+  workflow_dispatch: {}
+
+permissions:
+  actions: write
+
+jobs:
+  keepalive:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Re-enable scheduled workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for w in update-data.yml generate-reports.yml; do
+            gh api -X PUT "repos/${GITHUB_REPOSITORY}/actions/workflows/$w/enable" || echo "::warning::no se pudo reactivar $w"
+          done
