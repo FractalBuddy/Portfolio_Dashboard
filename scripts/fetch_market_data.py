@@ -1,18 +1,23 @@
 #!/usr/bin/env python3
 """
-Fetches market data (indices, stocks, commodities, forex, US rates, a
-country-level heatmap, and Spain CPI) and writes it to data.json at the repo
-root.
-
-Run automatically by the GitHub Actions workflow on a schedule. Can also be
-run locally for testing:
+Descarga datos de mercado (índices, acciones, fondos, materias primas, divisas, tipos de EE. UU.,
+un mapa de calor por países/sectores, IPC de España y noticias) y los escribe en data.json (+ meta.json)
+en la raíz del repo. Lo ejecuta el workflow de GitHub Actions de forma programada; también se puede
+lanzar en local:
 
     pip install -r requirements.txt
-    export FRED_API_KEY=your_key_here   # optional, needed for rates + CPI
+    export FRED_API_KEY=tu_clave   # opcional: necesaria para tipos + IPC
     python scripts/fetch_market_data.py
 
-This script never touches anything about your personal portfolio -- it only
-fetches generic public market data (index/ETF/commodity/forex prices).
+Qué contiene el feed PÚBLICO (la rama `data` de un repo público; cualquiera puede leerlo):
+  * precios y series de mercado de símbolos públicos (índices, acciones, ETF, divisas...);
+  * los ISIN y nombres de los fondos que sigues (YOUR_FUNDS) y su NAV exacto de ishares.com;
+  * la lista de criptomonedas vigiladas (CRYPTO_WATCHLIST), visible en el código y en las noticias filtradas.
+No incluye importes, cantidades, saldos ni operaciones: nada de tu cartera real más allá de qué
+fondos y qué cripto sigues. Si eso es un problema, quita esas entradas o no publiques el repo.
+
+Variable de entorno opcional PREV_FEED_PATH (por defecto `prev.json`): feed publicado anteriormente.
+Si FRED falla, se reutilizan de él los tipos y el IPC marcados como `stale` (ver reuse_previous_fred).
 """
 import json
 import math
@@ -24,11 +29,13 @@ from datetime import datetime, timedelta, timezone
 import random
 import time
 import socket
+import threading
 import requests
 import yfinance as yf
 import feedparser
 
-# feedparser.parse(url) no admite timeout propio: sin esto, un host colgado bloquea todo el job.
+# Red de seguridad para cualquier librería que abra sockets sin timeout propio (yfinance...). Las noticias ya no
+# dependen de esto: se descargan con requests (timeout + tope de tiempo total) y se pasan a feedparser como bytes.
 socket.setdefaulttimeout(25)
 
 FRED_API_KEY = os.environ.get("FRED_API_KEY", "")
@@ -46,7 +53,8 @@ CRYPTO_NEWS_FEEDS = [
     "https://www.coindesk.com/arc/outboundfeeds/rss/",
     "https://cointelegraph.com/rss",
 ]
-# Watched crypto keywords, used to filter CRYPTO_NEWS_FEEDS into position-relevant items.
+# Palabras clave de cripto vigilada, para filtrar CRYPTO_NEWS_FEEDS. OJO: esta lista está en el código público y las
+# palabras que coinciden con un titular salen en el feed público como `symbol`/`asset_name`.
 CRYPTO_WATCHLIST = ["bitcoin", "btc", "ethereum", "eth", "chainlink", "link",
                      "polkadot", "dot", "mina", "rocket pool", "rpl", "tezos", "xtz", "unibright"]
 
@@ -83,8 +91,10 @@ FUNDS = [
     ("SGLN.L", "iShares Physical Gold ETC"),
 ]
 
-# Your two actual MyInvestor holdings (Class S index mutual funds -- not exchange-traded,
-# so yfinance has no ticker for them). We scrape the exact Class S NAV directly off their
+# Los fondos que sigues (fondos indexados clase S, no cotizan en bolsa: yfinance no tiene ticker).
+# OJO: el ISIN y el nombre de cada fondo salen tal cual en el feed público (`your_funds` de data.json), así que
+# quien lea la rama `data` sabe qué fondos sigues (no importes ni cantidades). El dashboard los empareja por ISIN.
+# Scrapeamos el NAV exacto de la clase S directamente de su
 # ishares.com product page (public, no login, no API -- just the same page a human would
 # read). If the page layout ever changes and scraping fails, we fall back automatically to
 # a proxy ETF that tracks the same index, applying its % change to your last known NAV.
@@ -165,6 +175,13 @@ _YF_FAIL_STREAK = 0
 # Presupuesto de tiempo global (el job tiene timeout de 20 min): pasado este límite se deja de llamar a Yahoo y
 # se falla limpio (sanity-check) en vez de morir por timeout a mitad de publicación.
 _DEADLINE = time.monotonic() + 14 * 60
+# Presupuesto propio de las noticias (secundarias): main() lo fija al empezarlas como min(_DEADLINE, ahora + 5 min).
+# Pasado ese límite parse_feed() devuelve [] sin tocar la red.
+NEWS_BUDGET_SECONDS = 5 * 60
+_NEWS_DEADLINE = None
+# Tope por feed: tiempo total (un servidor que gotea bytes no puede alargarlo) y tamaño.
+FEED_MAX_SECONDS = 20
+FEED_MAX_BYTES = 3_000_000
 
 
 def _drop_phantom_bars(hist, max_dev=0.15):
@@ -426,9 +443,116 @@ def fetch_cpi_history():
         return [], meta
 
 
-def parse_feed(url, limit=8):
+def _download_feed(url, stop):
+    """Descarga con requests (timeout=(5, 10)) con tope de tamaño. `stop` (threading.Event) corta el bucle si el
+    llamador ya se ha rendido."""
+    headers = {"User-Agent": getattr(feedparser, "USER_AGENT", "feedparser"),  # el mismo UA que usaba feedparser.parse(url)
+               "Accept": "application/rss+xml, application/atom+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.1"}
+    with requests.get(url, headers=headers, timeout=(5, 10), stream=True) as res:
+        res.raise_for_status()
+        chunks, size = [], 0
+        for chunk in res.iter_content(chunk_size=16384):
+            if stop.is_set():
+                raise TimeoutError("descarga abandonada")
+            chunks.append(chunk)
+            size += len(chunk)
+            if size > FEED_MAX_BYTES:
+                raise ValueError("feed demasiado grande")
+        return b"".join(chunks)
+
+
+def _fetch_feed_bytes(url):
+    """Descarga un feed RSS con un tope de tiempo TOTAL (FEED_MAX_SECONDS) y de tamaño (FEED_MAX_BYTES).
+    El timeout de requests es por operación de socket: un servidor que gotea bytes lo esquiva (y iter_content
+    espera a llenar el chunk), así que la descarga corre en un hilo daemon al que se espera como máximo
+    FEED_MAX_SECONDS; si no termina, se abandona (el hilo muere solo al cortar el socket o al acabar el proceso).
+    Lanza una excepción si falla o se pasa de tiempo/tamaño."""
+    box, stop = {}, threading.Event()
+
+    def work():
+        try:
+            box["data"] = _download_feed(url, stop)
+        except Exception as e:  # noqa: BLE001 - se relanza en el hilo principal
+            box["err"] = e
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    t.join(FEED_MAX_SECONDS)
+    if t.is_alive():
+        stop.set()
+        raise TimeoutError("feed demasiado lento (>%d s)" % FEED_MAX_SECONDS)
+    if "err" in box:
+        raise box["err"]
+    return box["data"]
+
+
+def _load_prev_feed():
+    """Feed publicado anteriormente (PREV_FEED_PATH, por defecto prev.json). {} si no existe o no es un JSON válido."""
+    path = os.environ.get("PREV_FEED_PATH", "prev.json")
     try:
-        parsed = feedparser.parse(url)
+        with open(path, encoding="utf-8") as f:
+            prev = json.load(f)
+        return prev if isinstance(prev, dict) else {}
+    except Exception:
+        return {}
+
+
+def reuse_previous_fred(rates, cpi, cpi_meta, prev):
+    """
+    Si FRED falla (clave caducada, caída, serie cambiada) NO se bloquea la publicación de los precios de bolsa:
+    se reutilizan del feed anterior los tipos que falten y, si no hay IPC, el IPC y su cpi_meta, todo marcado
+    `stale: true` (+ `stale_since`: desde cuándo no se refresca; se conserva entre reutilizaciones sucesivas).
+    Sin feed anterior no hay nada que reutilizar y todo queda como estaba (el sanity-check exige lo mínimo).
+    Solo se llama con FRED_API_KEY definida. Devuelve (rates, cpi, cpi_meta).
+    """
+    if not isinstance(prev, dict):
+        return rates, cpi, cpi_meta
+    since_default = str(prev.get("generated_at", ""))[:10] or None
+
+    # Tipos: por serie, conservando el orden de RATES.
+    try:
+        have = {r.get("series") for r in rates}
+        prev_rates = {r.get("series"): r for r in prev.get("rates", []) if isinstance(r, dict)}
+        merged = []
+        for series_id, _name in RATES:
+            if series_id in have:
+                merged.extend(r for r in rates if r.get("series") == series_id)
+            elif isinstance(prev_rates.get(series_id), dict) and isinstance(prev_rates[series_id].get("value"), (int, float)):
+                r = dict(prev_rates[series_id])
+                r["stale"] = True
+                r["stale_since"] = r.get("stale_since") or since_default
+                merged.append(r)
+                print(f"  ! FRED {series_id}: se reutiliza el valor del feed anterior (stale)", file=sys.stderr)
+        rates = merged
+    except Exception as e:
+        print(f"  ! no se pudieron reutilizar los tipos anteriores: {type(e).__name__}", file=sys.stderr)
+
+    # IPC: solo si la descarga nueva ha salido vacía.
+    try:
+        if not cpi:
+            pts = [p for p in prev.get("cpi", []) if isinstance(p, dict) and isinstance(p.get("value"), (int, float)) and p.get("date")]
+            if len(pts) >= 12:
+                pm = prev.get("cpi_meta") if isinstance(prev.get("cpi_meta"), dict) else {}
+                cpi = pts
+                cpi_meta = dict(cpi_meta)
+                cpi_meta.update({k: pm[k] for k in ("source", "series") if k in pm})
+                cpi_meta["last_date"] = pts[-1]["date"]
+                cpi_meta["stale"] = True
+                cpi_meta["reused_from_previous"] = True
+                cpi_meta["stale_since"] = pm.get("stale_since") or since_default
+                print("  ! IPC de FRED no disponible: se reutiliza el del feed anterior (stale)", file=sys.stderr)
+    except Exception as e:
+        print(f"  ! no se pudo reutilizar el IPC anterior: {type(e).__name__}", file=sys.stderr)
+    return rates, cpi, cpi_meta
+
+
+def parse_feed(url, limit=8):
+    # Presupuesto global: pasado _NEWS_DEADLINE (o _DEADLINE) no se hace ninguna petición más.
+    if time.monotonic() > (_NEWS_DEADLINE or _DEADLINE):
+        print(f"  ! presupuesto de tiempo agotado, se omite el feed {url}", file=sys.stderr)
+        return []
+    try:
+        parsed = feedparser.parse(_fetch_feed_bytes(url))
         items = []
         for entry in parsed.entries[:limit]:
             link = str(entry.get("link", "") or "")
@@ -515,6 +639,84 @@ def _parse_num(txt):
     return None
 
 
+_MESES = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6, "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
+NAV_STALE_DAYS = 5          # un NAV con más antigüedad se marca nav_stale (fin de semana + festivo caben de sobra)
+CHANGE_PCT_MAX = 20.0       # una variación diaria de un fondo indexado mayor que esto es un parseo erróneo
+
+
+def _parse_signed(txt):
+    """Como _parse_num pero acepta signo inicial: '-0.85' -> -0.85. None si no es un número limpio."""
+    t = txt.strip()
+    sign = -1.0 if t.startswith("-") else 1.0
+    v = _parse_num(t.lstrip("+-"))
+    return None if v is None else sign * v
+
+
+def _parse_nav_date(txt):
+    """'03/Oct/2026' -> date(2026, 10, 3) sin depender del locale (strptime %b lo hace). None si no se entiende."""
+    m = re.fullmatch(r"(\d{1,2})/([A-Za-z]{3})/(\d{4})", txt.strip())
+    if not m or m.group(2).lower() not in _MESES:
+        return None
+    try:
+        return datetime(int(m.group(3)), _MESES[m.group(2).lower()], int(m.group(1))).date()
+    except ValueError:
+        return None
+
+
+def parse_ishares_nav(plain, isin, today=None):
+    """
+    Extrae el NAV del texto plano (sin etiquetas) de la página de producto de iShares.
+    Devuelve un dict {price, nav_date, [nav_stale], [change_pct], [wk52_low, wk52_high]} o None si no hay
+    un NAV fiable (patrón ausente, ISIN ausente o precio inverosímil). Los campos secundarios
+    (variación, rango 52 semanas) se parsean cada uno en su propio try: si uno viene malformado
+    se descarta ese campo, pero NO se pierde el NAV válido.
+    """
+    nav_match = re.search(r'NAV as of\s+([\d/A-Za-z]+)\s+EUR\s*([\d.,]+)', plain)
+    if not (nav_match and isin in plain):
+        print(f"  ! could not find expected NAV pattern for {isin} -- falling back to proxy", file=sys.stderr)
+        return None
+    price = _parse_num(nav_match.group(2))
+    # plausibility: a mis-parsed number (decimal comma read as thousands, 0.0001...) must not reach the dashboard
+    if price is None or not (0.1 < price < 10000):
+        print(f"  ! implausible NAV {nav_match.group(2)!r} for {isin} -- falling back to proxy", file=sys.stderr)
+        return None
+    result = {"price": round(price, 4), "nav_date": nav_match.group(1)}
+
+    # Antigüedad del NAV: si iShares congela la página, el NAV de hace días no debe pasar por "de hoy".
+    try:
+        nav_day = _parse_nav_date(nav_match.group(1))
+        if nav_day is not None:
+            today = today or datetime.now(timezone.utc).date()
+            result["nav_stale"] = (today - nav_day).days > NAV_STALE_DAYS
+            if result["nav_stale"]:
+                print(f"  ! NAV de {isin} con fecha {nav_match.group(1)} (> {NAV_STALE_DAYS} días)", file=sys.stderr)
+    except Exception as e:
+        print(f"  ! nav_date ilegible para {isin}: {e}", file=sys.stderr)
+
+    try:
+        cm = re.search(r'1 Day NAV Change.*?EUR\s*(-?[\d.,]+)\s*\(?\s*(-?[\d.,]+)%\s*\)?', plain)
+        if cm:
+            chg = _parse_signed(cm.group(2))
+            if chg is not None and abs(chg) <= CHANGE_PCT_MAX:
+                result["change_pct"] = chg
+            else:
+                print(f"  ! variación diaria descartada para {isin}: {cm.group(2)!r}", file=sys.stderr)
+    except Exception as e:
+        print(f"  ! variación diaria no parseable para {isin}: {e}", file=sys.stderr)
+
+    try:
+        wm = re.search(r'52\s*WK:\s*([\d.,]+)\s*-\s*([\d.,]+)', plain)
+        if wm:
+            lo, hi = _parse_num(wm.group(1)), _parse_num(wm.group(2))
+            if lo is not None and hi is not None and 0 < lo <= hi and lo * 0.8 <= price <= hi * 1.2:
+                result["wk52_low"], result["wk52_high"] = lo, hi
+            else:
+                print(f"  ! rango 52 semanas descartado para {isin}: {wm.group(0)!r}", file=sys.stderr)
+    except Exception as e:
+        print(f"  ! rango 52 semanas no parseable para {isin}: {e}", file=sys.stderr)
+    return result
+
+
 def fetch_ishares_nav(product_url, isin):
     """
     Scrapes the exact Class S NAV straight off the fund's public ishares.com product
@@ -525,32 +727,10 @@ def fetch_ishares_nav(product_url, isin):
         headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
         res = requests.get(product_url, headers=headers, timeout=20)
         res.raise_for_status()
-        text = res.text
         # Strip tags to plain text so we don't depend on exact HTML structure/classes.
-        plain = re.sub(r'<[^>]+>', ' ', text)
+        plain = re.sub(r'<[^>]+>', ' ', res.text)
         plain = re.sub(r'\s+', ' ', plain)
-
-        nav_match = re.search(r'NAV as of\s+([\d/A-Za-z]+)\s+EUR\s*([\d.,]+)', plain)
-        change_match = re.search(r'1 Day NAV Change.*?EUR\s*(-?[\d.,]+)\s*\(?\s*(-?[\d.,]+)%\s*\)?', plain)
-        wk_match = re.search(r'52\s*WK:\s*([\d.,]+)\s*-\s*([\d.,]+)', plain)
-        isin_present = isin in plain
-
-        if not (nav_match and isin_present):
-            print(f"  ! could not find expected NAV pattern for {isin} -- falling back to proxy", file=sys.stderr)
-            return None
-
-        price = _parse_num(nav_match.group(2))
-        # plausibility: a mis-parsed number (decimal comma read as thousands, 0.0001...) must not reach the dashboard
-        if price is None or not (0.1 < price < 10000):
-            print(f"  ! implausible NAV {nav_match.group(2)!r} for {isin} -- falling back to proxy", file=sys.stderr)
-            return None
-        result = {"price": round(price, 4), "nav_date": nav_match.group(1)}
-        if change_match:
-            result["change_pct"] = float(change_match.group(2).replace(',', ''))
-        if wk_match:
-            result["wk52_low"] = float(wk_match.group(1).replace(',', ''))
-            result["wk52_high"] = float(wk_match.group(2).replace(',', ''))
-        return result
+        return parse_ishares_nav(plain, isin)
     except Exception as e:
         print(f"  ! ishares scrape failed for {isin}: {e} -- falling back to proxy", file=sys.stderr)
         return None
@@ -739,6 +919,7 @@ def build_your_funds():
                 "price": scraped["price"],
                 "change_pct": scraped.get("change_pct"),
                 "nav_date": scraped.get("nav_date"),
+                "nav_stale": scraped.get("nav_stale"),
                 "wk52_low": scraped.get("wk52_low"),
                 "wk52_high": scraped.get("wk52_high"),
                 "proxy_symbol": fund["proxy_symbol"],
@@ -879,6 +1060,10 @@ def main():
     rates = build_rates()
     print("Fetching Spain CPI (inflation) history...")
     cpi, cpi_meta = fetch_cpi_history()
+    if FRED_API_KEY:
+        rates, cpi, cpi_meta = reuse_previous_fred(rates, cpi, cpi_meta, _load_prev_feed())
+    global _NEWS_DEADLINE
+    _NEWS_DEADLINE = min(_DEADLINE, time.monotonic() + NEWS_BUDGET_SECONDS)
     print("Fetching general news...")
     general_news = build_general_news()
     print("Fetching position news...")

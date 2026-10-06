@@ -1,3 +1,5 @@
-yfinance>=1.7.0
-requests>=2.34.2
-feedparser>=6.0.14
+# Cota superior = la siguiente versión mayor: Dependabot propone las subidas mayores en un PR aparte, en vez de
+# que el job `fetch` (que ejecuta este código con FRED_API_KEY en el entorno) se las trague solo en un run programado.
+yfinance>=1.7.0,<2
+requests>=2.34.2,<3
+feedparser>=6.0.14,<7

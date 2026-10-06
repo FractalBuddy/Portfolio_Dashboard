@@ -6,8 +6,12 @@ updates:
     directory: "/"
     schedule:
       interval: "monthly"
+    cooldown:
+      default-days: 7   # no propone versiones publicadas hace menos de 7 días (mitiga paquetes/acciones comprometidos recién publicados)
   - package-ecosystem: "pip"
     directory: "/"
     schedule:
       interval: "monthly"
     versioning-strategy: increase   # sin esto no propone PR mientras la última versión cumpla el rango >=
+    cooldown:
+      default-days: 7   # ídem; las actualizaciones de seguridad no esperan al cooldown

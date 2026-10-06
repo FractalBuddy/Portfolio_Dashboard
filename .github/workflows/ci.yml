@@ -23,12 +23,33 @@ jobs:
           python-version: '3.11'
 
       - name: Python syntax
-        run: python -m py_compile scripts/fetch_market_data.py
+        run: python -m py_compile scripts/*.py tests/*.py
 
-      - name: Dependencies resolve
-        run: pip install --dry-run -r requirements.txt
+      # Dependencias reales del script (los tests importan fetch_market_data) + herramientas de CI con versión fija
+      # (PyYAML: lo usan los tests de los workflows).
+      - name: Install dependencies
+        run: pip install -r requirements.txt "pytest==9.1.1" "ruff==0.15.11" "PyYAML==6.0.3"
 
+      - name: Ruff (solo reglas F de pyflakes)
+        run: ruff check --select F scripts tests
+
+      - name: Tests (sanity-check del feed, scrape de iShares, FRED, noticias)
+        run: python -m pytest -q
+
+      # actionlint no viene garantizado en el runner: si no está, se avisa y se sigue (no se descarga nada de terceros).
+      - name: actionlint (si está disponible)
+        run: |
+          if command -v actionlint >/dev/null 2>&1; then
+            actionlint
+          else
+            echo "::notice::actionlint no está disponible en este runner: se omite"
+          fi
+
+      # Coherente con .gitignore: falla si hay versionado algo que .gitignore excluye (`git ls-files -ci`), y además
+      # repasa a mano los patrones peligrosos por si alguien debilita el .gitignore. .env.example sí se permite.
       - name: No personal files committed
         run: |
-          bad=$(git ls-files '*.html' '*backup*' '*.env' | grep -v '^README' || true)
+          bad=$( { git ls-files -ci --exclude-standard
+                   git ls-files '*.html' '*backup*' '*export*' '*.env' '.env*' '*.csv' '*.xlsx' '*.zip' '*.pem' '*.key' 'data.json' 'meta.json'
+                 } | grep -v -E '(^|/)\.env\.example$' | sort -u || true)
           if [ -n "$bad" ]; then echo "::error::Ficheros que no deberían estar en el repo público:"; echo "$bad"; exit 1; fi

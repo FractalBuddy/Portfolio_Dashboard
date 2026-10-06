@@ -6,14 +6,14 @@ name: Keepalive
 # este mismo workflow se desactiva a la vez que el resto. Por eso aquí se hace actividad real:
 # si el último commit de la rama por defecto tiene más de 30 días, se añade un commit mínimo
 # (una fecha en .github/keepalive). Con commits normales o merges de Dependabot no hace nada.
+# Healthchecks.io (heartbeat de update-data.yml) sigue siendo la red de seguridad real si esto no bastara.
 on:
   schedule:
     - cron: '41 5 * * 1'
   workflow_dispatch: {}
 
-permissions:
-  contents: write
-  actions: write
+# Todo a nivel de job (mínimo privilegio): el workflow en sí no concede nada.
+permissions: {}
 
 concurrency:
   group: keepalive
@@ -21,6 +21,9 @@ concurrency:
 
 jobs:
   keepalive:
+    permissions:
+      contents: write   # el commit mínimo
+      actions: write    # reactivar update-data.yml
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
@@ -30,7 +33,13 @@ jobs:
           ref: ${{ github.event.repository.default_branch }}
 
       - name: Commit de actividad si hace >30 días del último
+        env:
+          BRANCH: ${{ github.event.repository.default_branch }}
         run: |
+          set -eu
+          # Si por lo que sea el evento no trae la rama por defecto, se usa la rama que dejó el checkout.
+          BRANCH="${BRANCH:-$(git rev-parse --abbrev-ref HEAD)}"
+          if [ -z "$BRANCH" ] || [ "$BRANCH" = "HEAD" ]; then echo "::error::no se pudo determinar la rama por defecto"; exit 1; fi
           last=$(git log -1 --format=%ct)
           now=$(date +%s)
           age_days=$(( (now - last) / 86400 ))
@@ -39,12 +48,13 @@ jobs:
             echo "Hay actividad reciente: no hace falta commit."
             exit 0
           fi
+          mkdir -p .github
           date -u +%Y-%m-%dT%H:%M:%SZ > .github/keepalive
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .github/keepalive
           git commit -m "chore: keepalive (evita desactivación por inactividad)"
-          git push
+          git push origin "HEAD:refs/heads/${BRANCH}"
 
       - name: Reactivar update-data.yml si estuviera desactivado
         env:

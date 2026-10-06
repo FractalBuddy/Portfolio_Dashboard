@@ -4,9 +4,15 @@ on:
   schedule:
     # 4x/day (UTC): 06:17, 11:17, 15:17, 20:17 (minuto «feo» a propósito: los cron en :00 son los que más retrasa GitHub).
     - cron: '17 6,11,15,20 * * *'
-  workflow_dispatch: {}   # manual run from the Actions tab
+  workflow_dispatch:   # ejecución manual desde la pestaña Actions
+    inputs:
+      allow_regression:
+        description: 'Publicar aunque el feed sea peor que el anterior (símbolos desaparecidos, histórico más corto, NAV perdido, tamaño). Úsalo tras cambiar a propósito la lista de símbolos; las reglas absolutas siguen bloqueando.'
+        type: boolean
+        default: false
 
-# Por defecto TODO solo lectura. Solo el job `publish` (que no instala ni ejecuta código de terceros) recibe contents: write.
+# Por defecto TODO solo lectura. Solo el job `publish` recibe contents: write, y solo ejecuta código de este repo
+# (scripts/sanity_check.py, solo biblioteca estándar): nunca instala ni ejecuta paquetes de terceros.
 permissions:
   contents: read
 
@@ -20,6 +26,7 @@ concurrency:
 jobs:
   fetch:
     # Instala dependencias flotantes (yfinance...) y ejecuta código de terceros: por eso NO tiene permiso de escritura ni secretos salvo FRED.
+    # Su salida (data.json) se trata como NO fiable: la valida el job `publish` antes de publicar.
     permissions:
       contents: read
     runs-on: ubuntu-24.04
@@ -41,59 +48,17 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # Feed publicado anteriormente (repo público, sin token). Solo lo usa el script para reutilizar tipos/IPC
+      # (marcados stale) si FRED falla. Si no existe (primer run, rama borrada) o falla la descarga: '{}' y listo.
+      - name: Download previous feed (for FRED fallback)
+        run: |
+          curl -fsS --max-time 60 --retry 2 -o prev.json "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/data/data.json" || echo '{}' > prev.json
+
       - name: Fetch market data
         env:
           FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          PREV_FEED_PATH: prev.json
         run: python scripts/fetch_market_data.py
-
-      # Refuse to publish anything that isn't a sane data.json: a run that "succeeds" but
-      # produced an empty/partial file must never overwrite the last good data.
-      - name: Sanity-check output
-        env:
-          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
-        run: |
-          python - <<'PY'
-          import json, os
-          d = json.load(open("data.json"))
-          m = json.load(open("meta.json"))
-          def with_hist(k):
-              return sum(1 for x in d.get(k, []) if x.get("history"))
-          assert len(d.get("indices", [])) >= 5, "too few indices"
-          assert len(d.get("stocks", [])) >= 10, "too few stocks"
-          assert with_hist("indices") >= 0.7 * len(d["indices"]), "most indices have no history (Yahoo throttled?)"
-          assert with_hist("stocks") >= 0.7 * len(d["stocks"]), "most stocks have no history (Yahoo throttled?)"
-          priced = sum(1 for x in d["stocks"] if x.get("price") is not None)
-          assert priced >= 0.7 * len(d["stocks"]), "most stocks have no price (%d/%d)" % (priced, len(d["stocks"]))
-          bm = d.get("benchmarks", {})
-          assert len(bm.get("sp500", [])) >= 30, "benchmark S&P 500 too short"
-          assert len(d.get("commodities", [])) >= 3 and len(d.get("forex", [])) >= 3, "commodities/forex too small"
-          assert len(d.get("market_mood", {})) >= 1, "market mood empty"
-          assert any(d.get("news", {}).get(k) for k in ("general", "positions")), "no news at all"
-          assert len(d.get("your_funds", [])) >= 1, "your_funds empty"
-          assert len(d.get("heatmap", [])) >= 10, "country heatmap too small"
-          assert len(d.get("sector_heatmap", [])) >= 8, "sector heatmap too small"
-          if os.environ.get("FRED_API_KEY"):
-              assert len(d.get("rates", [])) >= 1, "FRED key set but no rates"
-              assert len(d.get("cpi", [])) >= 12, "FRED key set but CPI series empty"
-              import datetime as _dt
-              _last = d["cpi"][-1]["date"]
-              if (_dt.date.today() - _dt.date.fromisoformat(_last)).days > 120:
-                  print("::warning::La serie de IPC termina en %s: el modo 'real' del dashboard usa ese último valor para fechas posteriores" % _last)
-          # --- plausibilidad (auditoría 2026-10): Yahoo degradado/congelado no debe pisar el último feed bueno ---
-          import datetime as _dt2
-          _sp = next((x for x in d["indices"] if x.get("symbol") == "^GSPC"), None)
-          assert _sp and _sp.get("history"), "^GSPC missing"
-          assert (_dt2.date.today() - _dt2.date.fromisoformat(_sp["history"][-1]["date"])).days <= 6, "^GSPC history stale (Yahoo frozen?)"
-          _bad = [x.get("symbol") for k in ("indices", "stocks", "commodities", "forex") for x in d.get(k, [])
-                  if not (x.get("price") or 0) > 0 or abs(x.get("change_pct") or 0) > 60]
-          assert len(_bad) <= 2, "implausible price/change: %s" % _bad[:5]
-          assert len(d["stocks"]) >= 25 and len(d.get("funds", [])) >= 3, "universe shrank"
-          assert all(str(n.get("link", "")).startswith(("http://", "https://")) for k in d.get("news", {}) for n in d["news"][k]), "non-http news link"
-          assert m["generated_at"] == d["generated_at"], "meta/data mismatch"
-          # jsDelivr no sirve ficheros de GitHub > 20 MB: fallar aquí evita publicar un feed que dejaría de servirse.
-          assert m["data_bytes"] < 18_000_000, "data.json too large for jsDelivr (%s bytes)" % m["data_bytes"]
-          print("OK:", len(d["indices"]), "indices,", len(d["stocks"]), "stocks,", m["data_bytes"], "bytes")
-          PY
 
       - name: Upload feed artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -107,16 +72,49 @@ jobs:
 
   publish:
     needs: fetch
-    # Único job con permiso de escritura. No hace pip install ni ejecuta scripts del repo: solo baja el artefacto ya validado y lo publica.
+    # Único job con permiso de escritura. No hace pip install ni ejecuta código de terceros: baja el artefacto, lo VALIDA con
+    # scripts/sanity_check.py (sacado del repo, no del artefacto, para que `fetch` no pueda alterar el validador) y solo
+    # entonces publica.
     permissions:
       contents: write
     runs-on: ubuntu-24.04
     timeout-minutes: 10
+    outputs:
+      generated_at: ${{ steps.meta.outputs.generated_at }}
     steps:
+      # Solo scripts/, sin credenciales persistentes en .git/config (el push de más abajo usa el token explícitamente).
+      - name: Check out scripts/ only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts
+          persist-credentials: false
+
       - name: Download feed artifact
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: market-data
+          path: feed
+
+      # Feed publicado anteriormente: base de las reglas de regresión del sanity-check. Sin anterior => '{}' => solo reglas absolutas.
+      - name: Download previous feed
+        run: |
+          curl -fsS --max-time 60 --retry 2 -o prev.json "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/data/data.json" || echo '{}' > prev.json
+
+      # Nunca publicar algo que no sea un data.json sano: un run que "termina bien" pero produjo un feed vacío/parcial/degradado
+      # no debe pisar el último dato bueno. Si falla, el job falla ANTES del push y el heartbeat manda /fail.
+      - name: Sanity-check feed
+        env:
+          FRED_KEY_SET: ${{ secrets.FRED_API_KEY != '' }}
+          SANITY_ALLOW_REGRESSION: ${{ inputs.allow_regression }}
+        run: python3 scripts/sanity_check.py --data feed/data.json --meta feed/meta.json --prev prev.json
+
+      # generated_at (ya validado: coincide en data.json y meta.json) se pasa a verify-cdn como salida del job.
+      - name: Read generated_at
+        id: meta
+        run: |
+          ga=$(python3 -c 'import json;print(json.load(open("feed/meta.json"))["generated_at"])')
+          case "$ga" in ""|*[!0-9A-Za-z:.+-]*) echo "::error::generated_at con formato inesperado"; exit 1;; esac
+          echo "generated_at=$ga" >> "$GITHUB_OUTPUT"
 
       # The feed lives on its OWN orphan branch (`data`) that is replaced by a single fresh
       # commit on every run, instead of adding a ~0.4MB commit to `main` 4x/day forever.
@@ -129,36 +127,64 @@ jobs:
         run: |
           set -euo pipefail
           mkdir /tmp/publish
-          cp data.json meta.json /tmp/publish/
+          cp feed/data.json feed/meta.json /tmp/publish/
           cd /tmp/publish
           git init -q -b data
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add data.json meta.json
           git commit -q -m "Market data $(date -u +%Y-%m-%dT%H:%M:%SZ)"
-          git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data
+          # Un fallo transitorio de red no debe tirar el run: el force-push es idempotente, se reintenta 3 veces.
+          ok=0
+          for i in 1 2 3; do
+            if git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data; then ok=1; break; fi
+            echo "::warning::git push falló (intento $i/3)"
+            if [ "$i" -lt 3 ]; then sleep 5; fi
+          done
+          if [ "$ok" -ne 1 ]; then echo "::error::no se pudo publicar la rama data tras 3 intentos"; exit 1; fi
 
+  # Purga y verificación de jsDelivr, FUERA del camino crítico: el dato ya está publicado en la rama `data` y no hay nada
+  # que hacer si el CDN va con retraso (cachea ramas hasta ~12 h). continue-on-error + no está en el `needs` del heartbeat:
+  # un CDN lento nunca marca el run como fallido ni dispara un /fail falso.
+  verify-cdn:
+    needs: publish
+    continue-on-error: true
+    permissions: {}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
       - name: Purge jsDelivr CDN cache and verify
+        env:
+          WANT: ${{ needs.publish.outputs.generated_at }}
+          HC: ${{ secrets.HC_UPDATE_URL }}
         run: |
-          # best-effort: NO hace fallar el job (jsDelivr cachea ramas ~12 h y el purge a veces falla), pero comprueba que el CDN
-          # sirve ya el meta.json nuevo y, si no, deja un ::warning:: visible en el resumen del run.
+          # Best-effort: siempre termina con exit 0; si el CDN sigue desfasado deja un ::warning:: y un ping informativo (/log).
           set -u
-          want=$(python3 -c 'import json;print(json.load(open("meta.json"))["generated_at"])')
+          if [ -z "$WANT" ]; then echo "::warning::sin generated_at esperado: no se verifica el CDN"; exit 0; fi
           for f in data.json meta.json; do
             echo "purge $f:"
             curl -sS --max-time 30 "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@data/${f}" || echo "(purge fallido, no es crítico)"
             echo
           done
-          for i in 1 2 3 4 5 6; do
-            got=$(curl -fsS --max-time 20 "https://cdn.jsdelivr.net/gh/${GITHUB_REPOSITORY}@data/meta.json?cb=$RANDOM" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("generated_at",""))' 2>/dev/null || true)
-            if [ "$got" = "$want" ]; then echo "CDN sirve la versión nueva ($want)"; exit 0; fi
-            echo "intento $i: CDN sirve '$got' (esperado '$want')"
-            sleep $((i*20))
+          tries=6
+          got=""
+          for i in $(seq 1 "$tries"); do
+            got=$(curl -fsS --max-time 20 "https://cdn.jsdelivr.net/gh/${GITHUB_REPOSITORY}@data/meta.json?cb=$RANDOM" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("generated_at",""))' 2>/dev/null | tr -d '\r\n' | cut -c1-64 || true)
+            if [ "$got" = "$WANT" ]; then echo "CDN sirve la versión nueva ($WANT)"; exit 0; fi
+            echo "intento $i/$tries: CDN sirve '$got' (esperado '$WANT')"
+            # sin dormir tras el último intento
+            if [ "$i" -lt "$tries" ]; then sleep $((i*20)); fi
           done
-          echo "::warning::jsDelivr sigue sirviendo un meta.json antiguo tras 6 intentos (la caché de rama puede tardar hasta ~12 h); el dashboard se pondrá al día solo."
+          msg="jsDelivr sigue sirviendo un meta.json antiguo ('${got:-vacío}', esperado '$WANT') tras $tries intentos"
+          echo "::warning::${msg}; la caché de rama puede tardar hasta ~12 h y el dashboard se pondrá al día solo."
+          if [ -n "${HC:-}" ]; then
+            curl -fsS -m 10 --retry 3 --retry-all-errors --data-raw "cdn-stale: ${msg}" "${HC%/}/log" >/dev/null || echo "::warning::no se pudo enviar el aviso informativo a Healthchecks (/log)"
+          fi
+          exit 0
 
   # Latido para Healthchecks.io: avisa si el workflow FALLA, se CANCELA, agota el timeout o deja de ejecutarse del todo
   # (cron desactivado, scheduler caído). La URL va en el secreto HC_UPDATE_URL (nunca en el repo, que es público).
+  # Solo depende de fetch y publish: el desfase del CDN (verify-cdn) no cuenta como fallo.
   heartbeat:
     needs: [fetch, publish]
     if: ${{ always() }}
@@ -172,7 +198,10 @@ jobs:
           FETCH: ${{ needs.fetch.result }}
           PUBLISH: ${{ needs.publish.result }}
         run: |
-          [ -n "$HC" ] || exit 0
+          if [ -z "$HC" ]; then
+            echo "::warning::HC_UPDATE_URL está vacío o no existe: no se avisa a Healthchecks y nadie se enterará si el workflow falla."
+            exit 0
+          fi
           HC="${HC%/}"
           if [ "$FETCH" = "success" ] && [ "$PUBLISH" = "success" ]; then url="$HC"; else url="$HC/fail"; fi
           curl -fsS -m 10 --retry 5 --retry-all-errors "$url" >/dev/null
