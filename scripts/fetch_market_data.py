@@ -1114,6 +1114,66 @@ def cnn_put_call_ratio(block):
         return None
 
 
+LIDO_API = "https://eth-api.lido.fi/v1/protocol/steth/apr"
+
+
+def parse_lido_apr(last_json, sma_json):
+    """Lido's /apr/last and /apr/sma responses -> feed dict, or None if `last` is missing/implausible.
+    `apr` is Lido's own figure (linear annualisation of the latest oracle rebase), in %; the SMA is the 7-day mean.
+    Pure function (no network) so it can be tested; never raises."""
+    try:
+        d = last_json["data"]
+        apr = float(d["apr"])
+        if not (0 < apr < 50):
+            return None
+        out = {"apr": round(apr, 3), "as_of": int(d["timeUnix"]), "source": "lido"}
+    except Exception:
+        return None
+    try:
+        sma = float(sma_json["data"]["smaApr"])
+        if 0 < sma < 50:
+            out["apr_sma7"] = round(sma, 3)
+    except Exception:
+        pass
+    return out
+
+
+def build_staking(prev=None):
+    """Public staking rates for the feed (rates only: never amounts or balances). Currently ETH via Lido (keyless
+    public API). If the call fails and the previous feed had a value, it is reused flagged `stale`."""
+    staking = {}
+    try:
+        headers = {"User-Agent": "personal-portfolio-dashboard/1.0"}
+        last = requests.get(f"{LIDO_API}/last", headers=headers, timeout=15)
+        last.raise_for_status()
+        sma_json = None
+        try:
+            sma = requests.get(f"{LIDO_API}/sma", headers=headers, timeout=15)
+            sma.raise_for_status()
+            sma_json = sma.json()
+        except Exception as e:
+            print(f"  ! lido apr/sma failed (se sigue solo con apr/last): {e}", file=sys.stderr)
+        parsed = parse_lido_apr(last.json(), sma_json)
+        if parsed:
+            staking["eth_lido"] = parsed
+        else:
+            print("  ! lido apr: respuesta inesperada o fuera de rango", file=sys.stderr)
+    except Exception as e:
+        print(f"  ! lido apr failed: {type(e).__name__}: {e}", file=sys.stderr)
+    if "eth_lido" not in staking:
+        try:
+            old = ((prev or {}).get("staking") or {}).get("eth_lido")
+            if isinstance(old, dict) and isinstance(old.get("apr"), (int, float)):
+                old = dict(old)
+                old["stale"] = True
+                old["stale_since"] = old.get("stale_since") or (str((prev or {}).get("generated_at", ""))[:10] or None)
+                staking["eth_lido"] = old
+                print("  ! lido apr: se reutiliza el valor del feed anterior (stale)", file=sys.stderr)
+        except Exception:
+            pass
+    return staking
+
+
 def build_market_mood():
     """VIX (volatility) + its 50-day moving average via yfinance, the crypto Fear & Greed
     Index via alternative.me (free, public, no key), and CNN's stock-market Fear & Greed
@@ -1260,6 +1320,8 @@ def main():
     benchmarks = build_benchmarks()
     print("Fetching market mood (VIX, Fear & Greed)...")
     market_mood = build_market_mood()
+    print("Fetching staking rates (Lido)...")
+    staking = build_staking(_load_prev_feed())
 
     data = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1280,6 +1342,7 @@ def main():
         },
         "benchmarks": benchmarks,
         "market_mood": market_mood,
+        "staking": staking,
     }
     data = sanitize_for_json(data)
 
