@@ -297,3 +297,122 @@ def test_parse_num_y_sanitize():
     assert fm._parse_num("1,234.56") == 1234.56 and fm._parse_num("12,3000") == 12.3 and fm._parse_num("1.2.3") is None
     assert fm._parse_signed("-0.85") == -0.85 and fm._parse_signed("+1.5") == 1.5 and fm._parse_signed("0.8.0") is None
     assert fm.sanitize_for_json({"a": [float("nan"), float("inf"), 1.5]}) == {"a": [None, None, 1.5]}
+
+
+# ============================================================ Altcoin Season Index
+def _coin(i, symbol=None, name=None, price=1.0):
+    return {"id": f"coin{i}", "symbol": symbol or f"c{i}", "name": name or f"Coin {i}", "current_price": price}
+
+
+BTC = {"id": "bitcoin", "symbol": "btc", "name": "Bitcoin", "current_price": 100000.0}
+
+
+def test_altcoin_season_cuenta_las_que_superan_a_btc_y_excluye_stables_y_envueltas():
+    # 60 altcoins reales + 5 que NO cuentan (2 stables por símbolo/id, 1 envuelta por nombre, 1 por id de categoría...)
+    alts = [_coin(i) for i in range(60)]
+    junk = [_coin(900, "usdt", "Tether"), _coin(901, "wbtc", "Wrapped Bitcoin"), _coin(902, "zzz", "Wrapped Foo"),
+            _coin(903, "abc", "Staked Thing"), _coin(904, "okc", "OK Coin")]
+    coins = [BTC] + junk[:4] + alts[:20] + [junk[4]] + alts[20:]
+    changes = {"BTC": 10.0}
+    for i in range(60):
+        changes[f"c{i}"] = 20.0 if i < 30 else 5.0   # las 50 primeras: 30 superan a BTC, 20 no
+    changes["okc"] = 99.0                           # esta se excluye por id de categoría y no debe contar
+    calls = []
+
+    def change_fn(sym, price):
+        calls.append(sym)
+        return changes[sym.upper() if sym.upper() in changes else sym]
+
+    r = fm.compute_altcoin_season(coins, {"coin904"}, change_fn=change_fn)
+    assert r["total"] == 50 and r["outperforming"] == 30 and r["value"] == 60
+    assert r["btc_change_pct"] == 10.0 and r["window_days"] == 90
+    assert not ({"usdt", "wbtc", "zzz", "abc", "okc"} & set(calls))   # ni se consultan
+    assert "c50" not in calls                                          # se para en 50 altcoins
+
+
+def test_altcoin_season_empate_con_btc_no_cuenta_como_superar():
+    coins = [BTC] + [_coin(i) for i in range(40)]
+    r = fm.compute_altcoin_season(coins, set(), change_fn=lambda s, p: 10.0)
+    assert r["outperforming"] == 0 and r["value"] == 0
+
+
+def test_altcoin_season_sustituye_las_monedas_cuyo_ticker_no_se_puede_verificar():
+    coins = [BTC] + [_coin(i) for i in range(70)]
+    bad = {f"c{i}" for i in range(0, 70, 3)}               # un tercio sin dato fiable en Yahoo
+    r = fm.compute_altcoin_season(coins, set(), change_fn=lambda s, p: None if s in bad or s == "xx" else (50.0 if s != "BTC" else 0.0))
+    assert r["total"] == 46   # 70 candidatas - 24 sin dato fiable
+    assert r["value"] == 100
+
+
+def test_altcoin_season_sin_btc_o_sin_suficientes_monedas_devuelve_none():
+    assert fm.compute_altcoin_season([_coin(1)], set(), change_fn=lambda s, p: 1.0) is None
+    assert fm.compute_altcoin_season([BTC] + [_coin(i) for i in range(10)], set(), change_fn=lambda s, p: 1.0) is None
+    assert fm.compute_altcoin_season([BTC] + [_coin(i) for i in range(60)], set(), change_fn=lambda s, p: None if s == "BTC" else 1.0) is None
+
+
+def test_altcoin_season_timeout_corta_y_usa_lo_acumulado():
+    coins = [BTC] + [_coin(i) for i in range(60)]
+    n = {"k": 0}
+
+    def change_fn(sym, price):
+        if sym == "BTC":
+            return 0.0
+        n["k"] += 1
+        if n["k"] > 35:
+            raise TimeoutError("sin presupuesto")
+        return 5.0
+
+    r = fm.compute_altcoin_season(coins, set(), change_fn=change_fn)
+    assert r["total"] == 35 and r["value"] == 100
+
+
+def _hist(days, last, base_at_cutoff, last_date="2026-10-10", gap_days=0):
+    import pandas as pd
+    idx = pd.date_range(end=last_date, periods=days, freq="D", tz="UTC")
+    vals = [base_at_cutoff] * days
+    vals[-1] = last
+    df = pd.DataFrame({"Close": vals}, index=idx)
+    if gap_days:   # quita las barras de alrededor del corte (hueco en los datos)
+        cutoff = idx[-1] - dt.timedelta(days=fm.ALT_WINDOW_DAYS)
+        df = df[(df.index < cutoff - dt.timedelta(days=gap_days)) | (df.index > cutoff + dt.timedelta(days=gap_days))]
+    return df
+
+
+def test_alt_change_pct_calcula_a_90_dias(monkeypatch):
+    monkeypatch.setattr(fm, "yf_history", lambda *a, **k: _hist(130, 150.0, 100.0))
+    assert fm._alt_change_pct("eth", 150.0) == pytest.approx(50.0)
+
+
+def test_alt_change_pct_descarta_ticker_de_otra_moneda_por_precio(monkeypatch):
+    monkeypatch.setattr(fm, "yf_history", lambda *a, **k: _hist(130, 150.0, 100.0))
+    assert fm._alt_change_pct("eth", 3.0) is None            # Yahoo dice 150, CoinGecko 3: no es la misma moneda
+    assert fm._alt_change_pct("eth", 140.0) is not None      # dentro del 15 %
+
+
+def test_alt_change_pct_sin_historial_suficiente_o_con_hueco(monkeypatch):
+    monkeypatch.setattr(fm, "yf_history", lambda *a, **k: _hist(40, 150.0, 100.0))   # listada hace <90 d
+    assert fm._alt_change_pct("new", 150.0) is None
+    monkeypatch.setattr(fm, "yf_history", lambda *a, **k: _hist(130, 150.0, 100.0, gap_days=10))
+    assert fm._alt_change_pct("gap", 150.0) is None
+
+
+def test_build_altcoin_season_reutiliza_el_anterior_marcado_stale(monkeypatch):
+    monkeypatch.setattr(fm, "_cg_markets", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("429")))
+    monkeypatch.setattr(fm.time, "sleep", lambda s: None)
+    prev = {"generated_at": "2026-10-10T20:17:00+00:00", "market_mood": {"altcoin_season": {"value": 42, "total": 50, "outperforming": 21}}}
+    r = fm.build_altcoin_season(prev)
+    assert r["value"] == 42 and r["stale"] is True and r["stale_since"] == "2026-10-10"
+    assert fm.build_altcoin_season({}) is None
+
+
+def test_build_altcoin_season_no_deja_disparado_el_circuit_breaker_de_yahoo(monkeypatch):
+    monkeypatch.setattr(fm.time, "sleep", lambda s: None)
+    monkeypatch.setattr(fm, "_cg_markets", lambda *a, **k: [BTC] + [_coin(i) for i in range(5)])
+    fm._YF_FAIL_STREAK = 2
+
+    def boom(coins, ids):
+        fm._YF_FAIL_STREAK = 40
+        return None
+    monkeypatch.setattr(fm, "compute_altcoin_season", boom)
+    fm.build_altcoin_season({})
+    assert fm._YF_FAIL_STREAK == 2
