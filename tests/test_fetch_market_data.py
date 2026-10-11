@@ -425,3 +425,47 @@ def test_cnn_put_call_ratio_toma_el_ultimo_punto_y_es_tolerante():
     assert fm.cnn_put_call_ratio({"data": [{"y": "abc"}]}) is None
     assert fm.cnn_put_call_ratio({"data": [{"y": 63.0}]}) is None               # un score colado como ratio: inverosímil
     assert fm.cnn_put_call_ratio(None) is None
+
+
+LIDO_LAST = {"data": {"timeUnix": 1791721319, "apr": 2.203}, "meta": {"symbol": "stETH"}}
+LIDO_SMA = {"data": {"aprs": [{"timeUnix": 1, "apr": 2.2}], "smaApr": 2.2533}, "meta": {"symbol": "stETH"}}
+
+
+def test_parse_lido_apr_formato_real_y_tolerancia():
+    assert fm.parse_lido_apr(LIDO_LAST, LIDO_SMA) == {"apr": 2.203, "as_of": 1791721319, "source": "lido", "apr_sma7": 2.253}
+    assert "apr_sma7" not in fm.parse_lido_apr(LIDO_LAST, None)                    # sin SMA seguimos con el último
+    assert "apr_sma7" not in fm.parse_lido_apr(LIDO_LAST, {"data": {"smaApr": 400}})  # SMA inverosímil: se descarta
+    assert fm.parse_lido_apr({"data": {"timeUnix": 1, "apr": 0}}, None) is None      # APR 0 / fuera de rango
+    assert fm.parse_lido_apr({"data": {"timeUnix": 1, "apr": 99}}, None) is None
+    assert fm.parse_lido_apr({"foo": 1}, None) is None
+    assert fm.parse_lido_apr(None, None) is None
+
+
+class _FakeResp:
+    def __init__(self, payload, fail=False):
+        self.payload, self.fail = payload, fail
+    def raise_for_status(self):
+        if self.fail:
+            raise RuntimeError("HTTP 500")
+    def json(self):
+        return self.payload
+
+
+def test_build_staking_ok_y_reutiliza_stale_si_falla(monkeypatch):
+    monkeypatch.setattr(fm.requests, "get", lambda url, **kw: _FakeResp(LIDO_LAST if url.endswith("/last") else LIDO_SMA))
+    assert fm.build_staking({})["eth_lido"]["apr"] == 2.203
+
+    def boom(url, **kw):
+        raise RuntimeError("sin red")
+    monkeypatch.setattr(fm.requests, "get", boom)
+    prev = {"generated_at": "2026-10-10T06:00:00+00:00", "staking": {"eth_lido": {"apr": 2.3, "as_of": 5, "source": "lido"}}}
+    out = fm.build_staking(prev)["eth_lido"]
+    assert out["apr"] == 2.3 and out["stale"] is True and out["stale_since"] == "2026-10-10"
+    assert fm.build_staking({}) == {}                                              # sin valor previo: sin sección
+    assert "stale" not in prev["staking"]["eth_lido"]                              # no muta el feed previo
+
+
+def test_build_staking_sma_caida_no_tumba_el_apr(monkeypatch):
+    monkeypatch.setattr(fm.requests, "get", lambda url, **kw: _FakeResp(LIDO_LAST) if url.endswith("/last") else _FakeResp(None, fail=True))
+    out = fm.build_staking({})["eth_lido"]
+    assert out["apr"] == 2.203 and "apr_sma7" not in out
