@@ -938,6 +938,171 @@ def build_your_funds():
     return out
 
 
+# ---------------------------------------------------------------------------
+# Altcoin Season Index: % of the top-N altcoins that beat Bitcoin over the last 90 days.
+# Same rule as blockchaincenter.net: stablecoins and wrapped / staked / asset-backed tokens
+# are NOT altcoins for this purpose (they track something else, so counting them skews it).
+# Computed here (not in the browser) because CoinGecko's API has no 90-day change field:
+# `price_change_percentage` only accepts 1h/24h/7d/14d/30d/200d/1y, so the old client-side
+# calculation always came back empty. The coin list + market caps come from CoinGecko
+# (1 + a few category calls, no key), the 90-day prices from Yahoo (`SYM-USD`), which the
+# rest of this script already uses.
+# ---------------------------------------------------------------------------
+ALT_WINDOW_DAYS = 90
+ALT_TOP_N = 50            # altcoins counted (BTC is the yardstick, not part of the count)
+ALT_MIN_COINS = 30        # fewer usable coins than this => no index (better "—" than a noisy number)
+ALT_MAX_TRIES = 90        # cap on Yahoo lookups (each failed ticker costs a request)
+ALT_PRICE_TOLERANCE = 0.15  # Yahoo's last close must be within 15 % of CoinGecko's price, else the ticker is a different coin
+ALT_EXCLUDE_CATEGORIES = ("stablecoins", "wrapped-tokens", "liquid-staking-tokens", "tokenized-gold")
+_ALT_EXCLUDE_SYMBOLS = {
+    # stablecoins
+    "USDT", "USDC", "DAI", "USDE", "USDS", "FDUSD", "PYUSD", "TUSD", "USD1", "USDD", "USDG", "RLUSD", "FRAX",
+    "GUSD", "USDP", "LUSD", "USDTB", "BUIDL", "USYC", "BFUSD", "USDF", "USDY", "EURC", "EURS", "CRVUSD", "GHO",
+    "SUSDS", "SUSDE", "USDC.E", "BSC-USD", "USDX", "USDT0", "USD0",
+    # wrapped / staked / bridged / asset-backed
+    "WBTC", "WETH", "STETH", "WSTETH", "WEETH", "CBBTC", "CBETH", "RETH", "WBETH", "BTCB", "EETH", "LBTC",
+    "SOLVBTC", "XAUT", "PAXG", "JITOSOL", "MSOL", "BNSOL", "WSOL", "METH", "OSETH", "ETHX", "SWETH", "TBTC",
+}
+_ALT_EXCLUDE_NAME_RE = re.compile(r"\b(wrapped|staked|bridged|restaked)\b|stablecoin", re.I)
+_CG_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)", "Accept": "application/json"}
+
+
+def _cg_markets(params, tries=3):
+    """GET CoinGecko /coins/markets (public, no key) with retries on 429/5xx. Returns the JSON list or raises."""
+    last = None
+    for i in range(tries):
+        try:
+            res = requests.get("https://api.coingecko.com/api/v3/coins/markets", params=params,
+                               headers=_CG_HEADERS, timeout=20)
+            if res.status_code in (429, 500, 502, 503, 504) and i < tries - 1:
+                time.sleep(8 * (i + 1)); continue
+            res.raise_for_status()
+            data = res.json()
+            if not isinstance(data, list):
+                raise ValueError("respuesta inesperada de CoinGecko")
+            return data
+        except (requests.RequestException, ValueError) as e:
+            last = e
+            if i < tries - 1:
+                time.sleep(4 * (i + 1))
+    raise last
+
+
+def _alt_excluded_ids():
+    """Ids of coins CoinGecko files under stablecoins / wrapped / liquid-staking / tokenized-gold. Best-effort:
+    a category call that fails just contributes nothing (the static symbol list still covers the big ones)."""
+    ids = set()
+    for cat in ALT_EXCLUDE_CATEGORIES:
+        try:
+            rows = _cg_markets({"vs_currency": "usd", "category": cat, "order": "market_cap_desc", "per_page": 250, "page": 1})
+            ids.update(str(r.get("id")) for r in rows if isinstance(r, dict) and r.get("id"))
+        except Exception as e:
+            print(f"  ! altcoin season: categoría {cat} no disponible ({type(e).__name__})", file=sys.stderr)
+        time.sleep(2.5)  # sin clave el límite de CoinGecko es bajo: no se le martillea
+    return ids
+
+
+def _alt_is_excluded(coin, excluded_ids):
+    sym = str(coin.get("symbol") or "").upper()
+    return (str(coin.get("id")) in excluded_ids or sym in _ALT_EXCLUDE_SYMBOLS
+            or bool(_ALT_EXCLUDE_NAME_RE.search(str(coin.get("name") or ""))))
+
+
+def _alt_change_pct(symbol, cg_price=None, window=ALT_WINDOW_DAYS):
+    """% change of `symbol`-USD over `window` days from Yahoo daily closes, or None when it can't be trusted:
+    no data, listed less than `window` days ago, or the Yahoo ticker is a different coin than CoinGecko's
+    (last close further than ALT_PRICE_TOLERANCE from CoinGecko's current price)."""
+    hist = yf_history(f"{symbol.upper()}-USD", tries=1, period="130d", interval="1d")
+    hist = hist.dropna(subset=["Close"]) if hist is not None else None
+    if hist is None or hist.empty or len(hist) < window // 2:
+        return None
+    last = float(hist["Close"].iloc[-1])
+    if last <= 0:
+        return None
+    if cg_price:
+        ratio = last / float(cg_price)
+        if not (1 - ALT_PRICE_TOLERANCE <= ratio <= 1 + ALT_PRICE_TOLERANCE):
+            return None
+    cutoff = hist.index[-1] - timedelta(days=window)
+    ref = hist[hist.index <= cutoff]
+    if ref.empty:
+        return None
+    if (cutoff - ref.index[-1]).days > 5:  # the nearest bar is too far from the cutoff: gap in the data
+        return None
+    base = float(ref["Close"].iloc[-1])
+    return (last / base - 1) * 100 if base > 0 else None
+
+
+def compute_altcoin_season(coins, excluded_ids, change_fn=_alt_change_pct):
+    """coins: CoinGecko /coins/markets rows (market-cap order). Returns the index dict or None.
+    Bitcoin is the yardstick; the first ALT_TOP_N non-excluded coins with a trustworthy 90-day change are counted
+    (a coin whose Yahoo ticker doesn't check out is skipped and the next one takes its place)."""
+    btc = next((c for c in coins if str(c.get("id")) == "bitcoin"), None)
+    if not btc:
+        return None
+    btc_change = change_fn("BTC", btc.get("current_price"))
+    if btc_change is None:
+        return None
+    changes, tries = [], 0
+    for c in coins:
+        if len(changes) >= ALT_TOP_N or tries >= ALT_MAX_TRIES:
+            break
+        if str(c.get("id")) == "bitcoin" or _alt_is_excluded(c, excluded_ids):
+            continue
+        sym = str(c.get("symbol") or "").strip()
+        if not sym:
+            continue
+        tries += 1
+        try:
+            ch = change_fn(sym, c.get("current_price"))
+        except TimeoutError:
+            break  # presupuesto de tiempo agotado: con lo que haya
+        except Exception:
+            ch = None
+        if ch is not None and math.isfinite(ch):
+            changes.append(ch)
+    if len(changes) < ALT_MIN_COINS:
+        print(f"  ! altcoin season: solo {len(changes)} monedas utilizables (mínimo {ALT_MIN_COINS}); no se publica", file=sys.stderr)
+        return None
+    beating = sum(1 for ch in changes if ch > btc_change)
+    return {
+        "value": int(round(beating / len(changes) * 100)),
+        "outperforming": beating,
+        "total": len(changes),
+        "window_days": ALT_WINDOW_DAYS,
+        "btc_change_pct": round(btc_change, 1),
+        "source": "coingecko+yahoo",
+    }
+
+
+def build_altcoin_season(prev=None):
+    """Altcoin Season Index for the feed, or None. If today's calculation fails and the previous feed has one, that
+    one is reused flagged `stale` (it moves slowly; better than blanking the card)."""
+    global _YF_FAIL_STREAK
+    streak = _YF_FAIL_STREAK  # many unmapped tickers would trip the Yahoo circuit breaker for the rest of the run
+    try:
+        coins = _cg_markets({"vs_currency": "usd", "order": "market_cap_desc", "per_page": 100, "page": 1})
+        time.sleep(2.5)
+        result = compute_altcoin_season(coins, _alt_excluded_ids())
+        if result:
+            return result
+    except Exception as e:
+        print(f"  ! altcoin season failed: {type(e).__name__}: {e}", file=sys.stderr)
+    finally:
+        _YF_FAIL_STREAK = streak
+    try:
+        old = (prev or {}).get("market_mood", {}).get("altcoin_season")
+        if isinstance(old, dict) and isinstance(old.get("value"), (int, float)):
+            old = dict(old)
+            old["stale"] = True
+            old["stale_since"] = old.get("stale_since") or (str((prev or {}).get("generated_at", ""))[:10] or None)
+            print("  ! altcoin season: se reutiliza el valor del feed anterior (stale)", file=sys.stderr)
+            return old
+    except Exception:
+        pass
+    return None
+
+
 def build_market_mood():
     """VIX (volatility) + its 50-day moving average via yfinance, the crypto Fear & Greed
     Index via alternative.me (free, public, no key), and CNN's stock-market Fear & Greed
@@ -965,6 +1130,10 @@ def build_market_mood():
         res.raise_for_status()
         d = res.json()["data"][0]
         mood["crypto_fear_greed"] = {"value": int(d["value"]), "classification": d["value_classification"]}
+        try:
+            mood["crypto_fear_greed"]["timestamp"] = int(d["timestamp"])  # unix, 00:00 UTC del día de la lectura (alternative.me)
+        except (KeyError, TypeError, ValueError):
+            pass
     except Exception as e:
         print(f"  ! fear & greed fetch failed: {e}", file=sys.stderr)
 
@@ -991,6 +1160,10 @@ def build_market_mood():
         if safe: mood["safe_haven_demand"] = safe
     except Exception as e:
         print(f"  ! CNN fear & greed fetch failed (unofficial endpoint, best-effort): {e}", file=sys.stderr)
+
+    alt = build_altcoin_season(_load_prev_feed())
+    if alt:
+        mood["altcoin_season"] = alt
 
     return mood
 
