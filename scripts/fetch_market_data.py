@@ -361,6 +361,93 @@ def attach_histories(items):
     return items
 
 
+PROFILE_FIELDS = ("sector", "industry", "employees", "market_cap", "enterprise_value", "cap_currency")
+
+
+def parse_stock_profile(info):
+    """Pure parser of yfinance's Ticker.info (the data behind Yahoo's Profile / Statistics pages).
+    Returns {sector, industry, employees, market_cap, enterprise_value, cap_currency} with ONLY the fields that
+    are present and plausible (a missing/garbage field is simply omitted, never null-filled), or {} if info is
+    not a dict. Market cap and EV keep Yahoo's own figures (the dashboard formats them like Yahoo: 3.21T, 52.37B)."""
+    out = {}
+    if not isinstance(info, dict):
+        return out
+
+    def _num(v, positive=True):
+        if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+            return None
+        if positive and v <= 0:
+            return None
+        return v
+
+    for key, src in (("sector", "sector"), ("industry", "industry")):
+        v = info.get(src)
+        if isinstance(v, str) and v.strip() and len(v.strip()) <= 80:
+            out[key] = v.strip()
+    emp = _num(info.get("fullTimeEmployees"))
+    if emp is not None and emp < 5_000_000:
+        out["employees"] = int(emp)
+    cap = _num(info.get("marketCap"))
+    if cap is not None:
+        out["market_cap"] = int(cap)
+        ev = _num(info.get("enterpriseValue"), positive=False)  # a net-cash giant can have a (rare) negative EV
+        if ev is not None and ev != 0:
+            out["enterprise_value"] = int(ev)
+    cur = info.get("currency")
+    if "market_cap" in out and isinstance(cur, str) and re.fullmatch(r"[A-Za-z]{3}", cur.strip()):
+        out["cap_currency"] = cur.strip().upper()
+    return out
+
+
+def fetch_stock_profile(symbol):
+    """One Yahoo quoteSummary call (Ticker.info) -> parse_stock_profile(); {} on any failure (caller falls back)."""
+    if time.monotonic() > _DEADLINE:
+        return {}
+    for i in range(2):
+        try:
+            prof = parse_stock_profile(yf.Ticker(symbol).info)
+            if prof:
+                return prof
+        except Exception as e:
+            print(f"  ! profile attempt {i + 1} failed for {symbol}: {type(e).__name__}: {e}", file=sys.stderr)
+        if i == 0:
+            time.sleep(random.uniform(0.5, 1.5))
+    return {}
+
+
+def attach_profiles(stocks, prev=None, fetch=fetch_stock_profile, max_fail_streak=5):
+    """Adds sector / industry / employees / market cap / EV (+ `profile_as_of`) to every stock. These move slowly:
+    when Yahoo fails for a symbol, the previous feed's values are kept (with their OLD `profile_as_of`) instead of
+    blanking the dashboard. After `max_fail_streak` consecutive failures Yahoo is skipped for the rest of the run
+    (rate limit): everything else still falls back to the previous values. Never raises."""
+    prev_by_sym = {s.get("symbol"): s for s in ((prev or {}).get("stocks") or []) if isinstance(s, dict)}
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    streak, fresh, kept = 0, 0, 0
+    for s in stocks:
+        prof = {}
+        if streak < max_fail_streak:
+            try:
+                prof = fetch(s["symbol"])
+            except Exception as e:
+                print(f"  ! profile failed for {s.get('symbol')}: {e}", file=sys.stderr)
+            streak = 0 if prof else streak + 1
+            time.sleep(0.25)
+        if prof:
+            s.update(prof)
+            s["profile_as_of"] = today
+            fresh += 1
+            continue
+        old = prev_by_sym.get(s.get("symbol")) or {}
+        got = {k: old[k] for k in PROFILE_FIELDS if k in old}
+        if got:
+            s.update(got)
+            if isinstance(old.get("profile_as_of"), str):
+                s["profile_as_of"] = old["profile_as_of"]
+            kept += 1
+    print(f"  profiles: {fresh} fresh, {kept} reused from the previous feed, {len(stocks) - fresh - kept} without data")
+    return stocks
+
+
 def _fred_get(params, tries=3):
     """GET a FRED observations con reintentos (5xx/429/timeout transitorios). Lanza la última excepción si todos fallan."""
     last = None
@@ -1304,6 +1391,8 @@ def main():
     stocks = build_list(STOCKS)
     print("Fetching full ('max') + intraday history for each stock (for the detail chart)...")
     stocks = attach_histories(stocks)
+    print("Fetching company profile + market cap / EV for each stock...")
+    stocks = attach_profiles(stocks, _load_prev_feed())
     print("Fetching funds...")
     funds = build_list(FUNDS)
     print("Fetching full ('max') + intraday history for each fund (Explore detail chart)...")
