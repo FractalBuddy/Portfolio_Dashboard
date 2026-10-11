@@ -494,7 +494,8 @@ def test_parse_stock_profile_campos_validos():
             "marketCap": 3_210_000_000_000.0, "enterpriseValue": 3_190_000_000_000, "currency": "usd"}
     assert fm.parse_stock_profile(info) == {
         "sector": "Technology", "industry": "Consumer Electronics", "employees": 164000,
-        "market_cap": 3_210_000_000_000, "enterprise_value": 3_190_000_000_000, "cap_currency": "USD"}
+        "market_cap": 3_210_000_000_000, "enterprise_value": 3_190_000_000_000, "cap_currency": "USD",
+        "dividend_yield": 0.0}  # sin claves de dividendo en info => no paga
 
 
 def test_parse_stock_profile_descarta_basura_sin_rellenar_con_null():
@@ -549,3 +550,74 @@ def test_main_publica_el_perfil_de_las_acciones(tmp_path, monkeypatch):
     fm.main()
     d = json.loads((tmp_path / "data.json").read_text())
     assert d["stocks"][0]["sector"] == "Technology" and d["stocks"][0]["enterprise_value"] == 9
+
+
+def test_parse_stock_profile_ratios_margenes_beta_insiders():
+    info = {"marketCap": 3e12, "trailingPE": 34.512, "forwardPE": 29.1, "enterpriseToEbitda": 24.456,
+            "profitMargins": 0.2704, "operatingMargins": 0.3151, "beta": 1.1049, "heldPercentInsiders": 0.0207}
+    out = fm.parse_stock_profile(info)
+    assert out["pe_trailing"] == 34.51 and out["pe_forward"] == 29.1 and out["ev_ebitda"] == 24.46
+    assert out["profit_margin"] == 27.04 and out["operating_margin"] == 31.51
+    assert out["beta"] == 1.1 and out["insiders_pct"] == 2.07
+
+
+def test_parse_stock_profile_descarta_ratios_invalidos():
+    info = {"marketCap": 1e9, "trailingPE": "Infinity", "forwardPE": -12.0, "enterpriseToEbitda": float("nan"),
+            "profitMargins": 7.0, "operatingMargins": "x", "beta": 99, "heldPercentInsiders": 1.7}
+    out = fm.parse_stock_profile(info)
+    for k in ("pe_trailing", "pe_forward", "ev_ebitda", "profit_margin", "operating_margin", "beta", "insiders_pct"):
+        assert k not in out
+    # margen negativo (pérdidas) sí es válido
+    assert fm.parse_stock_profile({"marketCap": 1e9, "profitMargins": -0.35})["profit_margin"] == -35.0
+
+
+def test_parse_stock_profile_dividendos_a_prueba_de_escala():
+    base = {"marketCap": 3e12, "currentPrice": 200.0}
+    # rentabilidad = tasa anual / precio, sin fiarse de la escala de dividendYield (0.44 ó 0.0044)
+    a = fm.parse_stock_profile({**base, "dividendRate": 1.0, "dividendYield": 0.5, "fiveYearAvgDividendYield": 0.62})
+    assert a["dividend_yield"] == 0.5 and a["dividend_rate"] == 1.0 and a["dividend_5y_avg"] == 0.62
+    b = fm.parse_stock_profile({**base, "dividendRate": 1.0, "dividendYield": 0.005})
+    assert b["dividend_yield"] == 0.5
+    # sin tasa: trailingAnnualDividendYield (fracción) y, en último lugar, dividendYield (fracción o porcentaje)
+    assert fm.parse_stock_profile({"marketCap": 1, "trailingAnnualDividendYield": 0.0123})["dividend_yield"] == 1.23
+    assert fm.parse_stock_profile({"marketCap": 1, "dividendYield": 0.0123})["dividend_yield"] == 1.23
+    assert fm.parse_stock_profile({"marketCap": 1, "dividendYield": 3.4})["dividend_yield"] == 3.4
+    # rentabilidades absurdas se descartan
+    assert "dividend_yield" not in fm.parse_stock_profile({**base, "dividendRate": 150.0})
+
+
+def test_parse_stock_profile_no_paga_dividendo():
+    out = fm.parse_stock_profile({"marketCap": 1e12, "currentPrice": 300.0})
+    assert out["dividend_yield"] == 0.0 and "dividend_rate" not in out
+    # sin marketCap (info casi vacío) no se afirma que no paga
+    assert "dividend_yield" not in fm.parse_stock_profile({"sector": "Technology"})
+
+
+def test_parse_stock_profile_estado_de_resultados_y_balance():
+    info = {"marketCap": 1e12, "ebitda": 130_541_000_000.0, "earningsQuarterlyGrowth": 0.1234,
+            "totalCash": 55_372_000_000.0, "totalDebt": 98_186_000_000.0, "financialCurrency": "twd"}
+    out = fm.parse_stock_profile(info)
+    assert out["ebitda"] == 130_541_000_000 and out["quarterly_earnings_growth"] == 12.34
+    assert out["total_cash"] == 55_372_000_000 and out["total_debt"] == 98_186_000_000
+    assert out["financial_currency"] == "TWD"  # divisa del balance (puede diferir de la de cotización)
+
+
+def test_parse_stock_profile_balance_casos_limite():
+    # EBITDA negativo y crecimiento negativo son legítimos; deuda 0 es "sin deuda", no ausencia de dato
+    out = fm.parse_stock_profile({"marketCap": 1e9, "ebitda": -5e7, "earningsQuarterlyGrowth": -0.4,
+                                  "totalCash": 2e8, "totalDebt": 0, "financialCurrency": "USD"})
+    assert out["ebitda"] == -50_000_000 and out["quarterly_earnings_growth"] == -40.0 and out["total_debt"] == 0
+    # basura: se omite, sin rellenar con null; sin divisa válida no se publica la divisa
+    bad = fm.parse_stock_profile({"marketCap": 1e9, "ebitda": float("nan"), "earningsQuarterlyGrowth": 500,
+                                  "totalCash": -3, "totalDebt": "x", "financialCurrency": "dolares"})
+    for k in ("ebitda", "quarterly_earnings_growth", "total_cash", "total_debt", "financial_currency"):
+        assert k not in bad
+    # ebitda == 0 no aporta nada
+    assert "ebitda" not in fm.parse_stock_profile({"marketCap": 1e9, "ebitda": 0})
+
+
+def test_attach_profiles_registra_cobertura_por_campo(capsys):
+    stocks = [{"symbol": "A"}, {"symbol": "B"}]
+    fm.attach_profiles(stocks, fetch=lambda sym: {"pe_trailing": 20.0, "ebitda": 5} if sym == "A" else {"pe_trailing": 15.0})
+    out = capsys.readouterr().out
+    assert "profile coverage (of 2 stocks)" in out and "pe_trailing 2" in out and "ebitda 1" in out and "beta 0" in out
