@@ -469,3 +469,19 @@ def test_build_staking_sma_caida_no_tumba_el_apr(monkeypatch):
     monkeypatch.setattr(fm.requests, "get", lambda url, **kw: _FakeResp(LIDO_LAST) if url.endswith("/last") else _FakeResp(None, fail=True))
     out = fm.build_staking({})["eth_lido"]
     assert out["apr"] == 2.203 and "apr_sma7" not in out
+
+
+def test_build_staking_proveedor_extra_y_fallo_aislado(monkeypatch):
+    # un proveedor nuevo se registra en STAKING_PROVIDERS; si uno falla, los demás siguen publicándose
+    def ok():
+        return {"apr": 4.5, "source": "otro"}
+
+    def roto():
+        raise RuntimeError("API caída")
+    monkeypatch.setattr(fm, "STAKING_PROVIDERS", {"eth_lido": roto, "dot_x": ok})
+    prev = {"generated_at": "2026-10-10T06:00:00+00:00", "staking": {"eth_lido": {"apr": 2.3, "source": "lido"}}}
+    out = fm.build_staking(prev)
+    assert out["dot_x"]["apr"] == 4.5
+    assert out["eth_lido"]["apr"] == 2.3 and out["eth_lido"]["stale"] is True
+    monkeypatch.setattr(fm, "STAKING_PROVIDERS", {"dot_x": roto})
+    assert fm.build_staking({}) == {}
