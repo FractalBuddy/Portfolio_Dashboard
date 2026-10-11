@@ -1115,6 +1115,7 @@ def cnn_put_call_ratio(block):
 
 
 LIDO_API = "https://eth-api.lido.fi/v1/protocol/steth/apr"
+_STAKING_HEADERS = {"User-Agent": "personal-portfolio-dashboard/1.0"}
 
 
 def parse_lido_apr(last_json, sma_json):
@@ -1138,37 +1139,54 @@ def parse_lido_apr(last_json, sma_json):
     return out
 
 
-def build_staking(prev=None):
-    """Public staking rates for the feed (rates only: never amounts or balances). Currently ETH via Lido (keyless
-    public API). If the call fails and the previous feed had a value, it is reused flagged `stale`."""
-    staking = {}
+def fetch_lido_apr():
+    """Keyless public API. Returns the parsed dict or None (the caller handles the stale fallback)."""
+    last = requests.get(f"{LIDO_API}/last", headers=_STAKING_HEADERS, timeout=15)
+    last.raise_for_status()
+    sma_json = None
     try:
-        headers = {"User-Agent": "personal-portfolio-dashboard/1.0"}
-        last = requests.get(f"{LIDO_API}/last", headers=headers, timeout=15)
-        last.raise_for_status()
-        sma_json = None
-        try:
-            sma = requests.get(f"{LIDO_API}/sma", headers=headers, timeout=15)
-            sma.raise_for_status()
-            sma_json = sma.json()
-        except Exception as e:
-            print(f"  ! lido apr/sma failed (se sigue solo con apr/last): {e}", file=sys.stderr)
-        parsed = parse_lido_apr(last.json(), sma_json)
-        if parsed:
-            staking["eth_lido"] = parsed
-        else:
-            print("  ! lido apr: respuesta inesperada o fuera de rango", file=sys.stderr)
+        sma = requests.get(f"{LIDO_API}/sma", headers=_STAKING_HEADERS, timeout=15)
+        sma.raise_for_status()
+        sma_json = sma.json()
     except Exception as e:
-        print(f"  ! lido apr failed: {type(e).__name__}: {e}", file=sys.stderr)
-    if "eth_lido" not in staking:
+        print(f"  ! lido apr/sma failed (se sigue solo con apr/last): {e}", file=sys.stderr)
+    parsed = parse_lido_apr(last.json(), sma_json)
+    if not parsed:
+        print("  ! lido apr: respuesta inesperada o fuera de rango", file=sys.stderr)
+    return parsed
+
+
+# Staking rates published in the public feed (rates only: NEVER amounts or balances), keyed by the name the
+# dashboard looks up (see STAKING_FEED in portfolio.html). To add another coin with a keyless public API: write a
+# `fetch_xxx()` returning {"apr": <percent>, "as_of": <unix>, "source": "<name>", "apr_sma7": <optional>} or None,
+# register it here, and map the coin's CoinGecko id to the key in the dashboard. Coins without a public source
+# are handled in the dashboard with a manual APR instead.
+STAKING_PROVIDERS = {
+    "eth_lido": fetch_lido_apr,
+}
+
+
+def build_staking(prev=None):
+    """`staking` section of the feed: {key: rate dict}. A provider that fails keeps the previous feed's value
+    flagged `stale` (it moves slowly; better than blanking the panel); with no previous value it is omitted."""
+    staking = {}
+    for key, fetch in STAKING_PROVIDERS.items():
         try:
-            old = ((prev or {}).get("staking") or {}).get("eth_lido")
+            parsed = fetch()
+            if parsed:
+                staking[key] = parsed
+        except Exception as e:
+            print(f"  ! staking {key} failed: {type(e).__name__}: {e}", file=sys.stderr)
+        if key in staking:
+            continue
+        try:
+            old = ((prev or {}).get("staking") or {}).get(key)
             if isinstance(old, dict) and isinstance(old.get("apr"), (int, float)):
                 old = dict(old)
                 old["stale"] = True
                 old["stale_since"] = old.get("stale_since") or (str((prev or {}).get("generated_at", ""))[:10] or None)
-                staking["eth_lido"] = old
-                print("  ! lido apr: se reutiliza el valor del feed anterior (stale)", file=sys.stderr)
+                staking[key] = old
+                print(f"  ! staking {key}: se reutiliza el valor del feed anterior (stale)", file=sys.stderr)
         except Exception:
             pass
     return staking
