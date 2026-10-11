@@ -416,3 +416,12 @@ def test_build_altcoin_season_no_deja_disparado_el_circuit_breaker_de_yahoo(monk
     monkeypatch.setattr(fm, "compute_altcoin_season", boom)
     fm.build_altcoin_season({})
     assert fm._YF_FAIL_STREAK == 2
+
+
+def test_cnn_put_call_ratio_toma_el_ultimo_punto_y_es_tolerante():
+    assert fm.cnn_put_call_ratio({"score": 63.2, "rating": "greed", "data": [{"x": 1, "y": 0.9}, {"x": 2, "y": 0.78}]}) == 0.78
+    assert fm.cnn_put_call_ratio({"score": 63.2}) is None                       # sin serie
+    assert fm.cnn_put_call_ratio({"data": []}) is None
+    assert fm.cnn_put_call_ratio({"data": [{"y": "abc"}]}) is None
+    assert fm.cnn_put_call_ratio({"data": [{"y": 63.0}]}) is None               # un score colado como ratio: inverosímil
+    assert fm.cnn_put_call_ratio(None) is None
