@@ -361,7 +361,10 @@ def attach_histories(items):
     return items
 
 
-PROFILE_FIELDS = ("sector", "industry", "employees", "market_cap", "enterprise_value", "cap_currency")
+PROFILE_FIELDS = ("sector", "industry", "employees", "market_cap", "enterprise_value", "cap_currency",
+                  "pe_trailing", "pe_forward", "ev_ebitda", "profit_margin", "operating_margin", "beta",
+                  "insiders_pct", "dividend_yield", "dividend_rate", "dividend_5y_avg",
+                  "ebitda", "quarterly_earnings_growth", "total_cash", "total_debt", "financial_currency")
 
 
 def parse_stock_profile(info):
@@ -396,6 +399,67 @@ def parse_stock_profile(info):
     cur = info.get("currency")
     if "market_cap" in out and isinstance(cur, str) and re.fullmatch(r"[A-Za-z]{3}", cur.strip()):
         out["cap_currency"] = cur.strip().upper()
+
+    # --- valuation / profitability / risk / ownership (Yahoo "Statistics" page). Ratios are published as Yahoo
+    # shows them: multiples as plain numbers, margins / insiders / yields as PERCENT (27.04 = 27.04 %).
+    # Loss-making companies have no P/E or EV/EBITDA on Yahoo: those fields are simply omitted (the dashboard shows "—").
+    for key, src in (("pe_trailing", "trailingPE"), ("pe_forward", "forwardPE"), ("ev_ebitda", "enterpriseToEbitda")):
+        v = _num(info.get(src))  # "Infinity" strings (a known Yahoo quirk) and non-positive values are dropped
+        if v is not None and v < 10000:
+            out[key] = round(float(v), 2)
+    for key, src in (("profit_margin", "profitMargins"), ("operating_margin", "operatingMargins")):
+        v = _num(info.get(src), positive=False)  # a fraction: 0.27 -> 27 %; negative margins are legitimate
+        if v is not None and -50 <= v <= 5:
+            out[key] = round(float(v) * 100, 2)
+    b = _num(info.get("beta"), positive=False)
+    if b is not None and abs(b) < 20:
+        out["beta"] = round(float(b), 2)
+    ins = _num(info.get("heldPercentInsiders"), positive=False)  # fraction 0-1
+    if ins is not None and 0 <= ins <= 1:
+        out["insiders_pct"] = round(float(ins) * 100, 2)
+
+    # Income statement / balance sheet (Yahoo "Financial Highlights"). These are expressed in the company's REPORTING
+    # currency (`financialCurrency`, e.g. TWD for TSM, EUR for ASML), which can differ from the quote currency, so it is
+    # published next to them. EBITDA may be negative (legitimate); cash and debt are >= 0.
+    eb = _num(info.get("ebitda"), positive=False)
+    if eb is not None and eb != 0:
+        out["ebitda"] = int(eb)
+    qg = _num(info.get("earningsQuarterlyGrowth"), positive=False)  # fraction: 0.12 -> +12 % year over year
+    if qg is not None and -10 <= qg <= 100:
+        out["quarterly_earnings_growth"] = round(float(qg) * 100, 2)
+    for key, src in (("total_cash", "totalCash"), ("total_debt", "totalDebt")):
+        v = _num(info.get(src), positive=False)
+        if v is not None and v >= 0:
+            out[key] = int(v)
+    fcur = info.get("financialCurrency")
+    if any(k in out for k in ("ebitda", "total_cash", "total_debt")) and isinstance(fcur, str) and re.fullmatch(r"[A-Za-z]{3}", fcur.strip()):
+        out["financial_currency"] = fcur.strip().upper()
+
+    # Dividends. Yahoo/yfinance have changed the scale of `dividendYield` (fraction vs percent) in the past, so the
+    # current yield is derived from the annual rate and the price first (scale-proof), then from the trailing
+    # fraction, and only then from `dividendYield` itself.
+    rate = _num(info.get("dividendRate"))
+    price = _num(info.get("currentPrice")) or _num(info.get("regularMarketPrice")) or _num(info.get("previousClose"))
+    cur_yield = None
+    if rate is not None and price is not None:
+        cur_yield = rate / price * 100
+    if cur_yield is None:
+        tay = _num(info.get("trailingAnnualDividendYield"))
+        if tay is not None:
+            cur_yield = tay * 100
+    if cur_yield is None:
+        dy = _num(info.get("dividendYield"))
+        if dy is not None:
+            cur_yield = dy * 100 if dy <= 0.02 else dy
+    if cur_yield is not None and 0 < cur_yield <= 30:
+        out["dividend_yield"] = round(float(cur_yield), 2)
+        if rate is not None:
+            out["dividend_rate"] = round(float(rate), 4)
+    elif "market_cap" in out and cur_yield is None:
+        out["dividend_yield"] = 0.0  # Yahoo omits every dividend key for non-payers
+    avg5 = _num(info.get("fiveYearAvgDividendYield"))  # already a percent on Yahoo (0.52 = 0.52 %)
+    if avg5 is not None and avg5 <= 30:
+        out["dividend_5y_avg"] = round(float(avg5), 2)
     return out
 
 
@@ -445,6 +509,10 @@ def attach_profiles(stocks, prev=None, fetch=fetch_stock_profile, max_fail_strea
                 s["profile_as_of"] = old["profile_as_of"]
             kept += 1
     print(f"  profiles: {fresh} fresh, {kept} reused from the previous feed, {len(stocks) - fresh - kept} without data")
+    # Per-field coverage, so the log shows at a glance whether Yahoo is returning each metric (a field that drops to 0
+    # across the board means Yahoo renamed it). Missing values are normal for banks / loss-makers / foreign listings.
+    cov = ", ".join(f"{k} {sum(1 for s in stocks if k in s)}" for k in PROFILE_FIELDS if k not in ("cap_currency", "financial_currency"))
+    print(f"  profile coverage (of {len(stocks)} stocks): {cov}")
     return stocks
 
 
