@@ -84,6 +84,7 @@ def _patch_main(monkeypatch, tmp_path):
     row = lambda items: [{"symbol": i[0], "name": i[1], "price": 1.0, "change_pct": 0.0, "history": []} for i in items]  # noqa: E731
     monkeypatch.setattr(fm, "build_list", row)
     monkeypatch.setattr(fm, "attach_histories", lambda x: x)
+    monkeypatch.setattr(fm, "attach_profiles", lambda stocks, prev=None: stocks)  # sin Yahoo (Ticker.info)
     monkeypatch.setattr(fm, "build_your_funds", lambda: [])
     monkeypatch.setattr(fm, "build_general_news", lambda: [])
     monkeypatch.setattr(fm, "build_position_news", lambda: [])
@@ -485,3 +486,66 @@ def test_build_staking_proveedor_extra_y_fallo_aislado(monkeypatch):
     assert out["eth_lido"]["apr"] == 2.3 and out["eth_lido"]["stale"] is True
     monkeypatch.setattr(fm, "STAKING_PROVIDERS", {"dot_x": roto})
     assert fm.build_staking({}) == {}
+
+
+# ============================================================ perfil de acción (sector, industria, empleados, market cap, EV)
+def test_parse_stock_profile_campos_validos():
+    info = {"sector": " Technology ", "industry": "Consumer Electronics", "fullTimeEmployees": 164000,
+            "marketCap": 3_210_000_000_000.0, "enterpriseValue": 3_190_000_000_000, "currency": "usd"}
+    assert fm.parse_stock_profile(info) == {
+        "sector": "Technology", "industry": "Consumer Electronics", "employees": 164000,
+        "market_cap": 3_210_000_000_000, "enterprise_value": 3_190_000_000_000, "cap_currency": "USD"}
+
+
+def test_parse_stock_profile_descarta_basura_sin_rellenar_con_null():
+    info = {"sector": 5, "industry": "", "fullTimeEmployees": "x", "marketCap": float("nan"),
+            "enterpriseValue": float("inf"), "currency": "dolares"}
+    assert fm.parse_stock_profile(info) == {}
+    assert fm.parse_stock_profile(None) == {} and fm.parse_stock_profile([]) == {}
+    # EV sin market cap no se publica (el indicador caja/deuda necesita los dos); bool no es número
+    assert fm.parse_stock_profile({"enterpriseValue": 1e9, "fullTimeEmployees": True}) == {}
+    # EV negativo (caja > capitalización) es legítimo; empleados absurdos se descartan
+    out = fm.parse_stock_profile({"marketCap": 1e9, "enterpriseValue": -2e8, "fullTimeEmployees": 9e9})
+    assert out["enterprise_value"] == -200_000_000 and "employees" not in out
+
+
+def test_attach_profiles_usa_anterior_si_yahoo_falla_y_corta_tras_racha(monkeypatch):
+    monkeypatch.setattr(fm.time, "sleep", lambda *_: None)
+    stocks = [{"symbol": s} for s in ("A", "B", "C", "D", "E", "F", "G")]
+    prev = {"stocks": [{"symbol": "G", "sector": "Energy", "market_cap": 5, "profile_as_of": "2026-10-01", "price": 1}]}
+    calls = []
+
+    def fetch(sym):
+        calls.append(sym)
+        return {"sector": "Tech", "market_cap": 10} if sym == "A" else {}
+
+    out = fm.attach_profiles(stocks, prev, fetch=fetch, max_fail_streak=3)
+    assert out[0]["sector"] == "Tech" and out[0]["profile_as_of"] == fm.datetime.now(fm.timezone.utc).strftime("%Y-%m-%d")
+    assert calls == ["A", "B", "C", "D"]  # A ok, luego 3 fallos seguidos y se deja de llamar a Yahoo
+    g = out[6]
+    assert g["sector"] == "Energy" and g["market_cap"] == 5 and g["profile_as_of"] == "2026-10-01" and "price" not in g or g.get("price") is None
+    assert "sector" not in out[1]  # sin dato nuevo ni anterior: queda sin campos
+
+
+def test_attach_profiles_nunca_lanza(monkeypatch):
+    monkeypatch.setattr(fm.time, "sleep", lambda *_: None)
+
+    def boom(sym):
+        raise RuntimeError("yahoo caido")
+
+    stocks = [{"symbol": "A"}]
+    assert fm.attach_profiles(stocks, None, fetch=boom) == [{"symbol": "A"}]
+
+
+def test_main_publica_el_perfil_de_las_acciones(tmp_path, monkeypatch):
+    _patch_main(monkeypatch, tmp_path)
+    monkeypatch.setattr(fm, "FRED_API_KEY", "")
+
+    def fake(stocks, prev=None):
+        stocks[0].update({"sector": "Technology", "market_cap": 10, "enterprise_value": 9, "cap_currency": "USD"})
+        return stocks
+
+    monkeypatch.setattr(fm, "attach_profiles", fake)
+    fm.main()
+    d = json.loads((tmp_path / "data.json").read_text())
+    assert d["stocks"][0]["sector"] == "Technology" and d["stocks"][0]["enterprise_value"] == 9
