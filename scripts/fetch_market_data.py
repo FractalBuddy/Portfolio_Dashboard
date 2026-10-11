@@ -1103,6 +1103,17 @@ def build_altcoin_season(prev=None):
     return None
 
 
+def cnn_put_call_ratio(block):
+    """CNN's `put_call_options` block carries a 0-100 score (what `value` holds) AND a daily series whose `y` is the
+    actual put/call ratio (~0.5-1.5). Returns the latest ratio, or None if the series is missing/implausible
+    (undocumented endpoint: best-effort, never raises)."""
+    try:
+        y = float(block["data"][-1]["y"])
+        return round(y, 3) if 0 < y < 5 else None
+    except Exception:
+        return None
+
+
 def build_market_mood():
     """VIX (volatility) + its 50-day moving average via yfinance, the crypto Fear & Greed
     Index via alternative.me (free, public, no key), and CNN's stock-market Fear & Greed
@@ -1153,7 +1164,11 @@ def build_market_mood():
         mom = sub("market_momentum_sp500")
         if mom: mood["market_momentum"] = mom
         pc = sub("put_call_options")
-        if pc: mood["put_call"] = pc
+        if pc:
+            ratio = cnn_put_call_ratio(d.get("put_call_options"))
+            if ratio is not None:
+                pc["ratio"] = ratio  # the real put/call ratio; `value` is CNN's 0-100 score for that component
+            mood["put_call"] = pc
         junk = sub("junk_bond_demand")
         if junk: mood["junk_bond_demand"] = junk
         safe = sub("safe_haven_demand")
