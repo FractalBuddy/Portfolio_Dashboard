@@ -81,6 +81,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       generated_at: ${{ steps.meta.outputs.generated_at }}
+      alerts: ${{ steps.alerts.outputs.alerts }}
     steps:
       # Solo scripts/, sin credenciales persistentes en .git/config (el push de más abajo usa el token explícitamente).
       - name: Check out scripts/ only
@@ -106,7 +107,21 @@ jobs:
         env:
           FRED_KEY_SET: ${{ secrets.FRED_API_KEY != '' }}
           SANITY_ALLOW_REGRESSION: ${{ inputs.allow_regression }}
-        run: python3 scripts/sanity_check.py --data feed/data.json --meta feed/meta.json --prev prev.json
+        run: python3 scripts/sanity_check.py --data feed/data.json --meta feed/meta.json --prev prev.json --alerts-out "$RUNNER_TEMP/alerts.txt"
+
+      # Avisos que merecen que el dueño se entere (Yahoo degradado: precios antiguos varios días, fundamentales sin refrescar, tabla de
+      # valoración caída, NAV de iShares perdido, FRED atascado...). El feed SÍ se publica (los datos buenos siguen siendo los mejores
+      # disponibles); el heartbeat de abajo lo convierte en un /fail de Healthchecks con el texto, y se ve también en el resumen del run.
+      - name: Collect alerts
+        id: alerts
+        run: |
+          a=""
+          if [ -f "$RUNNER_TEMP/alerts.txt" ]; then a=$(tr -d '\r\n' < "$RUNNER_TEMP/alerts.txt" | cut -c1-900); fi
+          echo "alerts=$a" >> "$GITHUB_OUTPUT"
+          if [ -n "$a" ]; then
+            echo "::warning::DATOS DEGRADADOS (se publica igualmente): $a"
+            { echo "### ⚠️ Datos degradados"; echo; echo "$a" | sed 's/ | /\n- /g; s/^/- /'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       # generated_at (ya validado: coincide en data.json y meta.json) se pasa a verify-cdn como salida del job.
       - name: Read generated_at
@@ -197,11 +212,21 @@ jobs:
           HC: ${{ secrets.HC_UPDATE_URL }}
           FETCH: ${{ needs.fetch.result }}
           PUBLISH: ${{ needs.publish.result }}
+          ALERTS: ${{ needs.publish.outputs.alerts }}
         run: |
           if [ -z "$HC" ]; then
             echo "::warning::HC_UPDATE_URL está vacío o no existe: no se avisa a Healthchecks y nadie se enterará si el workflow falla."
             exit 0
           fi
           HC="${HC%/}"
-          if [ "$FETCH" = "success" ] && [ "$PUBLISH" = "success" ]; then url="$HC"; else url="$HC/fail"; fi
+          if [ "$FETCH" = "success" ] && [ "$PUBLISH" = "success" ]; then
+            if [ -n "${ALERTS:-}" ]; then
+              # Publicado, pero con datos degradados: Healthchecks lo marca como caído con el motivo (el siguiente run limpio lo recupera).
+              curl -fsS -m 10 --retry 5 --retry-all-errors --data-raw "degraded: ${ALERTS}" "$HC/fail" >/dev/null
+              exit 0
+            fi
+            url="$HC"
+          else
+            url="$HC/fail"
+          fi
           curl -fsS -m 10 --retry 5 --retry-all-errors "$url" >/dev/null
