@@ -379,3 +379,40 @@ def test_historico_reutilizado_avisa():
     d["stocks"][2]["history_stale"] = True
     errs, warns = run(d, m, None)
     assert errs == [] and any("histórico reutilizado" in w and "S2" in w for w in warns)
+
+
+def _feed_with_profiles(n=10, table=10, **fields):
+    d, m = healthy()
+    for x in d["stocks"][:n]:
+        x.update({"market_cap": 1e11, "enterprise_value": 1.1e11, "pe_forward": 18.0, "profile_as_of": TODAY.isoformat()})
+        x.update(fields)
+    d["health"] = {"stale_symbols": [], "history_reused": [],
+                   "profiles": {"stocks": 31, "with_data": n, "valuation_table": table, "oldest_days": 0, "older_than_7d": 0}}
+    return d, m
+
+
+def test_aviso_si_la_tabla_de_valoracion_cubre_pocas_acciones():
+    d, m = _feed_with_profiles(n=10, table=10)
+    errs, warns = run(d, m, None)
+    assert errs == [] and not any("tabla de valoración" in w for w in warns)
+    d, m = _feed_with_profiles(n=10, table=2)
+    errs, warns = run(d, m, None)
+    assert errs == [] and any("tabla de valoración" in w and "2 de 10" in w for w in warns)
+    # sin el campo (feed antiguo) o con basura no se avisa ni se rompe
+    d, m = _feed_with_profiles(n=10, table=2)
+    del d["health"]["profiles"]["valuation_table"]
+    assert not any("tabla de valoración" in w for w in run(d, m, None)[1])
+    d["health"]["profiles"]["valuation_table"] = "x"
+    assert run(d, m, None)[0] == []
+    d["health"] = "raro"
+    assert run(d, m, None)[0] == []
+
+
+def test_aviso_de_ev_incoherente_con_la_capitalizacion():
+    d, m = _feed_with_profiles(n=3, table=3)
+    d["stocks"][0].update({"market_cap": 6.7e11, "enterprise_value": 3.8e13})
+    errs, warns = run(d, m, None)
+    assert errs == [] and any("EV incoherente" in w and "S0" in w for w in warns)
+    d["stocks"][0].update({"market_cap": "x", "enterprise_value": True})
+    errs, _ = run(d, m, None)                       # tipos erróneos: los frena la validación de perfiles, sin romper la nueva comprobación
+    assert all("EV incoherente" not in e for e in errs)
