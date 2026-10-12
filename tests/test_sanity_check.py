@@ -309,3 +309,65 @@ def test_no_muta_el_feed():
     before = copy.deepcopy(d)
     run(d, m, healthy()[0])
     assert d == before
+
+
+# ============================================================ auditoría 12-10: perfiles de acciones y filas con precio antiguo
+def _with_profile(d, n=None, as_of=TODAY.isoformat()):
+    for i, x in enumerate(d["stocks"][: n or len(d["stocks"])]):
+        x.update({"market_cap": 1e11 + i, "enterprise_value": 1.1e11, "cap_currency": "USD", "financial_currency": "USD",
+                  "pe_trailing": 20.0, "pe_forward": 18.0, "ev_ebitda": 11.0, "profit_margin": 12.0, "beta": 1.0,
+                  "insiders_pct": 3.0, "dividend_yield": 0.0, "ebitda": 9e9, "total_cash": 1e10, "total_debt": 2e10,
+                  "sector": "Technology", "profile_as_of": as_of})
+    return d
+
+
+def test_perfiles_sanos_pasan_sin_avisos_de_perfil():
+    d, m = healthy()
+    _with_profile(d)
+    errs, warns = run(d, m, None)
+    assert errs == [] and not any("perfil" in w or "fundamentales" in w for w in warns)
+
+
+@pytest.mark.parametrize("campo,valor", [("pe_forward", 1e9), ("beta", "x"), ("insiders_pct", 250), ("market_cap", -5),
+                                         ("total_debt", float("inf")), ("sector", "x" * 200), ("cap_currency", "usd"),
+                                         ("profit_margin", True), ("profile_as_of", "ayer")])
+def test_perfil_con_campos_inverosimiles_bloquea(campo, valor):
+    d, m = healthy()
+    _with_profile(d)
+    d["stocks"][3][campo] = valor
+    errs, _ = run(d, m, None)
+    assert any("inverosímiles" in e and ("S3.%s" % campo) in e for e in errs)
+
+
+def test_perfiles_antiguos_avisan_pero_no_bloquean():
+    d, m = healthy()
+    _with_profile(d, as_of=(TODAY - dt.timedelta(days=20)).isoformat())
+    errs, warns = run(d, m, None)
+    assert errs == [] and any("fundamentales de acciones desactualizados" in w and "20 días" in w for w in warns)
+
+
+def test_caida_de_cobertura_de_perfiles_avisa():
+    d, m = healthy()
+    prev, _ = healthy()
+    _with_profile(prev)
+    _with_profile(d, n=10)   # de 31 a 10
+    errs, warns = run(d, m, prev)
+    assert errs == [] and any("perfiles de acciones: solo 10" in w for w in warns)
+
+
+def test_filas_con_precio_antiguo_avisan_y_si_son_muchas_bloquean():
+    d, m = healthy()
+    d["stocks"][0].update({"stale": True, "stale_since": "2026-10-01"})
+    errs, warns = run(d, m, None)
+    assert errs == [] and any("stocks con precio antiguo" in w and "S0" in w for w in warns)
+    for x in d["stocks"][:12]:   # 12 de 31 > 30 %
+        x["stale"] = True
+    errs, _ = run(d, m, None)
+    assert any("stocks: 12 de 31 filas con precio antiguo" in e for e in errs)
+
+
+def test_historico_reutilizado_avisa():
+    d, m = healthy()
+    d["stocks"][2]["history_stale"] = True
+    errs, warns = run(d, m, None)
+    assert errs == [] and any("histórico reutilizado" in w and "S2" in w for w in warns)
