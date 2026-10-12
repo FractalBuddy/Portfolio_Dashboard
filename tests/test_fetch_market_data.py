@@ -766,3 +766,97 @@ def test_main_publica_health(tmp_path, monkeypatch, capsys):
     d = json.loads((tmp_path / "data.json").read_text())
     assert d["health"]["stale_symbols"] == [] and d["health"]["profiles"]["stocks"] == len(fm.STOCKS)
     assert "HEALTH:" in capsys.readouterr().out
+
+
+# ============================================================ tabla "Valuation Measures" (misma fuente que la web de Yahoo)
+def _val_df(**cur):
+    """DataFrame con la forma de Ticker.get_valuation_measures(): filas = medidas, columna 'Current' (+ trimestres)."""
+    import numpy as np
+    import pandas as pd
+    rows = {"Market Cap": 2.01e12, "Enterprise Value": 1.93e12, "Trailing P/E": 33.67, "Forward P/E": 21.41,
+            "PEG Ratio (5yr expected)": 0.86, "Price/Sales": 16.81, "Price/Book": 11.6,
+            "Enterprise Value/Revenue": 13.8, "Enterprise Value/EBITDA": 18.19}
+    rows.update(cur)
+    return pd.DataFrame({"Current": pd.Series(rows, dtype=float), "6/30/2026": pd.Series([np.nan] * len(rows), index=list(rows))})
+
+
+def test_parse_valuation_measures_toma_la_columna_current():
+    v = fm.parse_valuation_measures(_val_df())
+    assert v == {"market_cap": 2010000000000, "enterprise_value": 1930000000000, "pe_trailing": 33.67, "pe_forward": 21.41, "ev_ebitda": 18.19}
+
+
+@pytest.mark.parametrize("bad", [None, {}, [], "x", 5])
+def test_parse_valuation_measures_entradas_raras(bad):
+    assert fm.parse_valuation_measures(bad) == {}
+
+
+def test_parse_valuation_measures_vacia_sin_market_cap_o_con_basura():
+    import numpy as np
+    import pandas as pd
+    assert fm.parse_valuation_measures(pd.DataFrame()) == {}
+    assert fm.parse_valuation_measures(_val_df(**{"Market Cap": np.nan})) == {}   # sin capitalización no se fía de nada
+    assert fm.parse_valuation_measures(_val_df(**{"Market Cap": -5})) == {}
+    v = fm.parse_valuation_measures(_val_df(**{"Trailing P/E": np.nan, "Forward P/E": float("inf"), "Enterprise Value/EBITDA": -3}))
+    assert "pe_trailing" not in v and "pe_forward" not in v and "ev_ebitda" not in v and v["market_cap"] == 2010000000000
+    assert fm.parse_valuation_measures(pd.DataFrame({"Other": [1]}, index=["Market Cap"])) == {}
+
+
+def test_merge_valuation_la_tabla_manda_y_quita_lo_que_yahoo_no_muestra():
+    info = {"market_cap": 2318000000000, "enterprise_value": 16400000000000, "pe_trailing": 32.5, "pe_forward": 20.3, "ev_ebitda": 5.18, "beta": 1.2}
+    m = fm.merge_valuation(info, {"market_cap": 2010000000000, "enterprise_value": 1930000000000, "pe_forward": 21.41})
+    assert m["enterprise_value"] == 1930000000000 and m["market_cap"] == 2010000000000 and m["pe_forward"] == 21.41
+    assert "pe_trailing" not in m and "ev_ebitda" not in m and m["beta"] == 1.2      # sin P/E en la tabla (pérdidas): "—" como en Yahoo
+    assert fm.merge_valuation(info, {}) == info and fm.merge_valuation(info, {"pe_forward": 3}) == info   # sin tabla usable: info intacta
+    assert info["ev_ebitda"] == 5.18                                                  # no muta la entrada
+
+
+class _FakeTicker:
+    def __init__(self, info, val=None, val_exc=None):
+        self.info, self._val, self._exc = info, val, val_exc
+
+    def get_valuation_measures(self, freq="quarterly", periods=5):
+        assert freq == "trailing" and periods == 0
+        if self._exc:
+            raise self._exc
+        return self._val
+
+
+_ADR_INFO = {"marketCap": 2318000000000, "enterpriseValue": 16401145266176, "trailingPE": 32.48, "forwardPE": 20.31, "enterpriseToEbitda": 5.18,
+             "currency": "USD", "financialCurrency": "TWD", "totalCash": 3518010228736, "totalDebt": 1068558516224, "ebitda": 3167467077632,
+             "sector": "Technology", "beta": 1.24}
+
+
+def test_fetch_stock_profile_arregla_el_ev_de_un_adr(monkeypatch, capsys):
+    monkeypatch.setattr(fm.yf, "Ticker", lambda s: _FakeTicker(_ADR_INFO, _val_df()))
+    p = fm.fetch_stock_profile("TSM")
+    assert p["enterprise_value"] == 1930000000000 and p["market_cap"] == 2010000000000 and p["ev_ebitda"] == 18.19
+    assert p["pe_trailing"] == 33.67 and p["pe_forward"] == 21.41 and p["_valuation"] is True
+    assert p["ebitda"] == 3167467077632 and p["financial_currency"] == "TWD" and p["beta"] == 1.24   # el resto sigue viniendo de info
+    assert "tabla de valoración" in capsys.readouterr().err
+
+
+def test_fetch_stock_profile_si_la_tabla_falla_usa_info(monkeypatch, capsys):
+    monkeypatch.setattr(fm.yf, "Ticker", lambda s: _FakeTicker(_ADR_INFO, val_exc=RuntimeError("429")))
+    p = fm.fetch_stock_profile("TSM")
+    assert p["enterprise_value"] == 16401145266176 and p["_valuation"] is False and p["pe_forward"] == 20.31
+    assert "valuation table failed" in capsys.readouterr().err
+    # tabla vacía = mismo comportamiento
+    import pandas as pd
+    monkeypatch.setattr(fm.yf, "Ticker", lambda s: _FakeTicker(_ADR_INFO, pd.DataFrame()))
+    assert fm.fetch_stock_profile("TSM")["_valuation"] is False
+    # un Ticker sin el método (yfinance antiguo) tampoco rompe
+    class Old:
+        info = _ADR_INFO
+    monkeypatch.setattr(fm.yf, "Ticker", lambda s: Old())
+    assert fm.fetch_stock_profile("TSM")["_valuation"] is False
+
+
+def test_attach_profiles_no_publica_el_marcador_y_lo_cuenta(monkeypatch, capsys):
+    monkeypatch.setattr(fm.time, "sleep", lambda *_: None)
+    tick = {"A": _FakeTicker(_ADR_INFO, _val_df()), "B": _FakeTicker(_ADR_INFO, val_exc=RuntimeError("x"))}
+    monkeypatch.setattr(fm.yf, "Ticker", lambda s: tick[s])
+    stocks = fm.attach_profiles([{"symbol": "A"}, {"symbol": "B"}], {})
+    assert all("_valuation" not in s for s in stocks)
+    out = capsys.readouterr().out
+    assert "valuation table" in out and "1 of 2 fresh profiles" in out and "Ticker.info" in out
+    assert stocks[0]["enterprise_value"] == 1930000000000 and stocks[1]["enterprise_value"] == 16401145266176
