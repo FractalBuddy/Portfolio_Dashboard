@@ -416,3 +416,61 @@ def test_aviso_de_ev_incoherente_con_la_capitalizacion():
     d["stocks"][0].update({"market_cap": "x", "enterprise_value": True})
     errs, _ = run(d, m, None)                       # tipos erróneos: los frena la validación de perfiles, sin romper la nueva comprobación
     assert all("EV incoherente" not in e for e in errs)
+
+
+# ---------------------------------------------------------------- avisos que llegan al dueño (Alert -> Healthchecks)
+def _alerts(warns):
+    return [w for w in warns if isinstance(w, sc.Alert)]
+
+
+def test_un_tropiezo_puntual_de_yahoo_no_es_alerta():
+    d, m = healthy()
+    d["stocks"][0].update({"stale": True, "stale_since": TODAY.isoformat()})   # solo hoy, 1 de 31
+    errs, warns = run(d, m, None)
+    assert errs == [] and any("precio antiguo" in w for w in warns) and _alerts(warns) == []
+
+
+def test_precio_antiguo_persistente_o_masivo_es_alerta():
+    d, m = healthy()
+    d["stocks"][0].update({"stale": True, "stale_since": (TODAY - dt.timedelta(days=3)).isoformat()})
+    errs, warns = run(d, m, None)
+    assert errs == [] and len(_alerts(warns)) == 1 and "S0" in _alerts(warns)[0]
+    d, m = healthy()
+    for x in d["stocks"][:7]:                       # 7 de 31 = 22 %: bajo el umbral que bloquea (30 %), pero ya es alerta
+        x.update({"stale": True, "stale_since": TODAY.isoformat()})
+    errs, warns = run(d, m, None)
+    assert errs == [] and len(_alerts(warns)) == 1
+
+
+def test_yahoo_info_y_tabla_degradados_son_alerta():
+    d, m = _feed_with_profiles(n=10, table=2)
+    errs, warns = run(d, m, None)
+    assert errs == [] and any("tabla de valoración" in w for w in _alerts(warns))
+    d, m = _feed_with_profiles(n=3, table=3)
+    d["stocks"][0].update({"market_cap": 6.7e11, "enterprise_value": 3.8e13})
+    assert any("EV incoherente" in w for w in _alerts(run(d, m, None)[1]))
+    d, m = _feed_with_profiles(n=10, table=10)
+    for x in d["stocks"][:10]:
+        x["profile_as_of"] = (TODAY - dt.timedelta(days=30)).isoformat()
+    assert any("desactualizados" in w for w in _alerts(run(d, m, None)[1]))
+
+
+def test_feed_sano_no_genera_alertas():
+    d, m = healthy()
+    assert _alerts(run(d, m, None)[1]) == []
+
+
+def test_main_escribe_alerts_out_en_una_linea(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(sc, "MIN_DATA_BYTES", 0)
+    d, m = _feed_with_profiles(n=10, table=2)
+    d["stocks"][0].update({"stale": True, "stale_since": (TODAY - dt.timedelta(days=5)).isoformat()})
+    out = tmp_path / "alerts.txt"
+    write = lambda n, o: (tmp_path / n).write_text(json.dumps(o))
+    write("d.json", d); write("m.json", m)
+    m["data_bytes"] = (tmp_path / "d.json").stat().st_size
+    write("m.json", m)
+    rc = sc.main(["--data", str(tmp_path / "d.json"), "--meta", str(tmp_path / "m.json"), "--alerts-out", str(out)])
+    txt = out.read_text()
+    assert "\n" not in txt and len(txt) <= 900
+    assert rc == 0, capsys.readouterr().out
+    assert "tabla de valoración" in txt and "precio antiguo" in txt
