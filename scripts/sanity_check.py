@@ -64,6 +64,10 @@ PROFILE_NUM_BOUNDS = {
     "profit_margin": (-5000, 500), "operating_margin": (-5000, 500), "beta": (-20, 20), "insiders_pct": (0, 100),
     "dividend_yield": (0, 30), "dividend_rate": (0, 1e5), "dividend_5y_avg": (0, 30),
     "ebitda": (-1e15, 1e15), "quarterly_earnings_growth": (-1000, 10000), "total_cash": (0, 1e15), "total_debt": (0, 1e15),
+    # campos del veredicto (todos opcionales)
+    "market_cap_usd": (0, 1e15), "peg": (0, 1e4), "ps": (0, 1e4), "pb": (0, 1e4), "ev_revenue": (0, 1e4),
+    "gross_margin": (-5000, 500), "revenue_growth": (-100, 10000), "roe": (-3000, 3000), "free_cashflow": (-1e15, 1e15),
+    "target_mean": (0, 1e8), "analyst_count": (0, 500), "recommendation_mean": (1, 5), "fcf_yield": (-100, 100),
 }
 
 
@@ -213,6 +217,18 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
             except ValueError:
                 bad_prof.append("%s.profile_as_of" % x.get("symbol"))
     need(not bad_prof, "perfil de acción con campos inverosímiles o de tipo erróneo: %s" % bad_prof[:6])
+    # Tipos de cambio a USD (backend: comparar capitalizaciones y flujos de caja de acciones en distintas divisas).
+    fx = d.get("fx_usd")
+    if fx is not None:
+        need(isinstance(fx, dict) and all(isinstance(k, str) and len(k) == 3 and _num(v) and 1e-4 < v < 1e4 for k, v in fx.items()),
+             "fx_usd malformado (divisa o tipo fuera de rango)")
+        if isinstance(fx, dict):
+            no_usd = [x.get("symbol") for x in stocks if _num(x.get("market_cap")) and x.get("market_cap") > 0 and "market_cap_usd" not in x]
+            if no_usd:
+                warnings.append(Alert("sin capitalización en USD (falta el tipo de cambio de su divisa): %s" % no_usd[:8]))
+            h_fx = (d.get("health") or {}).get("fx_stale") if isinstance(d.get("health"), dict) else None
+            if isinstance(h_fx, list) and h_fx:
+                warnings.append("tipos de cambio a USD reutilizados del feed anterior (Yahoo no los dio hoy): %s" % h_fx[:8])
     ages_p = []
     for x in stocks:
         try:
