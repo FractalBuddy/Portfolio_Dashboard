@@ -14,6 +14,14 @@ TODAY = dt.date(2026, 10, 6)  # martes
 BYTES = 8_000_000
 
 
+@pytest.fixture(autouse=True)
+def _fixed_today(monkeypatch):
+    """Los feeds sintéticos llevan fechas fijas (alrededor de TODAY): sin esto, los tests que pasan por sc.main() (que usa la fecha
+    real) empezaban a fallar al cumplirse MAX_HISTORY_AGE_DAYS desde TODAY (bomba de relojería)."""
+    real = sc.check
+    monkeypatch.setattr(sc, "check", lambda *a, **kw: real(*a, **({"today": TODAY} | kw)))
+
+
 def _hist(n=300, last=TODAY - dt.timedelta(days=1)):
     return [{"date": (last - dt.timedelta(days=n - 1 - i)).isoformat(), "close": 100.0 + i} for i in range(n)]
 
