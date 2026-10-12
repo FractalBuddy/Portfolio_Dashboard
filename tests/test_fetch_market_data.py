@@ -783,7 +783,8 @@ def _val_df(**cur):
 
 def test_parse_valuation_measures_toma_la_columna_current():
     v = fm.parse_valuation_measures(_val_df())
-    assert v == {"market_cap": 2010000000000, "enterprise_value": 1930000000000, "pe_trailing": 33.67, "pe_forward": 21.41, "ev_ebitda": 18.19}
+    assert v == {"market_cap": 2010000000000, "enterprise_value": 1930000000000, "pe_trailing": 33.67, "pe_forward": 21.41, "ev_ebitda": 18.19,
+                 "peg": 0.86, "ps": 16.81, "pb": 11.6, "ev_revenue": 13.8}
 
 
 @pytest.mark.parametrize("bad", [None, {}, [], "x", 5])
@@ -871,7 +872,7 @@ def test_tabla_parcial_solo_market_cap_no_se_considera_usable():
     nan = np.nan
     df = _val_df(**{"Enterprise Value": nan, "Trailing P/E": nan, "Forward P/E": nan, "Enterprise Value/EBITDA": nan})
     v = fm.parse_valuation_measures(df)
-    assert v == {"market_cap": 2010000000000} and not fm._val_usable(v)
+    assert v["market_cap"] == 2010000000000 and "pe_trailing" not in v and not fm._val_usable(v)   # P/S, P/B... solos no bastan
     info = {"market_cap": 1, "pe_forward": 20.0, "enterprise_value": 5}
     assert fm.merge_valuation(info, v) == info                         # una respuesta a medias no borra métricas buenas
     assert fm._val_usable({"market_cap": 1, "pe_forward": 2}) and not fm._val_usable({}) and not fm._val_usable(None)
@@ -911,3 +912,97 @@ def test_health_cuenta_las_acciones_con_tabla(monkeypatch):
     stocks = fm.attach_profiles([{"symbol": "A"}, {"symbol": "B"}], {})
     h = fm.compute_health({"stocks": stocks})
     assert h["profiles"]["valuation_table"] == 2 and h["profiles"]["with_data"] == 2
+
+
+# ============================================================ campos para el veredicto + tipos de cambio a USD
+INFO_V = {"currentPrice": 100.0, "marketCap": 5e11, "currency": "USD", "grossMargins": 0.55, "revenueGrowth": 0.12,
+          "returnOnEquity": 0.31, "freeCashflow": 2.5e10, "financialCurrency": "USD", "targetMeanPrice": 120.0,
+          "numberOfAnalystOpinions": 38, "recommendationMean": 1.9}
+
+
+def test_parse_perfil_campos_del_veredicto():
+    p = fm.parse_stock_profile(dict(INFO_V))
+    assert p["gross_margin"] == 55.0 and p["revenue_growth"] == 12.0 and p["roe"] == 31.0
+    assert p["free_cashflow"] == 25000000000 and p["financial_currency"] == "USD"
+    assert p["target_mean"] == 120.0 and p["analyst_count"] == 38 and p["recommendation_mean"] == 1.9
+
+
+def test_parse_perfil_descarta_basura_y_objetivo_en_otra_divisa():
+    bad = dict(INFO_V, grossMargins=7, revenueGrowth=-5, returnOnEquity="x", freeCashflow=True, numberOfAnalystOpinions=0,
+               recommendationMean=9, targetMeanPrice=900.0)      # objetivo 9x el precio: otra divisa -> no se publica
+    p = fm.parse_stock_profile(bad)
+    for k in ("gross_margin", "revenue_growth", "roe", "free_cashflow", "analyst_count", "recommendation_mean", "target_mean"):
+        assert k not in p, k
+    assert fm.parse_stock_profile(dict(INFO_V, freeCashflow=-3e9))["free_cashflow"] == -3000000000   # FCF negativo es legítimo
+
+
+def test_merge_valuation_trae_peg_ps_pb_y_quita_los_que_faltan():
+    prof = {"market_cap": 1, "pe_trailing": 50.0}
+    val = fm.parse_valuation_measures(_val_df(**{"PEG Ratio (5yr expected)": float("nan")}))
+    m = fm.merge_valuation(prof, val)
+    assert m["ps"] == 16.81 and m["pb"] == 11.6 and m["ev_revenue"] == 13.8 and "peg" not in m
+
+
+class _H:
+    def __init__(self, v):
+        self._v = v
+        self.empty = v is None
+
+    @property
+    def Close(self):  # noqa: N802
+        return self
+
+    def __getitem__(self, k):
+        return self
+
+    @property
+    def iloc(self):
+        return self
+
+    def __call__(self, *a):
+        return self
+
+
+def _fake_yf(rates):
+    import pandas as pd
+
+    def f(symbol, tries=3, **kw):
+        ccy = symbol[:3]
+        if ccy not in rates or rates[ccy] is None:
+            raise RuntimeError("sin datos")
+        return pd.DataFrame({"Close": [rates[ccy] * 0.99, rates[ccy]]})
+    return f
+
+
+def test_fetch_fx_usd_normal_fallback_y_salto_absurdo(monkeypatch):
+    monkeypatch.setattr(fm, "yf_history", _fake_yf({"EUR": 1.1157, "DKK": 0.1495, "CHF": None, "TWD": 3.1}))
+    fx, stale = fm.fetch_fx_usd(["USD", "EUR", "DKK", "CHF", "TWD", "abc1", None, "eur"], {"CHF": 1.2, "TWD": 0.031})
+    assert fx["USD"] == 1.0 and fx["EUR"] == 1.1157 and fx["DKK"] == 0.1495
+    assert fx["CHF"] == 1.2 and "CHF" in stale                      # falló: reutiliza el anterior
+    assert fx["TWD"] == 0.031 and "TWD" in stale                    # 3.1 vs 0.031: salto de 100x -> se descarta
+    assert "ABC" not in fx
+    fx2, st2 = fm.fetch_fx_usd(["CHF"], None)                       # sin anterior y sin dato: simplemente no hay tipo
+    assert fx2 == {} and st2 == []
+
+
+def test_attach_usd_convierte_capitalizacion_y_fcf_con_cada_divisa(monkeypatch):
+    stocks = [{"symbol": "A", "market_cap": 100_000_000_000, "cap_currency": "DKK", "free_cashflow": 4_000_000_000, "financial_currency": "DKK"},
+              {"symbol": "B", "market_cap": 2_000_000_000_000, "cap_currency": "USD", "free_cashflow": 1_000_000_000_000, "financial_currency": "TWD"},
+              {"symbol": "C", "market_cap": 5e9, "cap_currency": "XXX"},
+              {"symbol": "D"}]
+    out, fx, stale = fm.attach_usd(stocks, {}, fetch_fx=lambda c, p: ({"USD": 1.0, "DKK": 0.15, "TWD": 0.031}, ["TWD"]))
+    a, b, c, d = out
+    assert a["market_cap_usd"] == 15_000_000_000 and a["fcf_yield"] == 4.0
+    assert b["market_cap_usd"] == 2_000_000_000_000 and b["fcf_yield"] == 1.55   # FCF en TWD, capitalización en USD: ambos a USD antes de dividir
+    z = fm.attach_usd([{"symbol": "Z", "market_cap": 1e9, "cap_currency": "USD", "free_cashflow": 5e9, "financial_currency": "USD"}], {},
+                      fetch_fx=lambda c, p: ({"USD": 1.0}, []))[0][0]
+    assert "fcf_yield" not in z                                                  # 500 %: absurdo, no se publica
+    assert "market_cap_usd" not in c and "market_cap_usd" not in d
+    assert fx["DKK"] == 0.15 and stale == ["TWD"]
+
+
+def test_attach_usd_nunca_lanza(monkeypatch):
+    def boom(*a):
+        raise RuntimeError("x")
+    out, fx, stale = fm.attach_usd([{"symbol": "A", "market_cap": 1}], {}, fetch_fx=boom)
+    assert fx == {} and stale == [] and out[0]["symbol"] == "A"
