@@ -214,6 +214,21 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
     if ages_p and sum(1 for a in ages_p if a > PROFILE_WARN_DAYS) >= 0.5 * len(ages_p):
         warnings.append("fundamentales de acciones desactualizados: %d de %d perfiles con más de %d días (Yahoo .info falla; el más antiguo, %d días)"
                         % (sum(1 for a in ages_p if a > PROFILE_WARN_DAYS), len(ages_p), PROFILE_WARN_DAYS, max(ages_p)))
+    # Market cap / EV / P/E / EV/EBITDA come from Yahoo's Valuation Measures table; `info` (the fallback) has a wrong EV for some ADRs.
+    h_prof = (d.get("health") or {}).get("profiles") if isinstance(d.get("health"), dict) else None
+    if isinstance(h_prof, dict) and isinstance(h_prof.get("valuation_table"), int) and h_prof.get("with_data"):
+        fresh_with = h_prof["with_data"] - h_prof.get("older_than_7d", 0)
+        if fresh_with >= 5 and h_prof["valuation_table"] < 0.6 * fresh_with:
+            warnings.append("tabla de valoración de Yahoo (Ticker.valuation) en solo %d de %d perfiles: capitalización/EV/P/E vienen de `info`, menos fiable (¿cambió yfinance o Yahoo?)"
+                            % (h_prof["valuation_table"], fresh_with))
+    odd_ev = []
+    for x in stocks:
+        mc, ev = x.get("market_cap"), x.get("enterprise_value")
+        if isinstance(mc, (int, float)) and isinstance(ev, (int, float)) and not isinstance(mc, bool) and not isinstance(ev, bool) and mc > 0 and ev > 0 \
+                and not (0.25 < ev / mc < 4):
+            odd_ev.append("%s (%.1fx)" % (x.get("symbol"), ev / mc))
+    if odd_ev:
+        warnings.append("EV incoherente con la capitalización (el dashboard lo oculta): %s" % odd_ev[:8])
     for k in ("indices", "stocks", "funds", "commodities", "forex"):
         rows_k = _rows(d, k)
         stale_k = [x.get("symbol") for x in rows_k if x.get("stale")]
