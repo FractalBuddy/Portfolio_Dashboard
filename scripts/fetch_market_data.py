@@ -568,11 +568,17 @@ def parse_valuation_measures(df):
     return out
 
 
+def _val_usable(val):
+    """A valuation table counts only with a market cap AND at least one more measure: a reply with just the market cap is a partial /
+    throttled answer, and trusting it would erase good P/E / EV figures."""
+    return bool(val) and "market_cap" in val and len(val) >= 2
+
+
 def merge_valuation(prof, val):
     """Valuation-table figures take precedence over `info` for the five measures Yahoo shows in that table. A measure the table
     lacks (loss-makers have no P/E) is removed so the dashboard shows "—" like Yahoo, instead of a stale `info` figure.
     Without a usable table (val empty) the `info` profile is returned untouched."""
-    if not val or "market_cap" not in val:
+    if not _val_usable(val):
         return prof
     merged = dict(prof)
     for key, _ in _VALUATION_LABELS:
@@ -595,10 +601,16 @@ def fetch_stock_profile(symbol):
             prof = parse_stock_profile(t.info)
             if prof:
                 val = {}
-                try:
-                    val = parse_valuation_measures(t.get_valuation_measures(freq="trailing", periods=0))
-                except Exception as e:
-                    print(f"  ! valuation table failed for {symbol}: {type(e).__name__}: {e}", file=sys.stderr)
+                for j in range(2):   # the table is a separate request: one retry before falling back to `info`
+                    try:
+                        val = parse_valuation_measures(t.get_valuation_measures(freq="trailing", periods=0))
+                        if _val_usable(val):
+                            break
+                    except Exception as e:
+                        print(f"  ! valuation table attempt {j + 1} failed for {symbol}: {type(e).__name__}: {e}", file=sys.stderr)
+                    val = {}
+                    if j == 0:
+                        time.sleep(random.uniform(0.5, 1.5))
                 if val:
                     old_ev, old_mc = prof.get("enterprise_value"), prof.get("market_cap")
                     new_ev, new_mc = val.get("enterprise_value"), val.get("market_cap")
@@ -606,8 +618,16 @@ def fetch_stock_profile(symbol):
                         print(f"  ~ {symbol}: EV de info ({old_ev:,}) != tabla de valoración ({new_ev:,}): se usa la tabla (la que muestra Yahoo)", file=sys.stderr)
                     if old_mc and new_mc and not (0.9 < old_mc / new_mc < 1.1):
                         print(f"  ~ {symbol}: capitalización de info ({old_mc:,}) != tabla de valoración ({new_mc:,}): se usa la tabla", file=sys.stderr)
+                else:
+                    # No table: `info` is all there is, and its EV is known to be wrong for some ADRs. An EV (and the EV/EBITDA derived
+                    # from it) that does not fit the market cap is never published.
+                    mc, ev = prof.get("market_cap"), prof.get("enterprise_value")
+                    if mc and ev and not (0.25 < ev / mc < 4):
+                        prof.pop("enterprise_value", None)
+                        prof.pop("ev_ebitda", None)
+                        print(f"  ! {symbol}: sin tabla de valoración y el EV de info ({ev / mc:.1f}x la capitalización) no es creíble: no se publica EV ni EV/EBITDA", file=sys.stderr)
                 prof = merge_valuation(prof, val)
-                prof["_valuation"] = bool(val)
+                prof["_valuation"] = _val_usable(val)
                 return prof
         except Exception as e:
             print(f"  ! profile attempt {i + 1} failed for {symbol}: {type(e).__name__}: {e}", file=sys.stderr)
@@ -645,6 +665,9 @@ def _profile_warnings(symbol, new, old):
     return msgs
 
 
+_LAST_VALUATION = {"table": 0, "fresh": 0}   # filled by attach_profiles: how many fresh profiles got Yahoo's valuation table
+
+
 def attach_profiles(stocks, prev=None, fetch=fetch_stock_profile, max_fail_streak=5):
     """Adds sector / industry / employees / market cap / EV (+ `profile_as_of`) to every stock. These move slowly:
     when Yahoo fails for a symbol, the previous feed's values are kept (with their OLD `profile_as_of`) instead of
@@ -652,6 +675,7 @@ def attach_profiles(stocks, prev=None, fetch=fetch_stock_profile, max_fail_strea
     (rate limit): everything else still falls back to the previous values. Never raises."""
     prev_by_sym = {s.get("symbol"): s for s in ((prev or {}).get("stocks") or []) if isinstance(s, dict)}
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    global _LAST_VALUATION
     streak, fresh, kept, val_ok = 0, 0, 0, 0
     for s in stocks:
         prof = {}
@@ -692,6 +716,7 @@ def attach_profiles(stocks, prev=None, fetch=fetch_stock_profile, max_fail_strea
     print(f"  valuation table (Yahoo's Statistics page: market cap, EV, P/E, EV/EBITDA): {val_ok} of {fresh} fresh profiles" + ("" if val_ok == fresh else "  <-- the rest use Ticker.info figures, which can be wrong for ADRs"))
     # Per-field coverage, so the log shows at a glance whether Yahoo is returning each metric (a field that drops to 0
     # across the board means Yahoo renamed it). Missing values are normal for banks / loss-makers / foreign listings.
+    _LAST_VALUATION = {"table": val_ok, "fresh": fresh}
     cov = ", ".join(f"{k} {sum(1 for s in stocks if k in s)}" for k in PROFILE_FIELDS if k not in ("cap_currency", "financial_currency"))
     print(f"  profile coverage (of {len(stocks)} stocks): {cov}")
     return stocks
@@ -1663,6 +1688,7 @@ def compute_health(data, today=None):
         "stale_symbols": sorted(set(stale))[:40],
         "history_reused": sorted(set(hist_reused))[:40],
         "profiles": {"stocks": len(stocks), "with_data": with_profile,
+                     "valuation_table": int(_LAST_VALUATION.get("table", 0)),
                      "oldest_days": max(ages) if ages else None,
                      "older_than_7d": sum(1 for a in ages if a > 7)},
     }
@@ -1743,7 +1769,8 @@ def main():
     print(f"HEALTH: {len(h['stale_symbols'])} símbolos con precio antiguo {h['stale_symbols'] or ''}; "
           f"{len(h['history_reused'])} con histórico reutilizado {h['history_reused'] or ''}; "
           f"perfiles: {h['profiles']['with_data']}/{h['profiles']['stocks']} con datos, el más antiguo de {h['profiles']['oldest_days']} días, "
-          f"{h['profiles']['older_than_7d']} con más de 7 días")
+          f"{h['profiles']['older_than_7d']} con más de 7 días; "
+          f"tabla de valoración de Yahoo: {h['profiles']['valuation_table']}/{h['profiles']['with_data']}")
     data = sanitize_for_json(data)
 
     with open("data.json", "w") as f:
