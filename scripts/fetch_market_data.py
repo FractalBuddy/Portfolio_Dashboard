@@ -179,6 +179,14 @@ _DEADLINE = time.monotonic() + 14 * 60
 # Pasado ese límite parse_feed() devuelve [] sin tocar la red.
 NEWS_BUDGET_SECONDS = 5 * 60
 _NEWS_DEADLINE = None
+# Un precio cuya última barra tiene más de esta antigüedad (días naturales) se publica marcado `stale` (cubre fin de semana
+# largo + festivo; un valor deslistado o congelado en Yahoo deja de pasar por "de hoy").
+STALE_BAR_DAYS = 7
+# Una fila arrastrada del feed anterior (el símbolo falló hoy) se deja de arrastrar pasados estos días: mejor que desaparezca
+# (y lo detecte el sanity-check) que enseñar un precio de hace semanas como si fuera vivo.
+STALE_CARRY_MAX_DAYS = 30
+# Fundamentales de Yahoo reutilizados del feed anterior (Yahoo falla): se conservan como mucho este tiempo.
+PROFILE_MAX_REUSE_DAYS = 60
 # Tope por feed: tiempo total (un servidor que gotea bytes no puede alargarlo) y tamaño.
 FEED_MAX_SECONDS = 20
 FEED_MAX_BYTES = 3_000_000
@@ -186,18 +194,21 @@ FEED_MAX_BYTES = 3_000_000
 
 def _drop_phantom_bars(hist, max_dev=0.15):
     """Yahoo a veces devuelve una barra 'fantasma' (volumen 0, O=H=L=C) con un salto >15 % respecto a AMBOS vecinos
-    (p. ej. SWDA.L 2025-10-24: +34 %/-24 %). Contamina volatilidad y gráficos; se descarta (solo barras interiores)."""
+    (p. ej. SWDA.L 2025-10-24: +34 %/-24 %). Contamina volatilidad y gráficos; se descarta. La primera/última barra solo
+    tiene un vecino: se compara con ese."""
     try:
         if hist is None or len(hist) < 3 or not {"Open", "High", "Low", "Close", "Volume"}.issubset(hist.columns):
             return hist
         c = hist["Close"].astype(float)
-        keep = []
-        for i in range(len(hist)):
+        keep, n = [], len(hist)
+        for i in range(n):
             row = hist.iloc[i]
             flat = (float(row["Volume"] or 0) == 0 and float(row["Open"]) == float(row["High"]) == float(row["Low"]) == float(row["Close"]))
-            if flat and 0 < i < len(hist) - 1:
-                a, b = float(c.iloc[i - 1]), float(c.iloc[i + 1])
-                if a and b and abs(float(c.iloc[i]) / a - 1) > max_dev and abs(float(c.iloc[i]) / b - 1) > max_dev:
+            if flat:
+                # Interior bars are compared with BOTH neighbours; the first/last bar with the single one it has (a phantom
+                # LAST bar would otherwise become "today's price"). A real >15 % day never has volume 0 and O=H=L=C.
+                nbrs = [float(c.iloc[j]) for j in (i - 1, i + 1) if 0 <= j < n]
+                if nbrs and all(a and abs(float(c.iloc[i]) / a - 1) > max_dev for a in nbrs):
                     keep.append(False)
                     continue
             keep.append(True)
@@ -247,19 +258,54 @@ def fetch_symbol(symbol):
         vol = float(hist["Volume"].iloc[-1]) if "Volume" in hist else None
         avg_vol = float(hist["Volume"].mean()) if "Volume" in hist else None
         vol_ratio = (vol / avg_vol) if (vol and avg_vol) else None
-        return {
+        out = {
             "price": round(last, 4),
             "change_pct": round(change_pct, 2),
             "change_pct_7d": round(change_pct_7d, 2),
             "volume_ratio": round(vol_ratio, 2) if vol_ratio else None,
             "sparkline": [round(float(c), 4) for c in hist["Close"].tolist()],
         }
+        try:  # fecha de la última barra: permite detectar precios congelados / símbolos deslistados
+            as_of = hist.index[-1].strftime("%Y-%m-%d")
+            out["as_of"] = as_of
+            age = (datetime.now(timezone.utc).date() - datetime.strptime(as_of, "%Y-%m-%d").date()).days
+            if age > STALE_BAR_DAYS:
+                out["stale"] = True
+                out["stale_since"] = as_of
+                print(f"  ! {symbol}: la última barra es del {as_of} ({age} días): se publica marcada como antigua", file=sys.stderr)
+        except Exception:
+            pass
+        return out
     except Exception as e:
         print(f"  ! failed {symbol}: {e}", file=sys.stderr)
         return None
 
 
-def build_list(items):
+def _carry_previous_row(symbol, name, extra, old, today=None):
+    """Fila del feed anterior para un símbolo que hoy ha fallado, marcada `stale` (+ `stale_since`). None si no hay fila
+    anterior utilizable o lleva más de STALE_CARRY_MAX_DAYS arrastrándose. Antes el símbolo simplemente desaparecía del
+    feed: el dashboard perdía la acción (y sus posiciones/Explorar) sin ningún aviso."""
+    if not isinstance(old, dict) or not isinstance(old.get("price"), (int, float)) or isinstance(old.get("price"), bool):
+        return None
+    today = today or datetime.now(timezone.utc).date()
+    since = str(old.get("stale_since") or old.get("as_of") or today.isoformat())[:10]
+    try:
+        if (today - datetime.strptime(since, "%Y-%m-%d").date()).days > STALE_CARRY_MAX_DAYS:
+            return None
+    except ValueError:
+        since = today.isoformat()
+    row = dict(old)
+    row["name"] = name
+    if extra:
+        row["region"] = extra[0]
+    row["stale"] = True
+    row["stale_since"] = since
+    row.pop("intraday", None)  # el intradía de ayer engañaría en el gráfico 1D
+    return row
+
+
+def build_list(items, prev_rows=None):
+    prev_by = {r.get("symbol"): r for r in (prev_rows or []) if isinstance(r, dict)}
     out = []
     for entry in items:
         symbol, name = entry[0], entry[1]
@@ -270,6 +316,11 @@ def build_list(items):
             if extra:
                 row["region"] = extra[0]
             out.append(row)
+        else:
+            row = _carry_previous_row(symbol, name, extra, prev_by.get(symbol))
+            if row:
+                print(f"  ! {symbol}: sin datos hoy, se conserva la fila del feed anterior marcada como antigua (desde {row['stale_since']})", file=sys.stderr)
+                out.append(row)
     return out
 
 
@@ -352,11 +403,22 @@ def fetch_intraday_history(symbol):
         return []
 
 
-def attach_histories(items):
+def attach_histories(items, prev_rows=None):
     """Attaches full ('max') daily history + intraday 5-min bars to any list of items
-    that have a 'symbol' key (stocks, indices, forex, commodities, funds)."""
+    that have a 'symbol' key (stocks, indices, forex, commodities, funds).
+    If Yahoo returns no daily history for a symbol today, the previous feed's history is reused (flagged
+    `history_stale`) instead of publishing an empty chart: it only lacks the latest days. Intraday is never reused
+    (yesterday's 5-minute bars would pass for today's session)."""
+    prev_by = {r.get("symbol"): r for r in (prev_rows or []) if isinstance(r, dict)}
     for s in items:
-        s["history"] = fetch_full_history(s["symbol"])
+        h = fetch_full_history(s["symbol"])
+        if not h:
+            old_h = (prev_by.get(s["symbol"]) or {}).get("history")
+            if isinstance(old_h, list) and old_h:
+                h = old_h
+                s["history_stale"] = True
+                print(f"  ! {s['symbol']}: sin histórico hoy, se reutiliza el del feed anterior (history_stale)", file=sys.stderr)
+        s["history"] = h
         s["intraday"] = fetch_intraday_history(s["symbol"])
     return items
 
@@ -479,6 +541,35 @@ def fetch_stock_profile(symbol):
     return {}
 
 
+_PROFILE_CORE = tuple(k for k in PROFILE_FIELDS if k not in ("cap_currency", "financial_currency"))
+
+
+def _profile_degraded(new, old):
+    """True when a fresh profile has lost more than half of the metrics the previous one had (Yahoo sometimes answers a
+    throttled/partial `info`: keeping it would silently erase good data). Only judged when the previous profile was rich."""
+    n_old = sum(1 for k in _PROFILE_CORE if k in old)
+    n_new = sum(1 for k in _PROFILE_CORE if k in new)
+    return n_old >= 8 and n_new < 0.5 * n_old
+
+
+def _profile_warnings(symbol, new, old):
+    """Plausibility notes for the log (never blocks): a market cap that moved >60 % between two runs, or an EV that is
+    not coherent with the market cap (Yahoo's currency mix-ups on ADRs)."""
+    msgs = []
+    try:
+        mc, ev = new.get("market_cap"), new.get("enterprise_value")
+        if mc and ev and not (0.25 < ev / mc < 4):
+            msgs.append(f"EV/MarketCap = {ev / mc:.1f}x: EV y EV/EBITDA no son fiables (el dashboard los oculta)")
+        omc = (old or {}).get("market_cap")
+        if mc and omc and not (0.625 < mc / omc < 1.6):
+            msgs.append(f"capitalización {mc / omc - 1:+.0%} respecto al perfil anterior: comprueba que no es un error de Yahoo")
+    except Exception:
+        pass
+    for m in msgs:
+        print(f"  ! {symbol}: {m}", file=sys.stderr)
+    return msgs
+
+
 def attach_profiles(stocks, prev=None, fetch=fetch_stock_profile, max_fail_streak=5):
     """Adds sector / industry / employees / market cap / EV (+ `profile_as_of`) to every stock. These move slowly:
     when Yahoo fails for a symbol, the previous feed's values are kept (with their OLD `profile_as_of`) instead of
@@ -489,21 +580,33 @@ def attach_profiles(stocks, prev=None, fetch=fetch_stock_profile, max_fail_strea
     streak, fresh, kept = 0, 0, 0
     for s in stocks:
         prof = {}
+        old = prev_by_sym.get(s.get("symbol")) or {}
         if streak < max_fail_streak:
             try:
                 prof = fetch(s["symbol"])
             except Exception as e:
                 print(f"  ! profile failed for {s.get('symbol')}: {e}", file=sys.stderr)
+            if prof and _profile_degraded(prof, old):
+                print(f"  ! {s.get('symbol')}: Yahoo devolvió un perfil incompleto ({sum(1 for k in _PROFILE_CORE if k in prof)} de "
+                      f"{sum(1 for k in _PROFILE_CORE if k in old)} métricas): se descarta y se conserva el anterior", file=sys.stderr)
+                prof = {}
             streak = 0 if prof else streak + 1
             time.sleep(0.25)
         if prof:
+            _profile_warnings(s.get("symbol"), prof, old)
             s.update(prof)
             s["profile_as_of"] = today
             fresh += 1
             continue
-        old = prev_by_sym.get(s.get("symbol")) or {}
         got = {k: old[k] for k in PROFILE_FIELDS if k in old}
         if got:
+            try:  # unos fundamentales de hace meses no se presentan como vigentes: pasado el tope se omiten
+                age = (datetime.now(timezone.utc).date() - datetime.strptime(str(old.get("profile_as_of"))[:10], "%Y-%m-%d").date()).days
+            except ValueError:
+                age = None
+            if age is None or age > PROFILE_MAX_REUSE_DAYS:
+                print(f"  ! {s.get('symbol')}: el perfil anterior tiene {age if age is not None else '?'} días: no se reutiliza", file=sys.stderr)
+                continue
             s.update(got)
             if isinstance(old.get("profile_as_of"), str):
                 s["profile_as_of"] = old["profile_as_of"]
@@ -1450,41 +1553,79 @@ def sanitize_for_json(obj):
     return obj
 
 
+def compute_health(data, today=None):
+    """Resumen de fiabilidad del feed, para el log y para el dashboard (`health` en data.json): qué símbolos llevan precio
+    antiguo (Yahoo falló hoy y se conserva la fila anterior, o su última barra es vieja), qué históricos se han reutilizado
+    y cuántos perfiles de fundamentales están al día. Pura (no toca la red) y nunca lanza."""
+    today = today or datetime.now(timezone.utc).date()
+    data = data if isinstance(data, dict) else {}
+    stale, hist_reused = [], []
+    try:
+        for key in ("indices", "stocks", "funds", "commodities", "forex", "heatmap", "sector_heatmap"):
+            for r in (data.get(key) or []):
+                if not isinstance(r, dict):
+                    continue
+                if r.get("stale"):
+                    stale.append(str(r.get("symbol")))
+                if r.get("history_stale"):
+                    hist_reused.append(str(r.get("symbol")))
+    except Exception:
+        pass
+    ages = []
+    with_profile = 0
+    stocks = [r for r in (data.get("stocks") if isinstance(data.get("stocks"), list) else []) if isinstance(r, dict)]
+    for r in stocks:
+        if "market_cap" in r or "pe_forward" in r:
+            with_profile += 1
+        try:
+            ages.append((today - datetime.strptime(str(r.get("profile_as_of"))[:10], "%Y-%m-%d").date()).days)
+        except ValueError:
+            pass
+    return {
+        "stale_symbols": sorted(set(stale))[:40],
+        "history_reused": sorted(set(hist_reused))[:40],
+        "profiles": {"stocks": len(stocks), "with_data": with_profile,
+                     "oldest_days": max(ages) if ages else None,
+                     "older_than_7d": sum(1 for a in ages if a > 7)},
+    }
+
+
 def main():
+    prev = _load_prev_feed()
     print("Fetching indices...")
-    indices = build_list(INDICES)
+    indices = build_list(INDICES, prev.get("indices"))
     print("Fetching full ('max') + intraday history for each index...")
-    indices = attach_histories(indices)
+    indices = attach_histories(indices, prev.get("indices"))
     print("Fetching stocks...")
-    stocks = build_list(STOCKS)
+    stocks = build_list(STOCKS, prev.get("stocks"))
     print("Fetching full ('max') + intraday history for each stock (for the detail chart)...")
-    stocks = attach_histories(stocks)
+    stocks = attach_histories(stocks, prev.get("stocks"))
     print("Fetching company profile + market cap / EV for each stock...")
-    stocks = attach_profiles(stocks, _load_prev_feed())
+    stocks = attach_profiles(stocks, prev)
     print("Fetching funds...")
-    funds = build_list(FUNDS)
+    funds = build_list(FUNDS, prev.get("funds"))
     print("Fetching full ('max') + intraday history for each fund (Explore detail chart)...")
-    funds = attach_histories(funds)
+    funds = attach_histories(funds, prev.get("funds"))
     print("Fetching your actual fund holdings (NAV scrape + fallback)...")
     your_funds = build_your_funds()
     print("Fetching commodities...")
-    commodities = build_list(COMMODITIES)
+    commodities = build_list(COMMODITIES, prev.get("commodities"))
     print("Fetching full ('max') + intraday history for each commodity...")
-    commodities = attach_histories(commodities)
+    commodities = attach_histories(commodities, prev.get("commodities"))
     print("Fetching forex...")
-    forex = build_list(FOREX)
+    forex = build_list(FOREX, prev.get("forex"))
     print("Fetching full ('max') + intraday history for each forex pair...")
-    forex = attach_histories(forex)
+    forex = attach_histories(forex, prev.get("forex"))
     print("Fetching country heatmap...")
-    heatmap = build_list(COUNTRY_HEATMAP)
+    heatmap = build_list(COUNTRY_HEATMAP, prev.get("heatmap"))
     print("Fetching sector heatmap...")
-    sector_heatmap = build_list(SECTOR_HEATMAP)
+    sector_heatmap = build_list(SECTOR_HEATMAP, prev.get("sector_heatmap"))
     print("Fetching FRED rates...")
     rates = build_rates()
     print("Fetching Spain CPI (inflation) history...")
     cpi, cpi_meta = fetch_cpi_history()
     if FRED_API_KEY:
-        rates, cpi, cpi_meta = reuse_previous_fred(rates, cpi, cpi_meta, _load_prev_feed())
+        rates, cpi, cpi_meta = reuse_previous_fred(rates, cpi, cpi_meta, prev)
     global _NEWS_DEADLINE
     _NEWS_DEADLINE = min(_DEADLINE, time.monotonic() + NEWS_BUDGET_SECONDS)
     print("Fetching general news...")
@@ -1496,7 +1637,7 @@ def main():
     print("Fetching market mood (VIX, Fear & Greed)...")
     market_mood = build_market_mood()
     print("Fetching staking rates (Lido)...")
-    staking = build_staking(_load_prev_feed())
+    staking = build_staking(prev)
 
     data = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -1519,6 +1660,12 @@ def main():
         "market_mood": market_mood,
         "staking": staking,
     }
+    data["health"] = compute_health(data)
+    h = data["health"]
+    print(f"HEALTH: {len(h['stale_symbols'])} símbolos con precio antiguo {h['stale_symbols'] or ''}; "
+          f"{len(h['history_reused'])} con histórico reutilizado {h['history_reused'] or ''}; "
+          f"perfiles: {h['profiles']['with_data']}/{h['profiles']['stocks']} con datos, el más antiguo de {h['profiles']['oldest_days']} días, "
+          f"{h['profiles']['older_than_7d']} con más de 7 días")
     data = sanitize_for_json(data)
 
     with open("data.json", "w") as f:
