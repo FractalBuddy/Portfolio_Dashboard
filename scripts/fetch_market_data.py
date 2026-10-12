@@ -525,14 +525,89 @@ def parse_stock_profile(info):
     return out
 
 
+# Yahoo's own "Valuation Measures" table (Statistics page). yfinance >= 1.7 exposes it as Ticker.valuation / get_valuation_measures():
+# it comes from the fundamentals-timeseries API and its "Current" column is exactly what the website shows. `Ticker.info`
+# (quoteSummary) is NOT the same source: for ADRs it returns an Enterprise Value in the wrong currency (ASML 37.98T, TSM 16.4T
+# vs. the 660B / 1.93T the website shows) and P/E / market cap computed at a different moment.
+_VALUATION_LABELS = (("market_cap", "Market Cap"), ("enterprise_value", "Enterprise Value"), ("pe_trailing", "Trailing P/E"),
+                     ("pe_forward", "Forward P/E"), ("ev_ebitda", "Enterprise Value/EBITDA"))
+
+
+def parse_valuation_measures(df):
+    """Pure parser of Ticker.get_valuation_measures(): the "Current" column -> {market_cap, enterprise_value, pe_trailing,
+    pe_forward, ev_ebitda} with ONLY the plausible values present. {} when the table is missing/empty or has no market cap
+    (then the caller keeps what `info` said). Never raises."""
+    out = {}
+    try:
+        if df is None or getattr(df, "empty", True) or "Current" not in df.columns:
+            return out
+        col = df["Current"]
+
+        def num(label):
+            if label not in df.index:
+                return None
+            try:
+                v = float(col[label])
+            except (TypeError, ValueError):
+                return None
+            return v if math.isfinite(v) else None
+
+        mc = num("Market Cap")
+        if mc is None or mc <= 0:
+            return out
+        out["market_cap"] = int(mc)
+        ev = num("Enterprise Value")
+        if ev is not None and ev != 0:
+            out["enterprise_value"] = int(ev)
+        for key, label in (("pe_trailing", "Trailing P/E"), ("pe_forward", "Forward P/E"), ("ev_ebitda", "Enterprise Value/EBITDA")):
+            v = num(label)
+            if v is not None and 0 < v < 10000:
+                out[key] = round(v, 2)
+    except Exception:
+        return {}
+    return out
+
+
+def merge_valuation(prof, val):
+    """Valuation-table figures take precedence over `info` for the five measures Yahoo shows in that table. A measure the table
+    lacks (loss-makers have no P/E) is removed so the dashboard shows "—" like Yahoo, instead of a stale `info` figure.
+    Without a usable table (val empty) the `info` profile is returned untouched."""
+    if not val or "market_cap" not in val:
+        return prof
+    merged = dict(prof)
+    for key, _ in _VALUATION_LABELS:
+        if key in val:
+            merged[key] = val[key]
+        else:
+            merged.pop(key, None)
+    return merged
+
+
 def fetch_stock_profile(symbol):
-    """One Yahoo quoteSummary call (Ticker.info) -> parse_stock_profile(); {} on any failure (caller falls back)."""
+    """Yahoo: Ticker.info (profile, margins, balance sheet...) + the Valuation Measures table (market cap, EV, P/Es, EV/EBITDA)
+    -> parse + merge. {} on total failure (caller falls back to the previous feed). The valuation table failing alone is not
+    fatal: `info` figures are used and the `_valuation` marker says so (popped by attach_profiles, logged, never published)."""
     if time.monotonic() > _DEADLINE:
         return {}
     for i in range(2):
         try:
-            prof = parse_stock_profile(yf.Ticker(symbol).info)
+            t = yf.Ticker(symbol)
+            prof = parse_stock_profile(t.info)
             if prof:
+                val = {}
+                try:
+                    val = parse_valuation_measures(t.get_valuation_measures(freq="trailing", periods=0))
+                except Exception as e:
+                    print(f"  ! valuation table failed for {symbol}: {type(e).__name__}: {e}", file=sys.stderr)
+                if val:
+                    old_ev, old_mc = prof.get("enterprise_value"), prof.get("market_cap")
+                    new_ev, new_mc = val.get("enterprise_value"), val.get("market_cap")
+                    if old_ev and new_ev and not (0.8 < old_ev / new_ev < 1.25):
+                        print(f"  ~ {symbol}: EV de info ({old_ev:,}) != tabla de valoración ({new_ev:,}): se usa la tabla (la que muestra Yahoo)", file=sys.stderr)
+                    if old_mc and new_mc and not (0.9 < old_mc / new_mc < 1.1):
+                        print(f"  ~ {symbol}: capitalización de info ({old_mc:,}) != tabla de valoración ({new_mc:,}): se usa la tabla", file=sys.stderr)
+                prof = merge_valuation(prof, val)
+                prof["_valuation"] = bool(val)
                 return prof
         except Exception as e:
             print(f"  ! profile attempt {i + 1} failed for {symbol}: {type(e).__name__}: {e}", file=sys.stderr)
@@ -577,7 +652,7 @@ def attach_profiles(stocks, prev=None, fetch=fetch_stock_profile, max_fail_strea
     (rate limit): everything else still falls back to the previous values. Never raises."""
     prev_by_sym = {s.get("symbol"): s for s in ((prev or {}).get("stocks") or []) if isinstance(s, dict)}
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    streak, fresh, kept = 0, 0, 0
+    streak, fresh, kept, val_ok = 0, 0, 0, 0
     for s in stocks:
         prof = {}
         old = prev_by_sym.get(s.get("symbol")) or {}
@@ -593,6 +668,8 @@ def attach_profiles(stocks, prev=None, fetch=fetch_stock_profile, max_fail_strea
             streak = 0 if prof else streak + 1
             time.sleep(0.25)
         if prof:
+            if prof.pop("_valuation", None):
+                val_ok += 1
             _profile_warnings(s.get("symbol"), prof, old)
             s.update(prof)
             s["profile_as_of"] = today
@@ -612,6 +689,7 @@ def attach_profiles(stocks, prev=None, fetch=fetch_stock_profile, max_fail_strea
                 s["profile_as_of"] = old["profile_as_of"]
             kept += 1
     print(f"  profiles: {fresh} fresh, {kept} reused from the previous feed, {len(stocks) - fresh - kept} without data")
+    print(f"  valuation table (Yahoo's Statistics page: market cap, EV, P/E, EV/EBITDA): {val_ok} of {fresh} fresh profiles" + ("" if val_ok == fresh else "  <-- the rest use Ticker.info figures, which can be wrong for ADRs"))
     # Per-field coverage, so the log shows at a glance whether Yahoo is returning each metric (a field that drops to 0
     # across the board means Yahoo renamed it). Missing values are normal for banks / loss-makers / foreign listings.
     cov = ", ".join(f"{k} {sum(1 for s in stocks if k in s)}" for k in PROFILE_FIELDS if k not in ("cap_currency", "financial_currency"))
