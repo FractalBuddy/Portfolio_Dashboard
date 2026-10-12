@@ -31,6 +31,12 @@ import os
 import statistics
 import sys
 
+class Alert(str):
+    """Aviso que merece que el dueño se entere (el feed se publica, pero con datos degradados que alguien debe corregir):
+    el workflow lo manda a Healthchecks como /fail con el texto. Es un `str` normal: el resto del código y los tests no lo notan.
+    Los avisos que no son Alert (un tropiezo puntual de Yahoo, información) solo quedan en el log."""
+
+
 # Listas de filas con `symbol`; solo las cuatro primeras y `funds` llevan histórico.
 SYMBOL_LISTS = ("indices", "stocks", "funds", "commodities", "forex", "heatmap", "sector_heatmap")
 HISTORY_LISTS = ("indices", "stocks", "funds", "commodities", "forex")
@@ -46,6 +52,8 @@ MIN_FRESH_FRACTION = 0.5         # "mayoría": al menos la mitad de los símbolo
 STALE_REUSE_WARN_DAYS = 7        # aviso si tipos/IPC reutilizados llevan tanto sin refrescarse
 MAX_STALE_ROWS_FRACTION = 0.3    # más de este % de una lista con precio antiguo (stale) = Yahoo roto, no se publica
 PROFILE_WARN_DAYS = 7            # aviso si los fundamentales de las acciones llevan tanto sin refrescarse
+STALE_ALERT_DAYS = 2             # una fila con precio antiguo desde hace tanto ya no es un tropiezo puntual de Yahoo: se avisa al dueño
+STALE_ALERT_FRACTION = 0.2       # ...o si una lista entera (>= 20 %) lleva precio antiguo hoy
 PROFILE_COVERAGE_DROP = 0.6      # aviso si el nº de acciones con perfil cae por debajo de este % del feed anterior
 
 # Límites de plausibilidad de los campos de perfil de las acciones (más holgados que los del parser: aquí solo se
@@ -172,7 +180,7 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
     for since in [r.get("stale_since") for r in _rows(d, "rates")] + [cm.get("stale_since")]:
         try:
             if since and (today - dt.date.fromisoformat(str(since)[:10])).days > STALE_REUSE_WARN_DAYS:
-                warnings.append("FRED lleva más de %d días sin refrescarse (desde %s): revisa la clave o las series" % (STALE_REUSE_WARN_DAYS, since))
+                warnings.append(Alert("FRED lleva más de %d días sin refrescarse (desde %s): revisa la clave o las series" % (STALE_REUSE_WARN_DAYS, since)))
                 break
         except ValueError:
             pass
@@ -212,15 +220,15 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
         except ValueError:
             pass
     if ages_p and sum(1 for a in ages_p if a > PROFILE_WARN_DAYS) >= 0.5 * len(ages_p):
-        warnings.append("fundamentales de acciones desactualizados: %d de %d perfiles con más de %d días (Yahoo .info falla; el más antiguo, %d días)"
-                        % (sum(1 for a in ages_p if a > PROFILE_WARN_DAYS), len(ages_p), PROFILE_WARN_DAYS, max(ages_p)))
+        warnings.append(Alert("fundamentales de acciones desactualizados: %d de %d perfiles con más de %d días (Yahoo .info falla; el más antiguo, %d días)"
+                        % (sum(1 for a in ages_p if a > PROFILE_WARN_DAYS), len(ages_p), PROFILE_WARN_DAYS, max(ages_p))))
     # Market cap / EV / P/E / EV/EBITDA come from Yahoo's Valuation Measures table; `info` (the fallback) has a wrong EV for some ADRs.
     h_prof = (d.get("health") or {}).get("profiles") if isinstance(d.get("health"), dict) else None
     if isinstance(h_prof, dict) and isinstance(h_prof.get("valuation_table"), int) and h_prof.get("with_data"):
         fresh_with = h_prof["with_data"] - h_prof.get("older_than_7d", 0)
         if fresh_with >= 5 and h_prof["valuation_table"] < 0.6 * fresh_with:
-            warnings.append("tabla de valoración de Yahoo (Ticker.valuation) en solo %d de %d perfiles: capitalización/EV/P/E vienen de `info`, menos fiable (¿cambió yfinance o Yahoo?)"
-                            % (h_prof["valuation_table"], fresh_with))
+            warnings.append(Alert("tabla de valoración de Yahoo (Ticker.valuation) en solo %d de %d perfiles: capitalización/EV/P/E vienen de `info`, menos fiable (¿cambió yfinance o Yahoo?)"
+                            % (h_prof["valuation_table"], fresh_with)))
     odd_ev = []
     for x in stocks:
         mc, ev = x.get("market_cap"), x.get("enterprise_value")
@@ -228,12 +236,24 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
                 and not (0.25 < ev / mc < 4):
             odd_ev.append("%s (%.1fx)" % (x.get("symbol"), ev / mc))
     if odd_ev:
-        warnings.append("EV incoherente con la capitalización (el dashboard lo oculta): %s" % odd_ev[:8])
+        warnings.append(Alert("EV incoherente con la capitalización (el dashboard lo oculta): %s" % odd_ev[:8]))
     for k in ("indices", "stocks", "funds", "commodities", "forex"):
         rows_k = _rows(d, k)
         stale_k = [x.get("symbol") for x in rows_k if x.get("stale")]
         if stale_k:
-            warnings.append("%s con precio antiguo (Yahoo no devolvió datos nuevos): %s" % (k, stale_k[:8]))
+            old_k = []
+            for x in rows_k:
+                if x.get("stale"):
+                    try:
+                        if (today - dt.date.fromisoformat(str(x.get("stale_since"))[:10])).days >= STALE_ALERT_DAYS:
+                            old_k.append(x.get("symbol"))
+                    except ValueError:
+                        pass
+            msg = "%s con precio antiguo (Yahoo no devolvió datos nuevos): %s" % (k, stale_k[:8])
+            if old_k:
+                msg += " — desde hace %d+ días: %s" % (STALE_ALERT_DAYS, old_k[:8])
+            persistent = bool(old_k) or (len(rows_k) >= 3 and len(stale_k) >= STALE_ALERT_FRACTION * len(rows_k))
+            warnings.append(Alert(msg) if persistent else msg)
             need(len(rows_k) < 3 or len(stale_k) <= MAX_STALE_ROWS_FRACTION * len(rows_k),
                  "%s: %d de %d filas con precio antiguo (¿Yahoo caído?)" % (k, len(stale_k), len(rows_k)))
     hist_reused = [x.get("symbol") for k in HISTORY_LISTS for x in _rows(d, k) if x.get("history_stale")]
@@ -293,14 +313,14 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
         n_prev = sum(1 for x in _rows(prev, "stocks") if "market_cap" in x)
         n_new = sum(1 for x in stocks if "market_cap" in x)
         if n_prev >= 10 and n_new < PROFILE_COVERAGE_DROP * n_prev:
-            warnings.append("perfiles de acciones: solo %d con capitalización frente a %d en el feed anterior (¿Yahoo .info limitando?)" % (n_new, n_prev))
+            warnings.append(Alert("perfiles de acciones: solo %d con capitalización frente a %d en el feed anterior (¿Yahoo .info limitando?)" % (n_new, n_prev)))
         # your_funds: ningún fondo con NAV exacto antes puede perderlo (ni desaparecer).
         new_f = {f.get("isin"): f for f in yf_rows}
         lost = [f.get("isin") for f in _rows(prev, "your_funds")
                 if f.get("price") is not None and (f.get("isin") not in new_f or new_f[f.get("isin")].get("price") is None)]
         if lost:
             # Solo aviso: el NAV sale de un scrape secundario y no debe frenar la publicación de los precios de bolsa/índices.
-            warnings.append("your_funds: se ha perdido el NAV exacto de %s (el scrape de iShares falla o cambió la página; se usa el proxy)" % lost)
+            warnings.append(Alert("your_funds: se ha perdido el NAV exacto de %s (el scrape de iShares falla o cambió la página; se usa el proxy)" % lost))
         if prev_bytes:
             if data_bytes < MIN_RATIO_VS_PREV * prev_bytes:
                 reg.append("el feed nuevo pesa %s bytes, menos del %d %% del anterior (%s)" % (data_bytes, int(MIN_RATIO_VS_PREV * 100), prev_bytes))
@@ -327,6 +347,8 @@ def main(argv=None):
     ap.add_argument("--data", default="data.json")
     ap.add_argument("--meta", default="meta.json")
     ap.add_argument("--prev", default=None, help="feed publicado anteriormente (opcional)")
+    ap.add_argument("--alerts-out", default=None,
+                    help="fichero donde escribir, en UNA línea, los avisos que merecen que el dueño se entere (vacío = todo bien)")
     a = ap.parse_args(argv)
 
     try:
@@ -358,8 +380,15 @@ def main(argv=None):
         print("::error::feed malformado: %s" % _line(type(e).__name__))
         return 1
 
+    alerts = [w for w in warnings if isinstance(w, Alert)]
     for w in warnings:
         print("::warning::" + _line(w))
+    if a.alerts_out:
+        try:
+            with open(a.alerts_out, "w", encoding="utf-8") as f:
+                f.write(" | ".join(_line(w) for w in alerts)[:900])
+        except OSError as e:
+            print("::warning::no se pudo escribir %s (%s)" % (_line(a.alerts_out), _line(type(e).__name__)))
     for e in errors:
         print("::error::" + _line(e))
     if errors:
