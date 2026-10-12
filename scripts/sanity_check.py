@@ -44,6 +44,19 @@ MIN_MEDIAN_STOCK_BARS = 250      # mediana de barras del histórico de las accio
 MAX_HISTORY_AGE_DAYS = 6         # antigüedad máxima de la última barra (cubre fin de semana + festivo)
 MIN_FRESH_FRACTION = 0.5         # "mayoría": al menos la mitad de los símbolos con barra reciente
 STALE_REUSE_WARN_DAYS = 7        # aviso si tipos/IPC reutilizados llevan tanto sin refrescarse
+MAX_STALE_ROWS_FRACTION = 0.3    # más de este % de una lista con precio antiguo (stale) = Yahoo roto, no se publica
+PROFILE_WARN_DAYS = 7            # aviso si los fundamentales de las acciones llevan tanto sin refrescarse
+PROFILE_COVERAGE_DROP = 0.6      # aviso si el nº de acciones con perfil cae por debajo de este % del feed anterior
+
+# Límites de plausibilidad de los campos de perfil de las acciones (más holgados que los del parser: aquí solo se
+# atrapa un fetch roto o manipulado, no un dato raro de Yahoo). El job `publish` no se fía de la salida de `fetch`.
+PROFILE_NUM_BOUNDS = {
+    "market_cap": (0, 1e15), "enterprise_value": (-1e15, 1e15), "employees": (0, 5e6),
+    "pe_trailing": (0, 1e4), "pe_forward": (0, 1e4), "ev_ebitda": (0, 1e4),
+    "profit_margin": (-5000, 500), "operating_margin": (-5000, 500), "beta": (-20, 20), "insiders_pct": (0, 100),
+    "dividend_yield": (0, 30), "dividend_rate": (0, 1e5), "dividend_5y_avg": (0, 30),
+    "ebitda": (-1e15, 1e15), "quarterly_earnings_growth": (-1000, 10000), "total_cash": (0, 1e15), "total_debt": (0, 1e15),
+}
 
 
 def _rows(d, key):
@@ -174,6 +187,44 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
     need(len(bad) <= 2, "precio/variación inverosímil: %s" % bad[:5])
     need(len(stocks) >= 25 and len(_rows(d, "funds")) >= 3, "el universo se ha encogido")
 
+    # ---- Fundamentales de las acciones (Yahoo Ticker.info) y filas con precio antiguo
+    bad_prof = []
+    for x in stocks:
+        for k, (lo, hi) in PROFILE_NUM_BOUNDS.items():
+            if k in x and not (_num(x[k]) and lo <= x[k] <= hi):
+                bad_prof.append("%s.%s" % (x.get("symbol"), k))
+        for k in ("sector", "industry"):
+            if k in x and not (isinstance(x[k], str) and len(x[k]) <= 80):
+                bad_prof.append("%s.%s" % (x.get("symbol"), k))
+        for k in ("cap_currency", "financial_currency"):
+            if k in x and not (isinstance(x[k], str) and len(x[k]) == 3 and x[k].isalpha() and x[k].isupper()):
+                bad_prof.append("%s.%s" % (x.get("symbol"), k))
+        if "profile_as_of" in x:
+            try:
+                dt.date.fromisoformat(str(x["profile_as_of"])[:10])
+            except ValueError:
+                bad_prof.append("%s.profile_as_of" % x.get("symbol"))
+    need(not bad_prof, "perfil de acción con campos inverosímiles o de tipo erróneo: %s" % bad_prof[:6])
+    ages_p = []
+    for x in stocks:
+        try:
+            ages_p.append((today - dt.date.fromisoformat(str(x.get("profile_as_of"))[:10])).days)
+        except ValueError:
+            pass
+    if ages_p and sum(1 for a in ages_p if a > PROFILE_WARN_DAYS) >= 0.5 * len(ages_p):
+        warnings.append("fundamentales de acciones desactualizados: %d de %d perfiles con más de %d días (Yahoo .info falla; el más antiguo, %d días)"
+                        % (sum(1 for a in ages_p if a > PROFILE_WARN_DAYS), len(ages_p), PROFILE_WARN_DAYS, max(ages_p)))
+    for k in ("indices", "stocks", "funds", "commodities", "forex"):
+        rows_k = _rows(d, k)
+        stale_k = [x.get("symbol") for x in rows_k if x.get("stale")]
+        if stale_k:
+            warnings.append("%s con precio antiguo (Yahoo no devolvió datos nuevos): %s" % (k, stale_k[:8]))
+            need(len(rows_k) < 3 or len(stale_k) <= MAX_STALE_ROWS_FRACTION * len(rows_k),
+                 "%s: %d de %d filas con precio antiguo (¿Yahoo caído?)" % (k, len(stale_k), len(rows_k)))
+    hist_reused = [x.get("symbol") for k in HISTORY_LISTS for x in _rows(d, k) if x.get("history_stale")]
+    if hist_reused:
+        warnings.append("histórico reutilizado del feed anterior: %s" % hist_reused[:8])
+
     links_ok = all(str(n.get("link", "")).startswith(("http://", "https://"))
                    for k in news for n in news[k] if isinstance(n, dict)) if news else True
     need(links_ok, "enlace de noticia no http(s)")
@@ -222,6 +273,12 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
                                and len(_hist(ns[s])) < (1 - MAX_HISTORY_LOSS) * len(_hist(x)))
                 if len(short) > tol:
                     reg.append("%s: histórico acortado >%d %% en %d símbolos (tolerancia %d): %s" % (k, int(MAX_HISTORY_LOSS * 100), len(short), tol, short[:6]))
+        # Perfiles: si de golpe muchas menos acciones traen fundamentales, Yahoo .info está fallando (solo aviso: los
+        # precios y gráficos no dependen de ello y el dashboard conserva el último perfil bueno).
+        n_prev = sum(1 for x in _rows(prev, "stocks") if "market_cap" in x)
+        n_new = sum(1 for x in stocks if "market_cap" in x)
+        if n_prev >= 10 and n_new < PROFILE_COVERAGE_DROP * n_prev:
+            warnings.append("perfiles de acciones: solo %d con capitalización frente a %d en el feed anterior (¿Yahoo .info limitando?)" % (n_new, n_prev))
         # your_funds: ningún fondo con NAV exacto antes puede perderlo (ni desaparecer).
         new_f = {f.get("isin"): f for f in yf_rows}
         lost = [f.get("isin") for f in _rows(prev, "your_funds")
