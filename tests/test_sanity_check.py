@@ -474,3 +474,24 @@ def test_main_escribe_alerts_out_en_una_linea(tmp_path, capsys, monkeypatch):
     assert "\n" not in txt and len(txt) <= 900
     assert rc == 0, capsys.readouterr().out
     assert "tabla de valoración" in txt and "precio antiguo" in txt
+
+
+def test_fx_usd_forma_capitalizacion_sin_usd_y_tipos_reutilizados():
+    d, m = _feed_with_profiles(n=3, table=3)
+    d["fx_usd"] = {"USD": 1.0, "DKK": 0.15}
+    for x in d["stocks"][:3]:
+        x.update({"cap_currency": "USD", "market_cap_usd": 1e11})
+    assert run(d, m, None)[0] == [] and _alerts(run(d, m, None)[1]) == []
+    del d["stocks"][0]["market_cap_usd"]                            # sin market_cap_usd: alerta
+    errs, warns = run(d, m, None)
+    assert errs == [] and any("sin capitalización en USD" in w and "S0" in w for w in _alerts(warns))
+    d["stocks"][0]["market_cap_usd"] = 1.5e11
+    d["health"]["fx_stale"] = ["DKK"]                               # tipo reutilizado: solo aviso
+    errs, warns = run(d, m, None)
+    assert errs == [] and any("reutilizados" in w for w in warns) and _alerts(warns) == []
+    for bad in ({"DKK": -1}, {"DKK": "x"}, {"DKKK": 1}, [1], {"DKK": float("nan")}):
+        d["fx_usd"] = bad
+        assert any("fx_usd" in e for e in run(d, m, None)[0]), bad
+    d["fx_usd"] = {"DKK": 0.15}
+    d["stocks"][0]["market_cap_usd"] = -3
+    assert any("perfil de acción" in e for e in run(d, m, None)[0])
