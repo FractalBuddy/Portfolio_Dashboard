@@ -745,7 +745,8 @@ def test_profile_warnings_detecta_ev_incoherente_y_saltos_de_capitalizacion(caps
     assert "ASML" in capsys.readouterr().err
 
 
-def test_compute_health_resume_filas_antiguas_y_edad_de_perfiles():
+def test_compute_health_resume_filas_antiguas_y_edad_de_perfiles(monkeypatch):
+    monkeypatch.setattr(fm, "_LAST_VALUATION", {"table": 0, "fresh": 0})
     today = dt.date(2026, 10, 12)
     data = {"stocks": [{"symbol": "A", "market_cap": 1, "profile_as_of": "2026-10-12"},
                        {"symbol": "B", "stale": True, "history_stale": True, "profile_as_of": "2026-09-20", "pe_forward": 10},
@@ -753,7 +754,7 @@ def test_compute_health_resume_filas_antiguas_y_edad_de_perfiles():
             "indices": [{"symbol": "^X", "stale": True}], "forex": None}
     h = fm.compute_health(data, today)
     assert h["stale_symbols"] == ["B", "^X"] and h["history_reused"] == ["B"]
-    assert h["profiles"] == {"stocks": 3, "with_data": 2, "oldest_days": 22, "older_than_7d": 1}
+    assert h["profiles"] == {"stocks": 3, "with_data": 2, "valuation_table": 0, "oldest_days": 22, "older_than_7d": 1}
     assert fm.compute_health({}, today)["profiles"]["oldest_days"] is None
     assert fm.compute_health(None, today)["stale_symbols"] == []   # nunca lanza
 
@@ -836,10 +837,12 @@ def test_fetch_stock_profile_arregla_el_ev_de_un_adr(monkeypatch, capsys):
 
 
 def test_fetch_stock_profile_si_la_tabla_falla_usa_info(monkeypatch, capsys):
+    monkeypatch.setattr(fm.time, "sleep", lambda *_: None)
     monkeypatch.setattr(fm.yf, "Ticker", lambda s: _FakeTicker(_ADR_INFO, val_exc=RuntimeError("429")))
     p = fm.fetch_stock_profile("TSM")
-    assert p["enterprise_value"] == 16401145266176 and p["_valuation"] is False and p["pe_forward"] == 20.31
-    assert "valuation table failed" in capsys.readouterr().err
+    assert p["market_cap"] == 2318000000000 and p["_valuation"] is False and p["pe_forward"] == 20.31   # info como respaldo
+    assert "enterprise_value" not in p                                                                      # ...pero su EV inverosímil no se publica
+    assert "valuation table attempt 2 failed" in capsys.readouterr().err
     # tabla vacía = mismo comportamiento
     import pandas as pd
     monkeypatch.setattr(fm.yf, "Ticker", lambda s: _FakeTicker(_ADR_INFO, pd.DataFrame()))
@@ -859,4 +862,52 @@ def test_attach_profiles_no_publica_el_marcador_y_lo_cuenta(monkeypatch, capsys)
     assert all("_valuation" not in s for s in stocks)
     out = capsys.readouterr().out
     assert "valuation table" in out and "1 of 2 fresh profiles" in out and "Ticker.info" in out
-    assert stocks[0]["enterprise_value"] == 1930000000000 and stocks[1]["enterprise_value"] == 16401145266176
+    assert stocks[0]["enterprise_value"] == 1930000000000 and "enterprise_value" not in stocks[1] and stocks[1]["market_cap"] == 2318000000000
+
+
+# ============================================================ robustez de la tabla de valoración
+def test_tabla_parcial_solo_market_cap_no_se_considera_usable():
+    import numpy as np
+    nan = np.nan
+    df = _val_df(**{"Enterprise Value": nan, "Trailing P/E": nan, "Forward P/E": nan, "Enterprise Value/EBITDA": nan})
+    v = fm.parse_valuation_measures(df)
+    assert v == {"market_cap": 2010000000000} and not fm._val_usable(v)
+    info = {"market_cap": 1, "pe_forward": 20.0, "enterprise_value": 5}
+    assert fm.merge_valuation(info, v) == info                         # una respuesta a medias no borra métricas buenas
+    assert fm._val_usable({"market_cap": 1, "pe_forward": 2}) and not fm._val_usable({}) and not fm._val_usable(None)
+
+
+def test_la_tabla_se_reintenta_una_vez(monkeypatch):
+    monkeypatch.setattr(fm.time, "sleep", lambda *_: None)
+    calls = []
+
+    class Flaky(_FakeTicker):
+        def get_valuation_measures(self, freq="quarterly", periods=5):
+            calls.append(1)
+            if len(calls) == 1:
+                raise RuntimeError("429")
+            return _val_df()
+    monkeypatch.setattr(fm.yf, "Ticker", lambda s: Flaky(_ADR_INFO))
+    p = fm.fetch_stock_profile("TSM")
+    assert len(calls) == 2 and p["enterprise_value"] == 1930000000000 and p["_valuation"] is True
+
+
+def test_sin_tabla_un_ev_inverosimil_de_info_no_se_publica(monkeypatch, capsys):
+    monkeypatch.setattr(fm.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(fm.yf, "Ticker", lambda s: _FakeTicker(_ADR_INFO, val_exc=RuntimeError("down")))
+    p = fm.fetch_stock_profile("TSM")
+    assert "enterprise_value" not in p and "ev_ebitda" not in p and p["_valuation"] is False
+    assert p["market_cap"] == 2318000000000 and p["pe_forward"] == 20.31      # lo demás de info se conserva
+    assert "no es creíble" in capsys.readouterr().err
+    # un EV coherente de info sí se conserva
+    ok = dict(_ADR_INFO, enterpriseValue=2200000000000, enterpriseToEbitda=12.0)
+    monkeypatch.setattr(fm.yf, "Ticker", lambda s: _FakeTicker(ok, val_exc=RuntimeError("down")))
+    assert fm.fetch_stock_profile("TSM")["enterprise_value"] == 2200000000000
+
+
+def test_health_cuenta_las_acciones_con_tabla(monkeypatch):
+    monkeypatch.setattr(fm.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(fm.yf, "Ticker", lambda s: _FakeTicker(_ADR_INFO, _val_df()))
+    stocks = fm.attach_profiles([{"symbol": "A"}, {"symbol": "B"}], {})
+    h = fm.compute_health({"stocks": stocks})
+    assert h["profiles"]["valuation_table"] == 2 and h["profiles"]["with_data"] == 2
