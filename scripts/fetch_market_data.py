@@ -426,7 +426,10 @@ def attach_histories(items, prev_rows=None):
 PROFILE_FIELDS = ("sector", "industry", "employees", "market_cap", "enterprise_value", "cap_currency",
                   "pe_trailing", "pe_forward", "ev_ebitda", "profit_margin", "operating_margin", "beta",
                   "insiders_pct", "dividend_yield", "dividend_rate", "dividend_5y_avg",
-                  "ebitda", "quarterly_earnings_growth", "total_cash", "total_debt", "financial_currency")
+                  "ebitda", "quarterly_earnings_growth", "total_cash", "total_debt", "financial_currency",
+                  # añadidos para el veredicto del dashboard (todos opcionales; un campo ausente simplemente no puntúa)
+                  "peg", "ps", "pb", "ev_revenue", "gross_margin", "revenue_growth", "roe", "free_cashflow",
+                  "target_mean", "analyst_count", "recommendation_mean")
 
 
 def parse_stock_profile(info):
@@ -493,8 +496,33 @@ def parse_stock_profile(info):
         v = _num(info.get(src), positive=False)
         if v is not None and v >= 0:
             out[key] = int(v)
+    # Crecimiento y rentabilidad (fracciones de Yahoo -> %). Los límites solo descartan basura, no datos raros pero reales.
+    gm = _num(info.get("grossMargins"), positive=False)
+    if gm is not None and -1 <= gm <= 1:
+        out["gross_margin"] = round(float(gm) * 100, 2)
+    rg = _num(info.get("revenueGrowth"), positive=False)  # trimestre a/a
+    if rg is not None and -0.9 <= rg <= 10:
+        out["revenue_growth"] = round(float(rg) * 100, 2)
+    roe = _num(info.get("returnOnEquity"), positive=False)
+    if roe is not None and -20 <= roe <= 20:
+        out["roe"] = round(float(roe) * 100, 2)
+    fcf = _num(info.get("freeCashflow"), positive=False)  # en la divisa de reporte, como EBITDA/caja/deuda
+    if fcf is not None and fcf != 0:
+        out["free_cashflow"] = int(fcf)
+    # Consenso de analistas. El precio objetivo se publica solo si es coherente con el precio (0,2x-5x): en algunos ADR Yahoo
+    # lo da en otra divisa y compararlo con el precio daría una "subida potencial" absurda.
+    px = _num(info.get("currentPrice")) or _num(info.get("regularMarketPrice")) or _num(info.get("previousClose"))
+    tgt = _num(info.get("targetMeanPrice"))
+    if tgt is not None and px is not None and 0.2 < tgt / px < 5:
+        out["target_mean"] = round(float(tgt), 2)
+    na = _num(info.get("numberOfAnalystOpinions"))
+    if na is not None and 1 <= na <= 200:
+        out["analyst_count"] = int(na)
+    rm = _num(info.get("recommendationMean"))
+    if rm is not None and 1 <= rm <= 5:
+        out["recommendation_mean"] = round(float(rm), 2)
     fcur = info.get("financialCurrency")
-    if any(k in out for k in ("ebitda", "total_cash", "total_debt")) and isinstance(fcur, str) and re.fullmatch(r"[A-Za-z]{3}", fcur.strip()):
+    if any(k in out for k in ("ebitda", "total_cash", "total_debt", "free_cashflow")) and isinstance(fcur, str) and re.fullmatch(r"[A-Za-z]{3}", fcur.strip()):
         out["financial_currency"] = fcur.strip().upper()
 
     # Dividends. Yahoo/yfinance have changed the scale of `dividendYield` (fraction vs percent) in the past, so the
@@ -530,7 +558,9 @@ def parse_stock_profile(info):
 # (quoteSummary) is NOT the same source: for ADRs it returns an Enterprise Value in the wrong currency (ASML 37.98T, TSM 16.4T
 # vs. the 660B / 1.93T the website shows) and P/E / market cap computed at a different moment.
 _VALUATION_LABELS = (("market_cap", "Market Cap"), ("enterprise_value", "Enterprise Value"), ("pe_trailing", "Trailing P/E"),
-                     ("pe_forward", "Forward P/E"), ("ev_ebitda", "Enterprise Value/EBITDA"))
+                     ("pe_forward", "Forward P/E"), ("ev_ebitda", "Enterprise Value/EBITDA"),
+                     ("peg", "PEG Ratio (5yr expected)"), ("ps", "Price/Sales"), ("pb", "Price/Book"),
+                     ("ev_revenue", "Enterprise Value/Revenue"))
 
 
 def parse_valuation_measures(df):
@@ -559,7 +589,9 @@ def parse_valuation_measures(df):
         ev = num("Enterprise Value")
         if ev is not None and ev != 0:
             out["enterprise_value"] = int(ev)
-        for key, label in (("pe_trailing", "Trailing P/E"), ("pe_forward", "Forward P/E"), ("ev_ebitda", "Enterprise Value/EBITDA")):
+        for key, label in (("pe_trailing", "Trailing P/E"), ("pe_forward", "Forward P/E"), ("ev_ebitda", "Enterprise Value/EBITDA"),
+                           ("peg", "PEG Ratio (5yr expected)"), ("ps", "Price/Sales"), ("pb", "Price/Book"),
+                           ("ev_revenue", "Enterprise Value/Revenue")):
             v = num(label)
             if v is not None and 0 < v < 10000:
                 out[key] = round(v, 2)
@@ -569,13 +601,13 @@ def parse_valuation_measures(df):
 
 
 def _val_usable(val):
-    """A valuation table counts only with a market cap AND at least one more measure: a reply with just the market cap is a partial /
-    throttled answer, and trusting it would erase good P/E / EV figures."""
-    return bool(val) and "market_cap" in val and len(val) >= 2
+    """A valuation table counts only with a market cap AND at least one of the core measures (EV, P/Es, EV/EBITDA): a reply with just
+    the market cap (or only P/S, P/B...) is a partial / throttled answer, and trusting it would erase good P/E / EV figures."""
+    return bool(val) and "market_cap" in val and any(k in val for k in ("enterprise_value", "pe_trailing", "pe_forward", "ev_ebitda"))
 
 
 def merge_valuation(prof, val):
-    """Valuation-table figures take precedence over `info` for the five measures Yahoo shows in that table. A measure the table
+    """Valuation-table figures take precedence over `info` for the measures Yahoo shows in that table. A measure the table
     lacks (loss-makers have no P/E) is removed so the dashboard shows "—" like Yahoo, instead of a stale `info` figure.
     Without a usable table (val empty) the `info` profile is returned untouched."""
     if not _val_usable(val):
@@ -720,6 +752,68 @@ def attach_profiles(stocks, prev=None, fetch=fetch_stock_profile, max_fail_strea
     cov = ", ".join(f"{k} {sum(1 for s in stocks if k in s)}" for k in PROFILE_FIELDS if k not in ("cap_currency", "financial_currency"))
     print(f"  profile coverage (of {len(stocks)} stocks): {cov}")
     return stocks
+
+
+def fetch_fx_usd(currencies, prev_fx=None):
+    """USD por 1 unidad de cada divisa (Yahoo `XXXUSD=X`), para convertir capitalizaciones/flujos de caja de acciones que cotizan o
+    reportan en otra moneda (DKK, CHF, EUR, TWD, JPY...) a una unidad común. Invisible en el dashboard: solo se usa para comparar.
+    Una divisa que falla (o salta >30 % en un día, que no es real) reutiliza la del feed anterior y se devuelve en `stale`.
+    Devuelve ({divisa: tipo}, [divisas con tipo reutilizado]). Nunca lanza."""
+    out, stale = {}, []
+    prev_fx = prev_fx if isinstance(prev_fx, dict) else {}
+    for c in sorted({str(c).upper() for c in currencies if isinstance(c, str) and re.fullmatch(r"[A-Za-z]{3}", c)}):
+        if c == "USD":
+            out[c] = 1.0
+            continue
+        rate = None
+        try:
+            h = yf_history(f"{c}USD=X", period="5d", interval="1d")
+            if h is not None and not h.empty:
+                rate = float(h["Close"].iloc[-1])
+        except Exception as e:
+            print(f"  ! tipo de cambio {c}USD falló: {type(e).__name__}: {e}", file=sys.stderr)
+        old = prev_fx.get(c)
+        old = old if isinstance(old, (int, float)) and not isinstance(old, bool) and math.isfinite(old) and old > 0 else None
+        if rate is not None and not (math.isfinite(rate) and 1e-4 < rate < 1e4):
+            rate = None
+        if rate is not None and old is not None and not (0.7 < rate / old < 1.43):
+            print(f"  ! {c}USD: salto de {old} a {rate} en un run: se descarta y se reutiliza el anterior", file=sys.stderr)
+            rate = None
+        if rate is None and old is not None:
+            rate = old
+            stale.append(c)
+        if rate is not None:
+            out[c] = round(rate, 8)
+    return out, stale
+
+
+def attach_usd(stocks, prev=None, fetch_fx=fetch_fx_usd):
+    """Añade a cada acción `market_cap_usd` y `fcf_yield` (flujo de caja libre / capitalización, en %, ya con ambas magnitudes en USD:
+    el flujo de caja viene en la divisa de reporte y la capitalización en la de cotización, que pueden diferir) y devuelve
+    (stocks, fx_usd, divisas_con_tipo_reutilizado). Sin tipo para una divisa, el campo simplemente no se publica. Nunca lanza."""
+    try:
+        ccys = [s.get(k) for s in stocks for k in ("cap_currency", "financial_currency")]
+        fx, stale = fetch_fx(ccys, (prev or {}).get("fx_usd"))
+        for s in stocks:
+            mc, cc = s.get("market_cap"), s.get("cap_currency")
+            s.pop("market_cap_usd", None)
+            s.pop("fcf_yield", None)
+            if isinstance(mc, (int, float)) and not isinstance(mc, bool) and mc > 0 and cc in fx:
+                mc_usd = mc * fx[cc]
+                s["market_cap_usd"] = int(mc_usd)
+                fcf, fc = s.get("free_cashflow"), s.get("financial_currency") or cc
+                if isinstance(fcf, (int, float)) and not isinstance(fcf, bool) and fc in fx and mc_usd > 0:
+                    y = fcf * fx[fc] / mc_usd * 100
+                    if -100 <= y <= 100:
+                        s["fcf_yield"] = round(y, 2)
+        missing = sorted({s.get("symbol") for s in stocks if s.get("market_cap") and "market_cap_usd" not in s})
+        if missing:
+            print(f"  ! sin tipo de cambio a USD para: {missing[:8]}", file=sys.stderr)
+        print(f"  fx_usd: {len(fx)} divisas ({', '.join(f'{k} {v}' for k, v in fx.items() if k != 'USD') or 'solo USD'}); reutilizadas del feed anterior: {stale or 'ninguna'}")
+        return stocks, fx, stale
+    except Exception as e:
+        print(f"  ! attach_usd falló: {type(e).__name__}: {e}", file=sys.stderr)
+        return stocks, {}, []
 
 
 def _fred_get(params, tries=3):
@@ -1706,6 +1800,8 @@ def main():
     stocks = attach_histories(stocks, prev.get("stocks"))
     print("Fetching company profile + market cap / EV for each stock...")
     stocks = attach_profiles(stocks, prev)
+    print("Fetching FX rates to USD (for comparing market caps / free cash flow across currencies)...")
+    stocks, fx_usd, fx_stale = attach_usd(stocks, prev)
     print("Fetching funds...")
     funds = build_list(FUNDS, prev.get("funds"))
     print("Fetching full ('max') + intraday history for each fund (Explore detail chart)...")
@@ -1763,8 +1859,10 @@ def main():
         "benchmarks": benchmarks,
         "market_mood": market_mood,
         "staking": staking,
+        "fx_usd": fx_usd,
     }
     data["health"] = compute_health(data)
+    data["health"]["fx_stale"] = fx_stale
     h = data["health"]
     print(f"HEALTH: {len(h['stale_symbols'])} símbolos con precio antiguo {h['stale_symbols'] or ''}; "
           f"{len(h['history_reused'])} con histórico reutilizado {h['history_reused'] or ''}; "
