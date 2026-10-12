@@ -81,9 +81,9 @@ def test_load_prev_feed_tolerante(tmp_path, monkeypatch):
 def _patch_main(monkeypatch, tmp_path):
     """main() sin red: todo lo que toca Yahoo/RSS/CNN se sustituye por datos mínimos."""
     monkeypatch.chdir(tmp_path)
-    row = lambda items: [{"symbol": i[0], "name": i[1], "price": 1.0, "change_pct": 0.0, "history": []} for i in items]  # noqa: E731
+    row = lambda items, prev_rows=None: [{"symbol": i[0], "name": i[1], "price": 1.0, "change_pct": 0.0, "history": []} for i in items]  # noqa: E731
     monkeypatch.setattr(fm, "build_list", row)
-    monkeypatch.setattr(fm, "attach_histories", lambda x: x)
+    monkeypatch.setattr(fm, "attach_histories", lambda x, prev_rows=None: x)
     monkeypatch.setattr(fm, "attach_profiles", lambda stocks, prev=None: stocks)  # sin Yahoo (Ticker.info)
     monkeypatch.setattr(fm, "build_your_funds", lambda: [])
     monkeypatch.setattr(fm, "build_general_news", lambda: [])
@@ -621,3 +621,148 @@ def test_attach_profiles_registra_cobertura_por_campo(capsys):
     fm.attach_profiles(stocks, fetch=lambda sym: {"pe_trailing": 20.0, "ebitda": 5} if sym == "A" else {"pe_trailing": 15.0})
     out = capsys.readouterr().out
     assert "profile coverage (of 2 stocks)" in out and "pe_trailing 2" in out and "ebitda 1" in out and "beta 0" in out
+
+
+# ============================================================ auditoría 12-10: frescura, filas arrastradas, perfiles degradados
+def _ohlc(closes, vols=None, last_date="2026-10-09", flat=()):
+    import pandas as pd
+    n = len(closes)
+    idx = pd.date_range(end=last_date, periods=n, freq="D", tz="UTC")
+    df = pd.DataFrame({"Open": closes, "High": [c * 1.01 for c in closes], "Low": [c * 0.99 for c in closes],
+                       "Close": closes, "Volume": vols or [1000.0] * n}, index=idx)
+    for i in flat:   # barra fantasma: volumen 0 y O=H=L=C
+        c = df["Close"].iloc[i]
+        df.iloc[i, df.columns.get_loc("High")] = c
+        df.iloc[i, df.columns.get_loc("Low")] = c
+        df.iloc[i, df.columns.get_loc("Volume")] = 0.0
+    return df
+
+
+def test_drop_phantom_bars_interior_y_extremos():
+    # interior (como antes): salto >15 % respecto a ambos vecinos
+    d = _ohlc([100, 100, 134, 100, 100], flat=(2,))
+    assert list(fm._drop_phantom_bars(d)["Close"]) == [100, 100, 100, 100]
+    # ÚLTIMA barra fantasma (+34 % respecto a la única vecina): se descarta, el precio de hoy no es esa barra
+    d = _ohlc([100, 101, 100, 134], flat=(3,))
+    assert list(fm._drop_phantom_bars(d)["Close"]) == [100, 101, 100]
+    # primera barra
+    d = _ohlc([60, 100, 101, 100], flat=(0,))
+    assert list(fm._drop_phantom_bars(d)["Close"]) == [100, 101, 100]
+    # un día real de +20 % (con volumen) no se toca, y una barra plana con movimiento pequeño tampoco
+    d = _ohlc([100, 101, 121], vols=[1000, 1000, 5000])
+    assert len(fm._drop_phantom_bars(d)) == 3
+    d = _ohlc([100, 101, 102], flat=(2,))
+    assert len(fm._drop_phantom_bars(d)) == 3
+
+
+def test_fetch_symbol_publica_as_of_y_marca_precio_antiguo(monkeypatch):
+    today = dt.datetime.now(dt.timezone.utc).date()
+    fresh = (today - dt.timedelta(days=1)).isoformat()
+    monkeypatch.setattr(fm, "yf_history", lambda *a, **k: _ohlc([10, 11, 12, 13], last_date=fresh))
+    r = fm.fetch_symbol("X")
+    assert r["as_of"] == fresh and "stale" not in r and r["price"] == 13
+    old = (today - dt.timedelta(days=20)).isoformat()
+    monkeypatch.setattr(fm, "yf_history", lambda *a, **k: _ohlc([10, 11, 12, 13], last_date=old))
+    r = fm.fetch_symbol("X")
+    assert r["stale"] is True and r["stale_since"] == r["as_of"]
+
+
+def test_build_list_conserva_la_fila_anterior_marcada_antigua(monkeypatch):
+    today = dt.datetime.now(dt.timezone.utc).date()
+    monkeypatch.setattr(fm, "fetch_symbol", lambda s: None if s == "BAD" else {"price": 2.0, "change_pct": 0.1, "as_of": "2026-10-09"})
+    prev_rows = [{"symbol": "BAD", "name": "viejo", "price": 5.0, "as_of": "2026-10-08", "history": [{"date": "2026-10-08", "close": 5.0}],
+                  "intraday": [{"time": "x", "close": 5}], "region": "Europe"}]
+    out = fm.build_list([("OK", "Ok"), ("BAD", "Malo", "Asia")], prev_rows)
+    assert [r["symbol"] for r in out] == ["OK", "BAD"]
+    bad = out[1]
+    assert bad["stale"] is True and bad["stale_since"] == "2026-10-08" and bad["price"] == 5.0
+    assert bad["name"] == "Malo" and bad["region"] == "Asia" and "intraday" not in bad and bad["history"]
+    # sucesivas reutilizaciones conservan stale_since
+    out2 = fm.build_list([("BAD", "Malo")], out)
+    assert out2[0]["stale_since"] == "2026-10-08"
+    # sin fila anterior, o con una de hace más de STALE_CARRY_MAX_DAYS, el símbolo desaparece (lo detecta el sanity-check)
+    assert fm.build_list([("BAD", "Malo")], []) == [] and fm.build_list([("BAD", "Malo")]) == []
+    ancient = [{"symbol": "BAD", "price": 5.0, "stale_since": (today - dt.timedelta(days=fm.STALE_CARRY_MAX_DAYS + 1)).isoformat()}]
+    assert fm.build_list([("BAD", "Malo")], ancient) == []
+    # precio no numérico en la fila anterior: no se arrastra
+    assert fm.build_list([("BAD", "Malo")], [{"symbol": "BAD", "price": "x"}, {"symbol": "BAD", "price": True}]) == []
+
+
+def test_attach_histories_reutiliza_historico_anterior_pero_no_el_intradia(monkeypatch):
+    monkeypatch.setattr(fm, "fetch_full_history", lambda s: [] if s == "A" else [{"date": "2026-10-09", "close": 1.0}])
+    monkeypatch.setattr(fm, "fetch_intraday_history", lambda s: [])
+    prev = [{"symbol": "A", "history": [{"date": "2026-10-08", "close": 9.0}], "intraday": [{"time": "t", "close": 9}]}]
+    out = fm.attach_histories([{"symbol": "A"}, {"symbol": "B"}], prev)
+    assert out[0]["history"] == [{"date": "2026-10-08", "close": 9.0}] and out[0]["history_stale"] is True and out[0]["intraday"] == []
+    assert out[1]["history"][0]["close"] == 1.0 and "history_stale" not in out[1]
+    # sin histórico anterior queda vacío (el sanity-check decide si es grave)
+    assert fm.attach_histories([{"symbol": "A"}], [])[0]["history"] == []
+
+
+def _rich_profile(**kw):
+    p = {"market_cap": 1e11, "enterprise_value": 1.1e11, "cap_currency": "USD", "pe_trailing": 20.0, "pe_forward": 18.0,
+         "ev_ebitda": 11.0, "profit_margin": 12.0, "operating_margin": 15.0, "beta": 1.0, "insiders_pct": 3.0,
+         "dividend_yield": 1.0, "ebitda": 9e9, "total_cash": 1e10, "total_debt": 2e10, "sector": "Technology"}
+    p.update(kw)
+    return p
+
+
+def test_attach_profiles_descarta_un_perfil_incompleto_de_yahoo(monkeypatch):
+    monkeypatch.setattr(fm.time, "sleep", lambda *_: None)
+    prev = {"stocks": [{"symbol": "A", **_rich_profile(), "profile_as_of": dt.datetime.now(dt.timezone.utc).date().isoformat()}]}
+    # Yahoo contesta con un info casi vacío (solo market cap + sector): no debe borrar las métricas buenas
+    stocks = fm.attach_profiles([{"symbol": "A"}], prev, fetch=lambda s: {"market_cap": 1.01e11, "sector": "Technology"})
+    assert stocks[0]["pe_forward"] == 18.0 and stocks[0]["total_debt"] == 2e10 and stocks[0]["market_cap"] == 1e11
+    # un perfil completo sí sustituye al anterior
+    stocks = fm.attach_profiles([{"symbol": "A"}], prev, fetch=lambda s: _rich_profile(pe_forward=17.0))
+    assert stocks[0]["pe_forward"] == 17.0
+    # sin perfil anterior rico, cualquier perfil se acepta (no hay nada que proteger)
+    stocks = fm.attach_profiles([{"symbol": "B"}], prev, fetch=lambda s: {"market_cap": 5e9})
+    assert stocks[0]["market_cap"] == 5e9
+
+
+def test_attach_profiles_no_reutiliza_perfiles_demasiado_antiguos(monkeypatch):
+    monkeypatch.setattr(fm.time, "sleep", lambda *_: None)
+    today = dt.datetime.now(dt.timezone.utc).date()
+    old_ok = (today - dt.timedelta(days=fm.PROFILE_MAX_REUSE_DAYS - 1)).isoformat()
+    too_old = (today - dt.timedelta(days=fm.PROFILE_MAX_REUSE_DAYS + 5)).isoformat()
+    prev = {"stocks": [{"symbol": "A", **_rich_profile(), "profile_as_of": old_ok},
+                       {"symbol": "B", **_rich_profile(), "profile_as_of": too_old},
+                       {"symbol": "C", **_rich_profile()}]}   # sin fecha: tampoco se puede dar por vigente
+    stocks = fm.attach_profiles([{"symbol": "A"}, {"symbol": "B"}, {"symbol": "C"}], prev, fetch=lambda s: {})
+    assert stocks[0]["pe_forward"] == 18.0 and stocks[0]["profile_as_of"] == old_ok
+    assert "pe_forward" not in stocks[1] and "profile_as_of" not in stocks[1]
+    assert "pe_forward" not in stocks[2]
+
+
+def test_profile_warnings_detecta_ev_incoherente_y_saltos_de_capitalizacion(capsys):
+    w = fm._profile_warnings("ASML", {"market_cap": 6.8e11, "enterprise_value": 3.8e13}, {})
+    assert len(w) == 1 and "EV/MarketCap" in w[0]
+    w = fm._profile_warnings("X", {"market_cap": 2e11, "enterprise_value": 2.1e11}, {"market_cap": 1e11})
+    assert len(w) == 1 and "capitalización" in w[0]
+    assert fm._profile_warnings("Y", {"market_cap": 1e11, "enterprise_value": 1.1e11}, {"market_cap": 1.05e11}) == []
+    assert fm._profile_warnings("Z", {}, None) == []
+    assert "ASML" in capsys.readouterr().err
+
+
+def test_compute_health_resume_filas_antiguas_y_edad_de_perfiles():
+    today = dt.date(2026, 10, 12)
+    data = {"stocks": [{"symbol": "A", "market_cap": 1, "profile_as_of": "2026-10-12"},
+                       {"symbol": "B", "stale": True, "history_stale": True, "profile_as_of": "2026-09-20", "pe_forward": 10},
+                       {"symbol": "C"}, "basura"],
+            "indices": [{"symbol": "^X", "stale": True}], "forex": None}
+    h = fm.compute_health(data, today)
+    assert h["stale_symbols"] == ["B", "^X"] and h["history_reused"] == ["B"]
+    assert h["profiles"] == {"stocks": 3, "with_data": 2, "oldest_days": 22, "older_than_7d": 1}
+    assert fm.compute_health({}, today)["profiles"]["oldest_days"] is None
+    assert fm.compute_health(None, today)["stale_symbols"] == []   # nunca lanza
+
+
+def test_main_publica_health(tmp_path, monkeypatch, capsys):
+    _patch_main(monkeypatch, tmp_path)
+    monkeypatch.setenv("PREV_FEED_PATH", str(tmp_path / "nada.json"))
+    monkeypatch.setattr(fm, "FRED_API_KEY", "")
+    fm.main()
+    d = json.loads((tmp_path / "data.json").read_text())
+    assert d["health"]["stale_symbols"] == [] and d["health"]["profiles"]["stocks"] == len(fm.STOCKS)
+    assert "HEALTH:" in capsys.readouterr().out
