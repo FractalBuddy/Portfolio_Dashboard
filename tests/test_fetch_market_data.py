@@ -139,7 +139,7 @@ def _page(nav="12.3456", date="03/Oct/2026", change="-0.85", wk="10.10 - 13.90",
 
 def test_ishares_pagina_sana():
     r = fm.parse_ishares_nav(_page(), ISIN, today=TODAY)
-    assert r == {"price": 12.3456, "nav_date": "03/Oct/2026", "nav_stale": False,
+    assert r == {"price": 12.3456, "nav_date": "03/Oct/2026", "nav_date_iso": "2026-10-03", "nav_stale": False,
                  "change_pct": -0.85, "wk52_low": 10.10, "wk52_high": 13.90}
 
 
@@ -166,8 +166,8 @@ def test_ishares_coma_decimal_en_variacion():
     assert fm.parse_ishares_nav(_page(change="0,85"), ISIN, today=TODAY)["change_pct"] == 0.85
 
 
-@pytest.mark.parametrize("date,stale", [("03/Oct/2026", False), ("01/Oct/2026", False), ("30/Sep/2026", True), ("01/Jan/2026", True)])
-def test_ishares_nav_stale_si_mas_de_5_dias(date, stale):
+@pytest.mark.parametrize("date,stale", [("03/Oct/2026", False), ("01/Oct/2026", False), ("30/Sep/2026", False), ("29/Sep/2026", True), ("01/Jan/2026", True)])
+def test_ishares_nav_stale_si_mas_de_6_dias(date, stale):   # umbral 6 (antes 5): ver NAV_STALE_DAYS y F_nav/INFORME.md
     assert fm.parse_ishares_nav(_page(date=date), ISIN, today=TODAY)["nav_stale"] is stale
 
 
