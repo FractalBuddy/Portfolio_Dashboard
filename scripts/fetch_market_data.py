@@ -253,6 +253,9 @@ def fetch_symbol(symbol):
         last = float(hist["Close"].iloc[-1])
         prev = float(hist["Close"].iloc[-2])
         week_ago = float(hist["Close"].iloc[0])
+        if not (math.isfinite(last) and last > 0):  # un Close 0/negativo de Yahoo no es un precio: mejor «sin datos» (se arrastra la fila anterior)
+            print(f"  ! {symbol}: último cierre no válido ({last}): se trata como sin datos", file=sys.stderr)
+            return None
         change_pct = (last / prev - 1) * 100 if prev else 0.0
         change_pct_7d = (last / week_ago - 1) * 100 if week_ago else 0.0
         vol = float(hist["Volume"].iloc[-1]) if "Volume" in hist else None
@@ -1016,7 +1019,7 @@ def parse_feed(url, limit=8):
             items.append({
                 "title": re.sub(r"<[^>]*>", "", str(entry.get("title", "") or "")).strip()[:300],
                 "link": link[:1000],
-                "source": str(parsed.feed.get("title", url))[:120],
+                "source": re.sub(r"<[^>]*>", "", str(parsed.feed.get("title", url))).strip()[:120],
                 "published": entry.get("published", entry.get("updated", "")),
             })
         return items
@@ -1094,8 +1097,18 @@ def _parse_num(txt):
     return None
 
 
-_MESES = {"jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6, "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12}
-NAV_STALE_DAYS = 5          # un NAV con más antigüedad se marca nav_stale (fin de semana + festivo caben de sobra)
+# Meses en inglés y español (nombre completo): se acepta cualquier prefijo de >= 3 letras («Sep», «Sept», «Sept.», «septiembre»).
+_MES_NOMBRES = {
+    1: ("january", "enero"), 2: ("february", "febrero"), 3: ("march", "marzo"), 4: ("april", "abril"),
+    5: ("may", "mayo"), 6: ("june", "junio"), 7: ("july", "julio"), 8: ("august", "agosto"),
+    9: ("september", "septiembre", "setiembre"), 10: ("october", "octubre"), 11: ("november", "noviembre"),
+    12: ("december", "diciembre"),
+}
+# Calibrado con un calendario de días hábiles irlandés/UK (Año Nuevo, Viernes Santo, Lunes de Pascua, Navidad, S. Esteban + sustitutos)
+# y los 4 cron diarios: con la página 1-2 días hábiles por detrás (lo visto en el feed real: SWDA 1, EM 2) la edad máxima del NAV es de 5 y 6 días
+# (Martes de Pascua, 29-dic). Con >5 habría falsos «antiguo» ~3 días al año en el fondo EM; con >6 no hay ninguno. Ver F_nav/INFORME.md.
+NAV_STALE_DAYS = 6          # un NAV con más antigüedad (>= 7 días naturales) se marca nav_stale
+NAV_FUTURE_DAYS = 1         # tolerancia a una fecha «de mañana» (huso horario); más allá la fecha no es creíble
 CHANGE_PCT_MAX = 20.0       # una variación diaria de un fondo indexado mayor que esto es un parseo erróneo
 
 
@@ -1107,13 +1120,36 @@ def _parse_signed(txt):
     return None if v is None else sign * v
 
 
-def _parse_nav_date(txt):
-    """'03/Oct/2026' -> date(2026, 10, 3) sin depender del locale (strptime %b lo hace). None si no se entiende."""
-    m = re.fullmatch(r"(\d{1,2})/([A-Za-z]{3})/(\d{4})", txt.strip())
-    if not m or m.group(2).lower() not in _MESES:
+def _month_from_token(tok):
+    """'Oct' / 'Sept' / 'sept.' / 'septiembre' / 'ene' -> 1..12; None si no es un mes (o es ambiguo)."""
+    t = tok.strip().strip(".").lower()
+    if len(t) < 3 or not t.isalpha():
         return None
+    hits = {m for m, names in _MES_NOMBRES.items() for n in names if n.startswith(t)}
+    return hits.pop() if len(hits) == 1 else None
+
+
+def _parse_nav_date(txt):
+    """Fecha del NAV -> date, o None si no se entiende de forma inequívoca. Sin depender del locale.
+    Admite '03/Oct/2026', '3-oct-2026', '03 Oct 2026', '26/Sept/2026', '03/Octubre/2026', ISO '2026-10-03' y numéricas
+    'dd/mm/yyyy' o 'dd.mm.yyyy' SOLO si no son ambiguas (un campo > 12): '03/10/2026' (¿3 oct o 10 mar?) -> None."""
+    t = str(txt).strip()
     try:
-        return datetime(int(m.group(3)), _MESES[m.group(2).lower()], int(m.group(1))).date()
+        m = re.fullmatch(r"(\d{1,2})[/\-. ]+([A-Za-z]{3,10})\.?[/\-. ]+(\d{4})", t)
+        if m:
+            mo = _month_from_token(m.group(2))
+            return datetime(int(m.group(3)), mo, int(m.group(1))).date() if mo else None
+        m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})(?:[T ].*)?", t)
+        if m:
+            return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).date()
+        m = re.fullmatch(r"(\d{1,2})[/.](\d{1,2})[/.](\d{4})", t)
+        if m:
+            a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if a > 12 >= b:
+                return datetime(y, b, a).date()
+            if b > 12 >= a:
+                return datetime(y, a, b).date()
+        return None
     except ValueError:
         return None
 
@@ -1121,12 +1157,12 @@ def _parse_nav_date(txt):
 def parse_ishares_nav(plain, isin, today=None):
     """
     Extrae el NAV del texto plano (sin etiquetas) de la página de producto de iShares.
-    Devuelve un dict {price, nav_date, [nav_stale], [change_pct], [wk52_low, wk52_high]} o None si no hay
+    Devuelve un dict {price, nav_date, [nav_date_iso, nav_stale], [change_pct], [wk52_low, wk52_high]} o None si no hay
     un NAV fiable (patrón ausente, ISIN ausente o precio inverosímil). Los campos secundarios
     (variación, rango 52 semanas) se parsean cada uno en su propio try: si uno viene malformado
     se descarta ese campo, pero NO se pierde el NAV válido.
     """
-    nav_match = re.search(r'NAV as of\s+([\d/A-Za-z]+)\s+EUR\s*([\d.,]+)', plain)
+    nav_match = re.search(r'NAV as of\s+(\d{1,2}\s+[A-Za-z]{3,10}\.?\s+\d{4}|[\w/.\-]+)\s+EUR\s*([\d.,]+)', plain)
     if not (nav_match and isin in plain):
         print(f"  ! could not find expected NAV pattern for {isin} -- falling back to proxy", file=sys.stderr)
         return None
@@ -1138,10 +1174,16 @@ def parse_ishares_nav(plain, isin, today=None):
     result = {"price": round(price, 4), "nav_date": nav_match.group(1)}
 
     # Antigüedad del NAV: si iShares congela la página, el NAV de hace días no debe pasar por "de hoy".
+    # Sin fecha creíble (ilegible, imposible o futura) NO se inventa ni nav_stale ni nav_date_iso: el sanity-check lo avisa.
     try:
         nav_day = _parse_nav_date(nav_match.group(1))
-        if nav_day is not None:
-            today = today or datetime.now(timezone.utc).date()
+        today = today or datetime.now(timezone.utc).date()
+        if nav_day is None:
+            print(f"  ! nav_date ilegible para {isin}: {nav_match.group(1)!r}", file=sys.stderr)
+        elif (nav_day - today).days > NAV_FUTURE_DAYS:
+            print(f"  ! nav_date de {isin} en el futuro: {nav_match.group(1)!r} (hoy {today})", file=sys.stderr)
+        else:
+            result["nav_date_iso"] = nav_day.isoformat()
             result["nav_stale"] = (today - nav_day).days > NAV_STALE_DAYS
             if result["nav_stale"]:
                 print(f"  ! NAV de {isin} con fecha {nav_match.group(1)} (> {NAV_STALE_DAYS} días)", file=sys.stderr)
@@ -1172,23 +1214,37 @@ def parse_ishares_nav(plain, isin, today=None):
     return result
 
 
+ISHARES_TRIES = 2           # un fallo transitorio (timeout, 5xx, corte de red) se reintenta una vez; 403/404/captcha no
+ISHARES_RETRY_WAIT = 4      # segundos entre intentos
+
+
 def fetch_ishares_nav(product_url, isin):
     """
     Scrapes the exact Class S NAV straight off the fund's public ishares.com product
     page. Returns None (never raises) if the page layout doesn't match what we expect,
     so callers can fall back to the proxy-ETF approximation instead of crashing.
+    Reintenta UNA vez solo ante fallos transitorios (timeout, error de conexión, HTTP 5xx/429): un 403/404 o una página
+    de captcha (200 sin el patrón) no se arreglan reintentando.
     """
-    try:
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
-        res = requests.get(product_url, headers=headers, timeout=20)
-        res.raise_for_status()
-        # Strip tags to plain text so we don't depend on exact HTML structure/classes.
-        plain = re.sub(r'<[^>]+>', ' ', res.text)
-        plain = re.sub(r'\s+', ' ', plain)
-        return parse_ishares_nav(plain, isin)
-    except Exception as e:
-        print(f"  ! ishares scrape failed for {isin}: {e} -- falling back to proxy", file=sys.stderr)
-        return None
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
+    for attempt in range(ISHARES_TRIES):
+        try:
+            res = requests.get(product_url, headers=headers, timeout=20)
+            res.raise_for_status()
+            # Strip tags to plain text so we don't depend on exact HTML structure/classes.
+            plain = re.sub(r'<[^>]+>', ' ', res.text)
+            plain = re.sub(r'\s+', ' ', plain)
+            return parse_ishares_nav(plain, isin)
+        except Exception as e:
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            transient = isinstance(e, (requests.Timeout, requests.ConnectionError)) or (code is not None and (code >= 500 or code == 429))
+            if transient and attempt < ISHARES_TRIES - 1:
+                print(f"  ! ishares scrape {isin}: {type(e).__name__} transitorio, reintento", file=sys.stderr)
+                time.sleep(ISHARES_RETRY_WAIT)
+                continue
+            print(f"  ! ishares scrape failed for {isin}: {e} -- falling back to proxy", file=sys.stderr)
+            return None
+    return None
 
 
 # La unidad viene en cualquier capitalización ("EUR 1.20 B", "USD 29.5 bn", "EUR 820.50 M"): antes el regex solo aceptaba
@@ -1374,6 +1430,7 @@ def build_your_funds():
                 "price": scraped["price"],
                 "change_pct": scraped.get("change_pct"),
                 "nav_date": scraped.get("nav_date"),
+                "nav_date_iso": scraped.get("nav_date_iso"),
                 "nav_stale": scraped.get("nav_stale"),
                 "wk52_low": scraped.get("wk52_low"),
                 "wk52_high": scraped.get("wk52_high"),
