@@ -28,6 +28,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import statistics
 import sys
 
@@ -55,6 +56,11 @@ PROFILE_WARN_DAYS = 7            # aviso si los fundamentales de las acciones ll
 STALE_ALERT_DAYS = 2             # una fila con precio antiguo desde hace tanto ya no es un tropiezo puntual de Yahoo: se avisa al dueño
 STALE_ALERT_FRACTION = 0.2       # ...o si una lista entera (>= 20 %) lleva precio antiguo hoy
 PROFILE_COVERAGE_DROP = 0.6      # aviso si el nº de acciones con perfil cae por debajo de este % del feed anterior
+# NAV de iShares (your_funds). Calibrado con un calendario de días hábiles irlandés/UK y los 4 cron diarios (F_nav/evidence/sim_calendar.py):
+# con la página 1-2 días hábiles por detrás la edad máxima «normal» del NAV es 5-6 días naturales (Martes de Pascua, 29-dic).
+NAV_STALE_DAYS = 6               # edad > 6 días naturales (>= 7): NAV «antiguo» -> aviso en el log (igual que el nav_stale del backend)
+NAV_ALERT_DAYS = 8               # >= 8 días en CUALQUIER fondo (o todos «antiguos»): ya no es un festivo, es una página congelada -> Alert (/fail)
+NAV_FUTURE_DAYS = 1              # fecha del NAV más allá de «mañana»: no es creíble
 
 # Límites de plausibilidad de los campos de perfil de las acciones (más holgados que los del parser: aquí solo se
 # atrapa un fetch roto o manipulado, no un dato raro de Yahoo). El job `publish` no se fía de la salida de `fetch`.
@@ -101,6 +107,49 @@ def _last_date(x):
 
 def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+# Mismos meses y mismas reglas que fetch_market_data._parse_nav_date (copia a propósito: este script es solo-stdlib y no importa el otro;
+# un test comprueba que ambos parsers coinciden). Prefijo >= 3 letras de un mes en inglés o español, sin ambigüedad.
+_MES_NOMBRES = {
+    1: ("january", "enero"), 2: ("february", "febrero"), 3: ("march", "marzo"), 4: ("april", "abril"),
+    5: ("may", "mayo"), 6: ("june", "junio"), 7: ("july", "julio"), 8: ("august", "agosto"),
+    9: ("september", "septiembre", "setiembre"), 10: ("october", "octubre"), 11: ("november", "noviembre"),
+    12: ("december", "diciembre"),
+}
+
+
+def _nav_date(f):
+    """Fecha (date) del NAV de una fila de your_funds: `nav_date_iso` si viene; si no, `nav_date` en 'dd/Mon/yyyy' y variantes. None si ilegible."""
+    iso = f.get("nav_date_iso")
+    if isinstance(iso, str):
+        try:
+            return dt.date.fromisoformat(iso[:10])
+        except ValueError:
+            pass
+    raw = f.get("nav_date")
+    if not isinstance(raw, str):
+        return None
+    t = raw.strip()
+    m = re.fullmatch(r"(\d{1,2})[/\-. ]+([A-Za-z]{3,10})\.?[/\-. ]+(\d{4})", t)
+    try:
+        if m:
+            tok = m.group(2).lower()
+            hits = {k for k, names in _MES_NOMBRES.items() for n in names if n.startswith(tok)}
+            return dt.date(int(m.group(3)), hits.pop(), int(m.group(1))) if len(hits) == 1 else None
+        m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})(?:[T ].*)?", t)
+        if m:
+            return dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        m = re.fullmatch(r"(\d{1,2})[/.](\d{1,2})[/.](\d{4})", t)
+        if m:
+            a, b, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+            if a > 12 >= b:
+                return dt.date(y, b, a)
+            if b > 12 >= a:
+                return dt.date(y, a, b)
+    except ValueError:
+        pass
+    return None
 
 
 def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, today=None,
@@ -155,8 +204,31 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
         if f.get("source") != "ishares_nav_scrape":
             warnings.append("your_funds/%s no viene del scrape de iShares (source=%s): NAV aproximado o ausente"
                             % (f.get("isin"), f.get("source")))
-        if f.get("nav_stale"):
-            warnings.append("your_funds/%s: el NAV es de %s (antiguo)" % (f.get("isin"), f.get("nav_date")))
+    # Frescura del NAV scrapeado. NO se fía de `nav_stale` del feed (lo calcula el job fetch): se recalcula aquí con la fecha del NAV.
+    # Hasta ahora nav_stale era un simple aviso de log: iShares podía llevar semanas congelado sin que Healthchecks se enterara.
+    nav_ages = []
+    for f in yf_rows:
+        if f.get("source") != "ishares_nav_scrape" or f.get("price") is None:
+            continue
+        isin_f, nd = f.get("isin"), _nav_date(f)
+        if nd is None:
+            warnings.append(Alert("your_funds/%s: la fecha del NAV (%r) es ilegible: no se puede comprobar que no esté congelado (¿cambió el formato de iShares?)"
+                                  % (isin_f, f.get("nav_date"))))
+            continue
+        age = (today - nd).days
+        if age < -NAV_FUTURE_DAYS:
+            warnings.append(Alert("your_funds/%s: la fecha del NAV (%s) está en el futuro: lectura errónea de la página de iShares" % (isin_f, nd.isoformat())))
+            continue
+        nav_ages.append((isin_f, nd, age))
+        if age >= NAV_ALERT_DAYS:
+            warnings.append(Alert("your_funds/%s: el NAV de iShares lleva congelado desde %s (%d días): el dashboard muestra un precio desfasado"
+                                  % (isin_f, nd.isoformat(), age)))
+        elif age > NAV_STALE_DAYS or f.get("nav_stale"):
+            warnings.append("your_funds/%s: el NAV es de %s (antiguo, %d días)" % (isin_f, nd.isoformat(), age))
+    if nav_ages and all(a > NAV_STALE_DAYS for _, _, a in nav_ages) and not any(a >= NAV_ALERT_DAYS for _, _, a in nav_ages):
+        # Todos los fondos con NAV antiguo a la vez (no es un festivo de un solo fondo): la página no se está actualizando para ninguno.
+        warnings.append(Alert("your_funds: TODOS los NAV de iShares son antiguos (el más reciente, del %s): la página parece congelada"
+                              % max(nd for _, nd, _ in nav_ages).isoformat()))
 
     need(len(_rows(d, "heatmap")) >= 10, "mapa de países demasiado pequeño")
     need(len(_rows(d, "sector_heatmap")) >= 8, "mapa de sectores demasiado pequeño")
@@ -334,6 +406,13 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
         new_f = {f.get("isin"): f for f in yf_rows}
         lost = [f.get("isin") for f in _rows(prev, "your_funds")
                 if f.get("price") is not None and (f.get("isin") not in new_f or new_f[f.get("isin")].get("price") is None)]
+        # Sin scrape dos runs seguidos: el aviso de arriba solo salta UNA vez (en el siguiente run el feed anterior ya no tenía NAV exacto
+        # y `lost` queda vacío), así que un scrape roto de forma permanente se quedaba en un aviso de log que nadie lee.
+        prev_f = {f.get("isin"): f for f in _rows(prev, "your_funds")}
+        still = [f.get("isin") for f in yf_rows
+                 if f.get("source") != "ishares_nav_scrape" and f.get("isin") in prev_f and prev_f[f.get("isin")].get("source") != "ishares_nav_scrape"]
+        if still:
+            warnings.append(Alert("your_funds: %s sigue sin NAV exacto de iShares (2+ runs seguidos con el proxy): el scrape está roto o cambió la página" % still))
         if lost:
             # Solo aviso: el NAV sale de un scrape secundario y no debe frenar la publicación de los precios de bolsa/índices.
             warnings.append(Alert("your_funds: se ha perdido el NAV exacto de %s (el scrape de iShares falla o cambió la página; se usa el proxy)" % lost))
@@ -353,9 +432,14 @@ def _line(s):
     return str(s).replace("\r", " ").replace("\n", " ")
 
 
+def _no_constant(name):
+    raise ValueError("constante no válida en JSON: %s" % name)
+
+
 def _load_json(path):
+    # json.load acepta NaN/Infinity (no son JSON válido): JSON.parse del navegador los rechaza y rompe TODO el feed.
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        return json.load(f, parse_constant=_no_constant)
 
 
 def main(argv=None):
