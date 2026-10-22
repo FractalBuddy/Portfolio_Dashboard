@@ -204,6 +204,10 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
         if f.get("source") != "ishares_nav_scrape":
             warnings.append("your_funds/%s no viene del scrape de iShares (source=%s): NAV aproximado o ausente"
                             % (f.get("isin"), f.get("source")))
+    # Ficha del fondo (TER, patrimonio...): si viene vacía, el scrape de «Key Facts» de iShares está roto o la página cambió.
+    for f in yf_rows:
+        if isinstance(f.get("facts"), dict) and not f["facts"].get("ongoing_charges_pct"):
+            warnings.append("your_funds/%s: la ficha de iShares no trae gastos corrientes (TER): ¿cambió «Key Facts»?" % f.get("isin"))
     # Frescura del NAV scrapeado. NO se fía de `nav_stale` del feed (lo calcula el job fetch): se recalcula aquí con la fecha del NAV.
     # Hasta ahora nav_stale era un simple aviso de log: iShares podía llevar semanas congelado sin que Healthchecks se enterara.
     nav_ages = []
