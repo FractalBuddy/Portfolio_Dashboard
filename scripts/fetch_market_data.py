@@ -103,15 +103,28 @@ YOUR_FUNDS = [
         "isin": "IE000ZYRH0Q7",
         "name": "iShares Developed World Index (IE) Acc EUR — Class S",
         "product_url": "https://www.ishares.com/ch/individual/en/products/345277/ishares-developed-world-index-fund-ie",
-        "proxy_symbol": "SWDA.L",
+        "proxy_symbol": "EUNL.DE",
     },
     {
         "isin": "IE000QAZP7L2",
         "name": "iShares Emerging Markets Index Fund (IE) Acc EUR — Class S",
         "product_url": "https://www.ishares.com/ch/individual/en/products/345276/ishares-emerging-markets-index-fund-ie",
-        "proxy_symbol": "EIMI.L",
+        "proxy_symbol": "IS3N.DE",
     },
 ]
+# OJO con la divisa del proxy: las clases S son EUR y siguen un índice MSCI en EUR. SWDA.L cotiza en GBp y EIMI.L en USD, así
+# que sus rentabilidades anuales/por periodo/volatilidad (y el gráfico) llevaban el efecto divisa de GBP/USD, no el del EUR
+# (p. ej. 2025: 12,64 % con SWDA.L frente a ~7,9 % con la cotización en EUR). Los proxies son las líneas EUR de Xetra del mismo ETF
+# (EUNL.DE = IWDA en EUR, IS3N.DE = EIMI en EUR). IS3N.DE sigue el MSCI EM IMI (incluye small caps); la clase S, el MSCI EM.
+
+# Fichas de iShares de los ETF de «Explorar» (mismas etiquetas «Key Facts» que las de los fondos). Opcional: si falla el scrape
+# se reutilizan los datos del feed anterior y, sin ellos, la ficha simplemente no enseña esas filas.
+FUND_FACT_URLS = {
+    "SWDA.L": "https://www.ishares.com/ch/individual/en/products/251882/ishares-msci-world-ucits-etf-acc-fund",
+    "EIMI.L": "https://www.ishares.com/ch/individual/en/products/264659/ishares-core-msci-em-imi-ucits-etf",
+    "IMEU.L": "https://www.ishares.com/ch/individual/en/products/251860/ishares-msci-europe-ucits-etf-inc-fund",
+    "SGLN.L": "https://www.ishares.com/uk/individual/en/products/258441/ishares-physical-gold-etc-fund",
+}
 
 COMMODITIES = [
     ("GC=F", "Gold"), ("SI=F", "Silver"), ("CL=F", "WTI Crude Oil"), ("BZ=F", "Brent Crude Oil"),
@@ -1247,80 +1260,104 @@ def fetch_ishares_nav(product_url, isin):
     return None
 
 
-# La unidad viene en cualquier capitalización ("EUR 1.20 B", "USD 29.5 bn", "EUR 820.50 M"): antes el regex solo aceptaba
-# minúsculas, no capturaba la unidad y _fmt_aum truncaba a "EUR 1" / "EUR 820" (orden de magnitud falso).
-_AUM_RE = r'([A-Z]{3})\s*([\d,]+(?:\.\d+)?)\s*((?i:bn|mn|mm|k|m|b))?\b'
+# La unidad viene en cualquier capitalización ("EUR 1.20 B", "USD 29.5 bn", "EUR 820.50 M"). Sin unidad, iShares escribe el número
+# agrupado con comas ("EUR 1,293,192,323") o, en la web suiza que scrapeamos, con apóstrofo tipográfico ("EUR 1’296’938’547"):
+# antes solo se aceptaban comas y el AUM de las clases S salía vacío. Se admiten también apóstrofo recto y espacios finos.
+_SEP = "’'\u2019\u202f\u00a0,"
+_NUM_AUM = r"(\d{1,3}(?:[" + _SEP + r"]\d{3})+(?:\.\d+)?|\d+(?:\.\d+)?)"
+_AUM_RE = r'([A-Z]{3})\s*' + _NUM_AUM + r'\s*((?i:bn|mn|mm|k|m|b))?\b'
 _AUM_U = {"k": "k", "m": "m", "mn": "m", "mm": "m", "bn": "bn", "b": "bn"}
 
 
 def _fmt_aum(m):
-    """'EUR', '809.12', 'M' -> 'EUR 809.12 m'; sin unidad se agrupa el número ('EUR 1,234,567'); sin unidad y < 1000 es ambiguo -> None."""
-    ccy, num, unit = m.group(1), m.group(2), (m.group(3) or "").lower()
+    """'EUR', '809.12', 'M' -> 'EUR 809.12 m'; sin unidad se compacta ('EUR 1’296’938’547' -> 'EUR 1.30 bn'); sin unidad y < 1000 es ambiguo -> None."""
+    ccy, num, unit = m.group(1), re.sub("[" + _SEP + "]", "", m.group(2)), (m.group(3) or "").lower()
     if unit:
         return f"{ccy} {num} {_AUM_U[unit]}"
     try:
-        v = float(num.replace(',', ''))
+        v = float(num)
     except ValueError:
         return None
-    return f"{ccy} {v:,.0f}" if v >= 1000 else None
+    if v < 1000:
+        return None
+    if v >= 1e9:
+        return f"{ccy} {v / 1e9:.2f} bn"
+    if v >= 1e6:
+        return f"{ccy} {v / 1e6:.2f} m"
+    return f"{ccy} {v:,.0f}"
+
+
+def _pct(txt, lo=0.0, hi=10.0):
+    """Porcentaje de comisión del texto plano de iShares -> float o None (fuera de rango = basura, no se publica)."""
+    try:
+        v = float(txt)
+    except (TypeError, ValueError):
+        return None
+    return v if lo <= v <= hi else None
+
+
+def scan_fund_facts(plain):
+    """
+    Lee el bloque «Key Facts» del texto plano (sin etiquetas) de una ficha de iShares: la de las clases S (fondos indexados) y la de
+    los ETF (SWDA, EIMI, IMEU) y ETC (SGLN), cuyas etiquetas cambian un poco («Total Expense Ratio», «Net Assets of Share Class»,
+    «Fund Manager»/«Arranger»...). Cada campo va en su propio try: uno malformado se descarta sin perder los demás.
+    """
+    facts = {}
+
+    def put(key, fn):
+        try:
+            v = fn()
+            if v is not None and v != "":
+                facts[key] = v
+        except Exception as e:
+            print(f"  ! fund fact {key} no parseable: {e}", file=sys.stderr)
+
+    def rx(pattern, grp=1, flags=0):
+        m = re.search(pattern, plain, flags)
+        return m.group(grp).strip() if m else None
+
+    _D = r'[\d/A-Za-z]+'
+    put("class_launch_date", lambda: rx(r'Share Class [Ll]aunch [Dd]ate\s+(' + _D + ')'))
+    put("class_inception_date", lambda: rx(r'Inception Date\s+(' + _D + ')'))
+    put("fund_launch_date", lambda: rx(r'Fund Launch Date\s+(' + _D + ')'))
+    # number WITH decimals and its unit (k / m / bn): "EUR 809.12 m", not "EUR 809"
+    put("class_aum", lambda: (lambda m: _fmt_aum(m) if m else None)(re.search(r'Net Assets(?: of Share Class)?\s+as of\s+' + _D + r'\s+' + _AUM_RE, plain)))
+    put("fund_aum", lambda: (lambda m: _fmt_aum(m) if m else None)(re.search(r'Net Assets of Fund\s+as of\s+' + _D + r'\s+' + _AUM_RE, plain)))
+    put("benchmark", lambda: rx(r'Benchmark Index\s+([A-Za-z0-9 ,()%.\-]+?)\s+(?:Initial Charge|Management Fee|Shares Outstanding)')
+        or rx(r'Base Currency\s+[A-Z]{3}\s+Index\s+([A-Za-z0-9 ,()%.\-]+?)\s+(?:Tonnes in Trust|Ounces in Trust)'))
+    put("management_company", lambda: rx(r'Management Company\s+([A-Za-z0-9 .,()]+?)\s+(?:Dealing Settlement|Bloomberg Ticker)')
+        or rx(r'Fund Manager\s+([A-Za-z0-9 .,()]+?)\s+Custodian') or rx(r'Arranger\s+([A-Za-z0-9 .,()]+?)\s+Custodian'))
+    put("morningstar_category", lambda: rx(r'Morningstar Category\s+([A-Za-z0-9 &\-]+?)\s+Dealing Frequency'))
+    put("ongoing_charges_pct", lambda: _pct(rx(r'(?:Ongoing Charges Figures|Total Expense Ratio)\s+(\d+(?:\.\d+)?)\s*%')))
+    put("management_fee_pct", lambda: _pct(rx(r'Management Fee\s+(\d+(?:\.\d+)?)\s*%')))
+    # en la ficha de las clases S estos dos vienen como «0.00%» / «0.00» (sin %) o como «-» (= no hay): el «-» no se publica
+    put("performance_fee_pct", lambda: _pct(rx(r'Performance Fee\s+(\d+(?:\.\d+)?)(?:\s*%|(?=\s))'), hi=50.0))
+    put("initial_charge_pct", lambda: _pct(rx(r'Initial Charge\s+(\d+(?:\.\d+)?)(?:\s*%|(?=\s))')))
+    put("base_currency", lambda: rx(r'Base Currency\s+([A-Z]{3})\b'))
+    put("share_class_currency", lambda: rx(r'Share Class Currency\s+([A-Z]{3})\b'))
+    put("use_of_income", lambda: rx(r'Use of Income\s+(Accumulating|Distributing|No Income)\b'))
+    put("structure", lambda: rx(r'Product Structure\s+([A-Za-z ]+?)\s+Methodology\s+([A-Za-z ]+?)\s+(?:Issuing Company|UCITS Eligible|Administrator|Arranger)', 1))
+    put("methodology", lambda: rx(r'Product Structure\s+([A-Za-z ]+?)\s+Methodology\s+([A-Za-z ]+?)\s+(?:Issuing Company|UCITS Eligible|Administrator|Arranger)', 2))
+    put("holdings", lambda: (lambda v: int(re.sub("[" + _SEP + "]", "", v)) if v else None)(rx(r'Number of Holdings\s+as of\s+' + _D + r'\s+(\d[\d’\',\u2019]*)')))
+    put("domicile", lambda: rx(r'Domicile\s+([A-Z][a-z]+)\b'))
+    return facts
 
 
 def fetch_ishares_fund_facts(product_url):
     """
-    Scrapes the 'Key Facts' block of the fund's ishares.com product page: management
-    company, benchmark, Morningstar category, fund/class size, launch date, and fees.
-    Best-effort and resilient -- any field that isn't found (or if the page structure
-    changes) is simply left out, never raises.
+    Scrapes the 'Key Facts' block of the fund's ishares.com product page (scan_fund_facts). Best-effort and resilient --
+    any field that isn't found (or if the page structure changes) is simply left out, never raises.
     """
-    facts = {}
     try:
         headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
         res = requests.get(product_url, headers=headers, timeout=20)
         res.raise_for_status()
         plain = re.sub(r'<[^>]+>', ' ', res.text)
         plain = re.sub(r'\s+', ' ', plain)
-
-        m = re.search(r'Inception Date\s+([\d/A-Za-z]+)', plain)
-        if m: facts["class_inception_date"] = m.group(1)
-
-        m = re.search(r'Fund Launch Date\s+([\d/A-Za-z]+)', plain)
-        if m: facts["fund_launch_date"] = m.group(1)
-
-        # number WITH decimals and its unit (k / m / bn): "EUR 809.12 m", not "EUR 809"
-        m = re.search(r'Net Assets\s+as of\s+[\d/A-Za-z]+\s+' + _AUM_RE, plain)
-        if m:
-            _v = _fmt_aum(m)
-            if _v: facts["class_aum"] = _v
-
-        m = re.search(r'Net Assets of Fund\s+as of\s+[\d/A-Za-z]+\s+' + _AUM_RE, plain)
-        if m:
-            _v = _fmt_aum(m)
-            if _v: facts["fund_aum"] = _v
-
-        m = re.search(r'Benchmark Index\s+([A-Za-z0-9 ,()%.\-]+?)\s+(?:Initial Charge|Management Fee)', plain)
-        if m: facts["benchmark"] = m.group(1).strip()
-
-        m = re.search(r'Management Company\s+([A-Za-z0-9 .,()]+?)\s+(?:Dealing Settlement|Bloomberg Ticker)', plain)
-        if m: facts["management_company"] = m.group(1).strip()
-
-        m = re.search(r'Morningstar Category\s+([A-Za-z0-9 &\-]+?)\s+Dealing Frequency', plain)
-        if m: facts["morningstar_category"] = m.group(1).strip()
-
-        m = re.search(r'Ongoing Charges Figures\s+([\d.]+)\s*%', plain)
-        if m: facts["ongoing_charges_pct"] = float(m.group(1))
-
-        m = re.search(r'Management Fee\s+([\d.]+)\s*%', plain)
-        if m: facts["management_fee_pct"] = float(m.group(1))
-
-        m = re.search(r'Performance Fee\s+([\d.]+)\s*%', plain)
-        if m: facts["performance_fee_pct"] = float(m.group(1))
-
-        m = re.search(r'Initial Charge\s+([\d.]+)\s*%', plain)
-        if m: facts["initial_charge_pct"] = float(m.group(1))
-
+        return scan_fund_facts(plain)
     except Exception as e:
         print(f"  ! fund facts scrape failed for {product_url}: {e}", file=sys.stderr)
-    return facts
+        return {}
 
 
 def compute_fund_analytics(proxy_symbol):
@@ -1333,7 +1370,9 @@ def compute_fund_analytics(proxy_symbol):
     them client-side via JS, empty in the raw HTML).
     """
     try:
-        hist = yf_history(proxy_symbol, period="10y", interval="1d")
+        # "max" y no "10y": con "10y" Yahoo devuelve unos días MENOS de 10 años y la rentabilidad a 10 años salía vacía (nearest_price
+        # no encuentra precio anterior a la fecha objetivo). Luego se recortan las rentabilidades anuales a los últimos 10 años naturales.
+        hist = yf_history(proxy_symbol, period="max", interval="1d")
         hist = hist.dropna(subset=["Close"])
         if hist.empty or len(hist) < 30:
             return {}
@@ -1341,7 +1380,7 @@ def compute_fund_analytics(proxy_symbol):
         closes = [float(c) for c in hist["Close"].tolist()]
 
         annual_returns = {}
-        for y in sorted(set(d.year for d in dates)):
+        for y in sorted(set(d.year for d in dates if d.year >= dates[-1].year - 9)):
             idxs = [i for i, d in enumerate(dates) if d.year == y]
             prev = [i for i, d in enumerate(dates) if d.year == y - 1]
             if not idxs or not prev:
@@ -1391,7 +1430,43 @@ def compute_fund_analytics(proxy_symbol):
         return {}
 
 
-def build_your_funds():
+def _prev_by(rows, key):
+    """Filas del feed anterior indexadas por `key` (isin/symbol); tolera feed ausente o con formato raro."""
+    try:
+        return {r[key]: r for r in (rows or []) if isinstance(r, dict) and r.get(key)}
+    except Exception:
+        return {}
+
+
+def attach_fund_extras(funds, prev=None, fetch_facts=None, fetch_analytics=None):
+    """
+    A los ETF de «Explorar» (FUNDS) les añade lo mismo que llevan tus fondos: `facts` (ficha de iShares: TER, patrimonio, índice...)
+    y `analytics` (rentabilidad por años/periodos y volatilidad, calculadas sobre su propia cotización, en su divisa).
+    Si el scrape o el cálculo fallan se reutiliza lo del feed anterior; si tampoco hay, el campo se omite (la ficha no enseña la fila).
+    """
+    fetch_facts = fetch_facts or fetch_ishares_fund_facts
+    fetch_analytics = fetch_analytics or compute_fund_analytics
+    old = _prev_by(prev, "symbol")
+    for f in funds:
+        try:
+            sym, url = f.get("symbol"), FUND_FACT_URLS.get(f.get("symbol"))
+            if url:
+                facts = fetch_facts(url)
+                if not (facts and len(facts) >= 3):          # menos de 3 campos = página rota/captcha: mejor lo de antes
+                    facts = (old.get(sym) or {}).get("facts") or facts
+                if facts:
+                    f["facts"] = facts
+            an = fetch_analytics(f.get("symbol"))
+            if not an:
+                an = (old.get(f.get("symbol")) or {}).get("analytics")
+            if an:
+                f["analytics"] = an
+        except Exception as e:
+            print(f"  ! extras de {f.get('symbol')}: {e}", file=sys.stderr)
+    return funds
+
+
+def build_your_funds(prev=None):
     """
     Your actual fund holdings. Tries the exact scraped Class S NAV first; if that
     fails for any reason, falls back to applying the proxy ETF's daily % change to
@@ -1400,10 +1475,13 @@ def build_your_funds():
     volatility -- from the proxy ETF's history, see compute_fund_analytics).
     """
     out = []
+    old = _prev_by(prev, "isin")
     for fund in YOUR_FUNDS:
         scraped = fetch_ishares_nav(fund["product_url"], fund["isin"])
         facts = fetch_ishares_fund_facts(fund["product_url"])
-        analytics = compute_fund_analytics(fund["proxy_symbol"])
+        if len(facts) < 3:                       # scrape roto/parcial: se conserva la ficha del feed anterior en vez de vaciarla
+            facts = (old.get(fund["isin"]) or {}).get("facts") or facts
+        analytics = compute_fund_analytics(fund["proxy_symbol"]) or (old.get(fund["isin"]) or {}).get("analytics") or {}
         entry = {
             "isin": fund["isin"],
             "name": fund["name"],
@@ -1863,8 +1941,10 @@ def main():
     funds = build_list(FUNDS, prev.get("funds"))
     print("Fetching full ('max') + intraday history for each fund (Explore detail chart)...")
     funds = attach_histories(funds, prev.get("funds"))
+    print("Fetching key facts + returns/volatility for the Explore funds...")
+    funds = attach_fund_extras(funds, prev.get("funds"))
     print("Fetching your actual fund holdings (NAV scrape + fallback)...")
-    your_funds = build_your_funds()
+    your_funds = build_your_funds(prev.get("your_funds"))
     print("Fetching commodities...")
     commodities = build_list(COMMODITIES, prev.get("commodities"))
     print("Fetching full ('max') + intraday history for each commodity...")
