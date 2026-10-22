@@ -238,7 +238,8 @@ def test_D17_hechos_de_ishares_numero_malformado_aborta_el_resto(monkeypatch):
     html = "Ongoing Charges Figures 0.0.6 % Management Fee 0.04 % Initial Charge 1.0 %"
     monkeypatch.setattr(fm.requests, "get", lambda *a, **k: types.SimpleNamespace(text=html, raise_for_status=lambda: None))
     f = fm.fetch_ishares_fund_facts("https://x.test")
-    assert f == {}      # float('0.0.6') lanza y el try exterior descarta TAMBIÉN las comisiones posteriores (valores buenos)
+    # «0.0.6» no es un número: se descarta ESE campo, pero las comisiones buenas que vienen después se conservan
+    assert f == {"management_fee_pct": 0.04, "initial_charge_pct": 1.0}
 
 
 def test_D18_perfil_fuzz_la_salida_del_parser_siempre_cumple_los_limites_del_sanity():
