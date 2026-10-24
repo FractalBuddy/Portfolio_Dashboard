@@ -19,6 +19,7 @@ fondos y qué cripto sigues. Si eso es un problema, quita esas entradas o no pub
 Variable de entorno opcional PREV_FEED_PATH (por defecto `prev.json`): feed publicado anteriormente.
 Si FRED falla, se reutilizan de él los tipos y el IPC marcados como `stale` (ver reuse_previous_fred).
 """
+import html
 import json
 import math
 import os
@@ -1165,6 +1166,23 @@ def reuse_previous_fred(rates, cpi, cpi_meta, prev):
     return rates, cpi, cpi_meta
 
 
+def _plain_text(value, limit):
+    """Texto de un feed RSS (no fiable) reducido a texto plano: se des-escapan las entidades (hasta 3 pasadas, por si vienen doblemente
+    codificadas: `&amp;lt;img&amp;gt;` => `&lt;img&gt;` => `<img>`), se quitan las etiquetas, se descartan los `<` `>` sueltos y los
+    caracteres de control y se recorta (BE-14). Lo que sale ya no contiene marcado ni entidades de marcado, con independencia de cómo
+    lo pinte el dashboard (textContent o innerHTML)."""
+    t = str(value or "")
+    for _ in range(3):
+        u = html.unescape(t)
+        if u == t:
+            break
+        t = u
+    t = re.sub(r"<[^>]*>", "", t)
+    t = re.sub(r"[<>]", "", t)
+    t = re.sub(r"[\x00-\x1f\x7f]+", " ", t)
+    return re.sub(r" {2,}", " ", t).strip()[:limit]
+
+
 def parse_feed(url, limit=8):
     # Presupuesto global: pasado _NEWS_DEADLINE (o _DEADLINE) no se hace ninguna petición más.
     if _budget_exhausted(_NEWS_DEADLINE or _DEADLINE):
@@ -1178,10 +1196,10 @@ def parse_feed(url, limit=8):
             if not link.lower().startswith(("http://", "https://")):
                 continue  # nunca publicar javascript:/data: etc. (el dashboard ya lo filtra; defensa en profundidad)
             items.append({
-                "title": re.sub(r"<[^>]*>", "", str(entry.get("title", "") or "")).strip()[:300],
+                "title": _plain_text(entry.get("title", ""), 300),
                 "link": link[:1000],
-                "source": re.sub(r"<[^>]*>", "", str(parsed.feed.get("title", url))).strip()[:120],
-                "published": entry.get("published", entry.get("updated", "")),
+                "source": _plain_text(parsed.feed.get("title", url), 120),
+                "published": _plain_text(entry.get("published", entry.get("updated", "")), 100),
             })
         return items
     except Exception as e:

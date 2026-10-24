@@ -216,3 +216,37 @@ def test_BE12_main_publica_health_budget_exhausted(tmp_path, monkeypatch, reloj)
     monkeypatch.setattr(fm, "build_market_mood", lambda: (fm._budget_exhausted(), {})[1])    # una fase choca con el tope
     fm.main()
     assert json.loads((tmp_path / "data.json").read_text())["health"]["budget_exhausted"] is True
+
+
+# ------------------------------------------------------------------ BE-14: entidades HTML en los títulos de noticias
+def _rss(titulo, canal="Canal", publicado=None):
+    pub = "<pubDate>%s</pubDate>" % publicado if publicado else ""
+    return ("<?xml version='1.0'?><rss version='2.0'><channel><title>%s</title><item><title>%s</title>%s"
+            "<link>https://a.test/1</link></item></channel></rss>" % (canal, titulo, pub)).encode()
+
+
+@pytest.mark.parametrize("titulo,esperado", [
+    ("&amp;lt;img src=x onerror=alert(1)&amp;gt;", ""),                       # doble codificación (reproducción de la auditoría)
+    ("&amp;amp;lt;script&amp;amp;gt;alert(1)&amp;amp;lt;/script&amp;amp;gt;Hola", "alert(1)Hola"),   # triple
+    ("&lt;b&gt;negrita&lt;/b&gt; y más", "negrita y más"),
+    ("AT&amp;amp;T sube un 3%", "AT&T sube un 3%"),                          # una entidad legítima se conserva como texto
+    ("S&amp;P 500 &amp;lt; 5000", "S&P 500 5000"),                           # un «<» suelto se descarta
+])
+def test_BE14_titulos_sin_marcado_ni_entidades_de_marcado(monkeypatch, titulo, esperado):
+    monkeypatch.setattr(fm, "_fetch_feed_bytes", lambda url: _rss(titulo))
+    monkeypatch.setattr(fm, "_NEWS_DEADLINE", None)
+    t = fm.parse_feed("https://x.test/rss")[0]["title"]
+    assert t == esperado and "<" not in t and ">" not in t and "&lt;" not in t.lower() and "&gt;" not in t.lower()
+
+
+def test_BE14_source_y_published_tambien_son_texto_plano(monkeypatch):
+    monkeypatch.setattr(fm, "_fetch_feed_bytes", lambda url: _rss("t", canal="&amp;lt;i&amp;gt;Fuente&amp;lt;/i&amp;gt;",
+                                                                 publicado="Mon, 05 Oct 2026 10:00:00 +0000 &amp;lt;b&amp;gt;"))
+    monkeypatch.setattr(fm, "_NEWS_DEADLINE", None)
+    it = fm.parse_feed("https://x.test/rss")[0]
+    assert it["source"] == "Fuente" and "<" not in it["published"] and it["published"].startswith("Mon, 05 Oct 2026")
+
+
+def test_BE14_el_titulo_limpio_pasa_el_validador():
+    import sanity_check as sc
+    assert sc._text_problem("title", "S&P 500 5000 y AT&T") is None
