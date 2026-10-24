@@ -201,14 +201,24 @@ jobs:
           done
           tries=6
           got=""
+          want_bytes=""
+          have_bytes=""
           for i in $(seq 1 "$tries"); do
-            got=$(curl -fsS --max-time 20 "https://cdn.jsdelivr.net/gh/${GITHUB_REPOSITORY}@data/meta.json?cb=$RANDOM" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("generated_at",""))' 2>/dev/null | tr -d '\r\n' | cut -c1-64 || true)
-            if [ "$got" = "$WANT" ]; then echo "CDN sirve la versión nueva ($WANT)"; exit 0; fi
-            echo "intento $i/$tries: CDN sirve '$got' (esperado '$WANT')"
+            meta=$(curl -fsS --max-time 20 "https://cdn.jsdelivr.net/gh/${GITHUB_REPOSITORY}@data/meta.json?cb=$RANDOM" 2>/dev/null || true)
+            got=$(printf '%s' "$meta" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("generated_at",""))' 2>/dev/null | tr -d '\r\n' | cut -c1-64 || true)
+            want_bytes=$(printf '%s' "$meta" | python3 -c 'import sys,json;print(int(json.load(sys.stdin).get("data_bytes",0)))' 2>/dev/null | tr -d '\r\n' | cut -c1-12 || true)
+            have_bytes=""
+            if [ "$got" = "$WANT" ]; then
+              # El dashboard lee meta.json y, si cambia generated_at, descarga data.json: un borde que sirva el meta NUEVO con el data VIEJO
+              # lo engaña (BE-11). Se compara el tamaño real (descomprimido) de data.json con el data_bytes que declara el meta.
+              have_bytes=$(curl -fsS --compressed --max-time 60 "https://cdn.jsdelivr.net/gh/${GITHUB_REPOSITORY}@data/data.json?cb=$RANDOM" 2>/dev/null | wc -c | tr -d ' \r\n' || true)
+              if [ -n "$want_bytes" ] && [ "$want_bytes" != "0" ] && [ "$have_bytes" = "$want_bytes" ]; then echo "CDN sirve la versión nueva ($WANT, data.json $have_bytes bytes)"; exit 0; fi
+            fi
+            echo "intento $i/$tries: CDN sirve meta '$got' (esperado '$WANT'), data.json '${have_bytes:-sin comprobar}' bytes (esperado '${want_bytes:-?}')"
             # sin dormir tras el último intento
             if [ "$i" -lt "$tries" ]; then sleep $((i*20)); fi
           done
-          msg="jsDelivr sigue sirviendo un meta.json antiguo ('${got:-vacío}', esperado '$WANT') tras $tries intentos"
+          msg="jsDelivr sigue sirviendo un meta.json o data.json antiguo (meta '${got:-vacío}', esperado '$WANT'; data.json '${have_bytes:-sin comprobar}' bytes, esperados '${want_bytes:-?}') tras $tries intentos"
           echo "::warning::${msg}; la caché de rama puede tardar hasta ~12 h y el dashboard se pondrá al día solo."
           if [ -n "${HC:-}" ]; then
             curl -fsS -m 10 --retry 3 --retry-all-errors --data-raw "cdn-stale: ${msg}" "${HC%/}/log" >/dev/null || echo "::warning::no se pudo enviar el aviso informativo a Healthchecks (/log)"
