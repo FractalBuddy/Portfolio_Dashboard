@@ -324,3 +324,60 @@ def test_keepalive_con_head_desacoplado_y_sin_rama_falla_claro(sandbox):
     _git("checkout", "-q", "--detach", cwd=work)
     r = bash(sandbox, _keepalive_script(), env={"BRANCH": ""}, cwd=work)
     assert r.returncode != 0 and "no se pudo determinar la rama" in r.stdout
+
+
+# ---- BE-06: descarga del feed anterior sin desactivar en silencio las reglas de regresión
+def _fake_curl_prev(sb, mode):
+    _exe(sb.bin / "curl", '''echo "curl $*" >> "$CALLS_LOG"
+out=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-o" ]; then out="$2"; shift; fi
+  shift
+done
+case "%s" in
+  ok)  echo '{"indices":[{"symbol":"^GSPC"}]}' > "$out"; printf 200;;
+  nf)  echo 'Not Found' > "$out"; printf 404;;
+  s500) echo 'oops' > "$out"; printf 500;;
+  down) exit 6;;
+esac
+''' % mode)
+
+
+def _run_prev_step(sb, job, name, mode):
+    _fake_curl_prev(sb, mode)
+    genv = sb.tmp / "github_env"
+    genv.write_text("")
+    r = bash(sb, step(load("update-data.yml"), job, name)["run"], env={"GITHUB_ENV": str(genv)})
+    prev = (sb.work / "prev.json").read_text()
+    return r, prev, genv.read_text()
+
+
+@pytest.mark.parametrize("job,name", [("publish", "Download previous feed"),
+                                      ("fetch", "Download previous feed (for FRED fallback)")])
+def test_BE06_descarga_ok_espera_feed_anterior(sandbox, job, name):
+    r, prev, genv = _run_prev_step(sandbox, job, name, "ok")
+    assert r.returncode == 0 and "^GSPC" in prev and "EXPECT_PREV=true" in genv
+    assert "--retry-all-errors" in " ".join(calls(sandbox))     # --retry solo no cubre los fallos de conexión
+
+
+@pytest.mark.parametrize("job,name", [("publish", "Download previous feed"),
+                                      ("fetch", "Download previous feed (for FRED fallback)")])
+def test_BE06_404_es_primer_run_legitimo(sandbox, job, name):
+    r, prev, genv = _run_prev_step(sandbox, job, name, "nf")
+    assert r.returncode == 0 and prev.strip() == "{}" and "EXPECT_PREV" not in genv
+
+
+@pytest.mark.parametrize("mode", ["s500", "down"])
+@pytest.mark.parametrize("job,name", [("publish", "Download previous feed"),
+                                      ("fetch", "Download previous feed (for FRED fallback)")])
+def test_BE06_cualquier_otro_fallo_no_es_primer_run(sandbox, job, name, mode):
+    r, prev, genv = _run_prev_step(sandbox, job, name, mode)
+    assert r.returncode == 0 and prev.strip() == "{}"           # el paso no tira el job: lo decide el sanity-check
+    assert "EXPECT_PREV=true" in genv                           # ...que ya sabe que faltaba un anterior
+    assert "::warning::" in r.stdout
+
+
+def test_BE06_el_sanity_check_recibe_expect_prev():
+    run = step(load("update-data.yml"), "publish", "Sanity-check feed")
+    assert "EXPECT_PREV" in run["env"] or "EXPECT_PREV" in run["run"]
+    assert "|| echo '{}'" not in (WF / "update-data.yml").read_text(encoding="utf-8")

@@ -49,10 +49,18 @@ jobs:
         run: pip install -r requirements.txt
 
       # Feed publicado anteriormente (repo público, sin token). Solo lo usa el script para reutilizar tipos/IPC
-      # (marcados stale) si FRED falla. Si no existe (primer run, rama borrada) o falla la descarga: '{}' y listo.
+      # (marcados stale) si FRED falla. Primer run / rama borrada (404): '{}'. Cualquier otro fallo: '{}' + aviso (la decisión es del job `publish`).
       - name: Download previous feed (for FRED fallback)
         run: |
-          curl -fsS --max-time 60 --retry 2 -o prev.json "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/data/data.json" || echo '{}' > prev.json
+          # 200 = hay feed anterior (la rama `data` existe); 404 = primer run o rama borrada (único caso legítimo de «sin anterior»);
+          # cualquier otra cosa es un fallo de descarga y NO debe desactivar en silencio las reglas de regresión (BE-06).
+          code=$(curl -sS --max-time 60 --retry 3 --retry-all-errors -o prev.json -w '%{http_code}' "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/data/data.json" || true)
+          case "$code" in
+            200) echo "EXPECT_PREV=true" >> "$GITHUB_ENV" ;;
+            404) echo "::notice::sin feed anterior (HTTP 404): primer run o rama data borrada"; echo '{}' > prev.json ;;
+            *)   echo "::warning::no se pudo bajar el feed anterior (HTTP ${code:-sin respuesta}): el sanity-check lo tratará como fallo, no como primer run"
+                 echo '{}' > prev.json; echo "EXPECT_PREV=true" >> "$GITHUB_ENV" ;;
+          esac
 
       - name: Fetch market data
         env:
@@ -96,10 +104,19 @@ jobs:
           name: market-data
           path: feed
 
-      # Feed publicado anteriormente: base de las reglas de regresión del sanity-check. Sin anterior => '{}' => solo reglas absolutas.
+      # Feed publicado anteriormente: base de las reglas de regresión del sanity-check. 404 (primer run) => '{}' => solo reglas absolutas;
+      # otro fallo => EXPECT_PREV=true => el sanity-check bloquea (o, con allow_regression, avisa con Alert) en vez de saltarse la regresión.
       - name: Download previous feed
         run: |
-          curl -fsS --max-time 60 --retry 2 -o prev.json "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/data/data.json" || echo '{}' > prev.json
+          # 200 = hay feed anterior (la rama `data` existe); 404 = primer run o rama borrada (único caso legítimo de «sin anterior»);
+          # cualquier otra cosa es un fallo de descarga y NO debe desactivar en silencio las reglas de regresión (BE-06).
+          code=$(curl -sS --max-time 60 --retry 3 --retry-all-errors -o prev.json -w '%{http_code}' "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/data/data.json" || true)
+          case "$code" in
+            200) echo "EXPECT_PREV=true" >> "$GITHUB_ENV" ;;
+            404) echo "::notice::sin feed anterior (HTTP 404): primer run o rama data borrada"; echo '{}' > prev.json ;;
+            *)   echo "::warning::no se pudo bajar el feed anterior (HTTP ${code:-sin respuesta}): el sanity-check lo tratará como fallo, no como primer run"
+                 echo '{}' > prev.json; echo "EXPECT_PREV=true" >> "$GITHUB_ENV" ;;
+          esac
 
       # Nunca publicar algo que no sea un data.json sano: un run que "termina bien" pero produjo un feed vacío/parcial/degradado
       # no debe pisar el último dato bueno. Si falla, el job falla ANTES del push y el heartbeat manda /fail.
@@ -107,6 +124,7 @@ jobs:
         env:
           FRED_KEY_SET: ${{ secrets.FRED_API_KEY != '' }}
           SANITY_ALLOW_REGRESSION: ${{ inputs.allow_regression }}
+          EXPECT_PREV: ${{ env.EXPECT_PREV }}
         run: python3 scripts/sanity_check.py --data feed/data.json --meta feed/meta.json --prev prev.json --alerts-out "$RUNNER_TEMP/alerts.txt"
 
       # Avisos que merecen que el dueño se entere (Yahoo degradado: precios antiguos varios días, fundamentales sin refrescar, tabla de

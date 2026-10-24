@@ -17,6 +17,8 @@ Uso:
 
 Variables de entorno opcionales:
     FRED_KEY_SET=true             la clave de FRED está configurada: se exigen tipos e IPC.
+    EXPECT_PREV=true              la rama `data` existe: si el feed anterior no se pudo bajar o leer, NO se
+                                  trata como primer run (bloquea; con SANITY_ALLOW_REGRESSION=true avisa con Alert).
     SANITY_ALLOW_REGRESSION=true  las reglas de REGRESIÓN pasan a ser avisos (para cambios
                                   intencionados del universo de símbolos; las absolutas siguen
                                   bloqueando). Se activa con la entrada `allow_regression` del
@@ -215,7 +217,7 @@ def _nav_date(f):
 
 
 def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, today=None,
-          allow_regression=False):
+          allow_regression=False, expect_prev=False):
     """Devuelve (errores, avisos): listas de textos de una línea. Sin errores = publicable."""
     errors, warnings = [], []
     today = today or dt.datetime.now(dt.timezone.utc).date()
@@ -519,6 +521,14 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
         if prev_bytes:
             if data_bytes < MIN_RATIO_VS_PREV * prev_bytes:
                 reg.append("el feed nuevo pesa %s bytes, menos del %d %% del anterior (%s)" % (data_bytes, int(MIN_RATIO_VS_PREV * 100), prev_bytes))
+    elif expect_prev:
+        # BE-06: la rama `data` existe (el workflow bajó un 200 o falló la descarga), así que la falta de anterior NO es un primer run:
+        # sin esto, una descarga fallida desactivaba en silencio las reglas de regresión justo cuando Yahoo va peor.
+        msg = "feed anterior esperado pero no utilizable (descarga fallida o ilegible): las reglas de regresión no se pueden aplicar"
+        if allow_regression:
+            warnings.append(Alert(msg + " [allow_regression: se publica igualmente]"))
+        else:
+            errors.append(msg)
     else:
         warnings.append("sin feed anterior utilizable: solo se aplican las reglas absolutas")
 
@@ -575,6 +585,7 @@ def main(argv=None):
             data_bytes=os.path.getsize(a.data), prev_bytes=prev_bytes,
             fred_key_set=os.environ.get("FRED_KEY_SET", "").lower() in truthy,
             allow_regression=os.environ.get("SANITY_ALLOW_REGRESSION", "").lower() in truthy,
+            expect_prev=os.environ.get("EXPECT_PREV", "").lower() in truthy,
         )
     except Exception as e:  # noqa: BLE001 - feed con tipos inesperados = no publicable
         print("::error::feed malformado: %s" % _line(type(e).__name__))

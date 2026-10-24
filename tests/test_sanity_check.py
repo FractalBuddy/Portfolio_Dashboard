@@ -607,3 +607,45 @@ def test_BE05_nav_normal_o_sin_anterior_no_molesta():
     d["your_funds"][0]["price"] *= 1.02
     prev["your_funds"][1]["price"] = None
     assert run(d, m, prev)[0] == []
+
+
+# =============================================================== BE-06: feed anterior esperado y no disponible
+def test_BE06_prev_vacio_con_rama_data_existente_bloquea():               # R1b
+    d, m = healthy()
+    errs, _ = run(d, m, {}, expect_prev=True)
+    assert any("feed anterior" in e for e in errs)
+
+
+def test_BE06_prev_vacio_con_allow_regression_avisa_con_alert():
+    d, m = healthy()
+    errs, warns = run(d, m, {}, expect_prev=True, allow_regression=True)
+    assert errs == [] and any(isinstance(w, sc.Alert) and "feed anterior" in w for w in warns)
+
+
+def test_BE06_primer_run_sin_rama_data_sigue_siendo_aviso():
+    d, m = healthy()
+    errs, warns = run(d, m, {}, expect_prev=False)
+    assert errs == [] and any("sin feed anterior" in w for w in warns)
+
+
+def test_BE06_prev_valido_con_expect_prev_pasa():
+    d, m = healthy(); prev, _ = healthy()
+    assert run(d, m, prev, expect_prev=True)[0] == []
+
+
+def test_BE06_main_lee_expect_prev_del_entorno(tmp_path, capsys, monkeypatch):
+    d, m = healthy()
+    d["padding"] = "x" * 3_100_000
+    p = tmp_path / "d.json"; p.write_text(json.dumps(d))
+    m["data_bytes"] = p.stat().st_size
+    (tmp_path / "m.json").write_text(json.dumps(m))
+    (tmp_path / "prev.json").write_text("{}")
+    monkeypatch.setenv("FRED_KEY_SET", "true")
+    args = ["--data", str(p), "--meta", str(tmp_path / "m.json"), "--prev", str(tmp_path / "prev.json")]
+    assert sc.main(args) == 0                                  # sin EXPECT_PREV: como siempre
+    capsys.readouterr()
+    monkeypatch.setenv("EXPECT_PREV", "true")
+    assert sc.main(args) == 1
+    assert "feed anterior" in capsys.readouterr().out
+    monkeypatch.setenv("SANITY_ALLOW_REGRESSION", "true")
+    assert sc.main(args) == 0
