@@ -1,0 +1,6 @@
+# Herramientas de CI (tests y lint) con versión exacta. `requirements-dev.txt` se genera con hashes (BE-16):
+#   uv pip compile requirements-dev.in --generate-hashes --universal --python-version 3.14 --no-header -o requirements-dev.txt
+# Están en un fichero de requirements para que Dependabot las vea (antes iban fijadas a mano dentro de ci.yml).
+pytest==9.1.1
+ruff==0.15.11
+PyYAML==6.0.3

@@ -2,8 +2,10 @@ name: Update market data
 
 on:
   schedule:
-    # 4x/day (UTC): 06:17, 11:17, 15:17, 20:17 (minuto «feo» a propósito: los cron en :00 son los que más retrasa GitHub).
-    - cron: '17 6,11,15,20 * * *'
+    # 4x/day (UTC): 06:17, 11:17, 15:17, 21:17 (minuto «feo» a propósito: los cron en :00 son los que más retrasa GitHub).
+    # La última a las 21:17 y no a las 20:17: Wall Street cierra a las 20:00 UTC con horario de verano y a las 21:00 UTC en invierno, así que
+    # a las 20:17 la barra diaria de un día de invierno salía parcial (sesión aún abierta) (BE-20).
+    - cron: '17 6,11,15,21 * * *'
   workflow_dispatch:   # ejecución manual desde la pestaña Actions
     inputs:
       allow_regression:
@@ -17,8 +19,10 @@ permissions:
   contents: read
 
 # Never let two runs overlap (a manual run during a scheduled one, or a slow run still
-# going when the next cron fires): they'd race on the same branch. Queue instead of cancel
-# so a half-finished run is never killed mid-publish.
+# going when the next cron fires): they'd race on the same branch. `cancel-in-progress: false`
+# means a half-finished run is never killed mid-publish. Pero NO es una cola: GitHub guarda como
+# mucho UN run pendiente por grupo, y un tercero sustituye al pendiente (el pendiente se cancela).
+# Es inocuo: cada run baja datos frescos y el siguiente cron/dispatch recupera lo que falte.
 concurrency:
   group: update-market-data
   cancel-in-progress: false
@@ -45,8 +49,10 @@ jobs:
           python-version: '3.14'
           cache: pip
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      # Este es el job que ejecuta código de terceros con FRED_API_KEY en el entorno: se instala SOLO lo fijado en requirements.txt
+      # (versiones exactas + hashes, generado desde requirements.in) y pip rechaza cualquier archivo cuyo hash no coincida (BE-07).
+      - name: Install dependencies (hash-pinned)
+        run: pip install --require-hashes --no-deps -r requirements.txt
 
       # Feed publicado anteriormente (repo público, sin token). Solo lo usa el script para reutilizar tipos/IPC
       # (marcados stale) si FRED falla. Primer run / rama borrada (404): '{}'. Cualquier otro fallo: '{}' + aviso (la decisión es del job `publish`).

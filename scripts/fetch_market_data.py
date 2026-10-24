@@ -19,6 +19,7 @@ fondos y qué cripto sigues. Si eso es un problema, quita esas entradas o no pub
 Variable de entorno opcional PREV_FEED_PATH (por defecto `prev.json`): feed publicado anteriormente.
 Si FRED falla, se reutilizan de él los tipos y el IPC marcados como `stale` (ver reuse_previous_fred).
 """
+import html
 import json
 import math
 import os
@@ -32,6 +33,7 @@ import socket
 import threading
 import requests
 import yfinance as yf
+from yfinance import exceptions as yf_exceptions
 import feedparser
 
 # Red de seguridad para cualquier librería que abra sockets sin timeout propio (yfinance...). Las noticias ya no
@@ -185,9 +187,49 @@ CPI_STALE_DAYS = 100   # last observation older than this => flagged as stale in
 # workflow's sanity gate. Each history call now retries with jittered exponential backoff, but a
 # circuit breaker stops retrying once Yahoo is clearly down (so the 20-minute job timeout holds).
 _YF_FAIL_STREAK = 0
+# --- Yahoo desde una IP compartida de runner (BE-08): ritmo contenido y 429 tratado como lo que es.
+# Un 429 NO se arregla reintentando en 1-4 s: pausa larga (con jitter) y, si Yahoo sigue limitando, abandono limpio (el resto de
+# símbolos arrastra la fila anterior marcada `stale` en vez de seguir martilleando y alargar el bloqueo de la IP).
+YF_REQ_GAP = (0.15, 0.35)         # segundos entre dos peticiones a Yahoo (ráfaga acotada: ~4-5 peticiones/s como mucho)
+YF_BURST_SIZE = 40                # cada tantas peticiones...
+YF_BURST_PAUSE = 5.0              # ...una pausa, para que la ráfaga no sea continua
+YF_RATE_LIMIT_PAUSE = (30.0, 60.0)  # pausa tras un 429
+YF_RATE_LIMIT_MAX_CONSECUTIVE = 3   # 429 seguidos (sin ninguna respuesta buena entre medias) => se abandona Yahoo
+YF_RATE_LIMIT_MAX_TOTAL = 6         # o tantos 429 en total en el run
+_YF_LAST_REQ = 0.0
+_YF_REQS = 0
+_YF_429_CONSECUTIVE = 0
+_YF_429_TOTAL = 0
+_YF_ABANDONED = False
 # Presupuesto de tiempo global (el job tiene timeout de 20 min): pasado este límite se deja de llamar a Yahoo y
 # se falla limpio (sanity-check) en vez de morir por timeout a mitad de publicación.
 _DEADLINE = time.monotonic() + 14 * 60
+# Presupuesto GLOBAL del job (BE-12). `_DEADLINE` (14 min) solo manda sobre Yahoo; el resto de fases (iShares, FRED, CoinGecko, Lido, CNN)
+# no tenían tope y, en el peor caso con todo fallando, sumaban ~17,8 min más: el job moría por timeout (20 min) sin publicar nada.
+# Pasado `_HARD_DEADLINE` ninguna fase hace ya peticiones ni esperas: se devuelve lo que haya (o «sin dato») y el sanity-check decide.
+# Quedan ~2 min de margen para escribir los ficheros y subir el artefacto.
+HARD_BUDGET_SECONDS = 18 * 60
+_HARD_DEADLINE = time.monotonic() + HARD_BUDGET_SECONDS
+_BUDGET_HIT = False                  # alguna fase se saltó trabajo por falta de tiempo (se publica en health.budget_exhausted)
+
+
+def _budget_exhausted(deadline=None):
+    """True (y queda anotado) si ya pasó `deadline` (por defecto, el tope duro del job)."""
+    global _BUDGET_HIT
+    if time.monotonic() > (_HARD_DEADLINE if deadline is None else deadline):
+        _BUDGET_HIT = True
+        return True
+    return False
+
+
+def _net_timeout(default):
+    """Timeout de una petición: el habitual, recortado a lo que queda de presupuesto (mínimo 1 s)."""
+    return max(1.0, min(float(default), _HARD_DEADLINE - time.monotonic()))
+
+
+def _nap(seconds):
+    """Espera entre reintentos que nunca sobrepasa el presupuesto global."""
+    time.sleep(max(0.0, min(seconds, _HARD_DEADLINE - time.monotonic())))
 # Presupuesto propio de las noticias (secundarias): main() lo fija al empezarlas como min(_DEADLINE, ahora + 5 min).
 # Pasado ese límite parse_feed() devuelve [] sin tocar la red.
 NEWS_BUDGET_SECONDS = 5 * 60
@@ -250,25 +292,89 @@ def _tag_currency(hist, ticker):
         pass
 
 
+def _is_rate_limit(exc):
+    """¿Es un 429 de Yahoo? yfinance lo lanza como YFRateLimitError; si la librería cambia, se reconoce también por el texto."""
+    if isinstance(exc, getattr(yf_exceptions, "YFRateLimitError", ())):
+        return True
+    txt = f"{type(exc).__name__} {exc}".lower()
+    return "too many requests" in txt or "rate limit" in txt or "429" in txt
+
+
+class YahooStop(RuntimeError):
+    """No se hace (más) trabajo contra Yahoo en este run: abandonado por 429 o presupuesto de tiempo agotado."""
+
+
+def _yf_pace():
+    """Antes de CADA petición a Yahoo: separación mínima entre peticiones y una pausa cada YF_BURST_SIZE. Lanza si ya se abandonó
+    Yahoo por 429 (no se hace ninguna petición más) o si se agotó el presupuesto de tiempo."""
+    global _YF_LAST_REQ, _YF_REQS
+    if _YF_ABANDONED:
+        raise YahooStop("Yahoo limita (429): se abandona para el resto del run")
+    if _budget_exhausted(_DEADLINE):
+        raise YahooStop('presupuesto de tiempo de fetch agotado')
+    wait = YF_REQ_GAP[0] + random.random() * (YF_REQ_GAP[1] - YF_REQ_GAP[0]) - (time.monotonic() - _YF_LAST_REQ)
+    if wait > 0:
+        time.sleep(wait)
+    _YF_REQS += 1
+    if _YF_REQS % YF_BURST_SIZE == 0:
+        time.sleep(YF_BURST_PAUSE)
+    _YF_LAST_REQ = time.monotonic()
+
+
+def _yf_ok():
+    """Una respuesta buena de Yahoo corta la racha de 429."""
+    global _YF_429_CONSECUTIVE
+    _YF_429_CONSECUTIVE = 0
+
+
+def _yf_rate_limited(symbol, pause=True):
+    """Registra un 429: pausa larga con jitter (recortada al presupuesto que quede) o, pasados los topes, abandona Yahoo. Devuelve True si
+    se puede reintentar. `pause=False` cuando no queda ningún intento (se cuenta el 429 pero no se espera en balde)."""
+    global _YF_429_CONSECUTIVE, _YF_429_TOTAL, _YF_ABANDONED
+    _YF_429_CONSECUTIVE += 1
+    _YF_429_TOTAL += 1
+    if _YF_429_CONSECUTIVE >= YF_RATE_LIMIT_MAX_CONSECUTIVE or _YF_429_TOTAL >= YF_RATE_LIMIT_MAX_TOTAL:
+        _YF_ABANDONED = True
+        print(f"  ! Yahoo responde 429 ({_YF_429_CONSECUTIVE} seguidos, {_YF_429_TOTAL} en total, último en {symbol}): "
+              "se abandona Yahoo en este run (las filas se arrastran del feed anterior)", file=sys.stderr)
+        return False
+    if pause:
+        secs = min(random.uniform(*YF_RATE_LIMIT_PAUSE), max(0.0, _DEADLINE - time.monotonic()))
+        print(f"  ! Yahoo responde 429 en {symbol}: pausa de {secs:.0f} s ({_YF_429_CONSECUTIVE}/{YF_RATE_LIMIT_MAX_CONSECUTIVE} seguidos)", file=sys.stderr)
+        time.sleep(secs)
+    return True
+
+
 def yf_history(symbol, tries=3, **kw):
     """yf.Ticker(symbol).history(**kw) with retries on exceptions AND on empty results.
-    Returns a DataFrame (possibly empty); raises only if every attempt raised."""
+    Returns a DataFrame (possibly empty); raises only if every attempt raised.
+    Un 429 se trata aparte (pausa larga y, si persiste, abandono de Yahoo): ver _yf_rate_limited."""
     global _YF_FAIL_STREAK
-    if time.monotonic() > _DEADLINE:
+    if _budget_exhausted(_DEADLINE):
         raise TimeoutError('presupuesto de tiempo de fetch agotado')
     last_exc, hist = None, None
     attempts = 1 if _YF_FAIL_STREAK >= 15 else tries
     for i in range(attempts):
+        limited = False
         try:
+            _yf_pace()
             tk = yf.Ticker(symbol)
             hist = tk.history(**kw)
             hist = _drop_phantom_bars(hist.dropna(subset=["Close"]))
+            _yf_ok()
             if not hist.empty:
                 _YF_FAIL_STREAK = 0
                 _tag_currency(hist, tk)
                 return hist
         except Exception as e:  # network, rate limit, parsing...
             last_exc = e
+            if isinstance(e, YahooStop):
+                break               # Yahoo ya abandonado o presupuesto agotado: no hay nada que reintentar
+            limited = _is_rate_limit(e)
+        if limited:
+            if not _yf_rate_limited(symbol, pause=i < attempts - 1):
+                break
+            continue
         if i < attempts - 1:
             time.sleep(random.uniform(0.5, 1.0 * 2 ** (i + 1)))
     _YF_FAIL_STREAK += 1
@@ -425,6 +531,10 @@ def fetch_full_history(symbol, period="max"):
         return []
 
 
+_INTRADAY_TZ = {}   # símbolo -> zona horaria IANA de las barras de su último fetch_intraday_history (la lee attach_histories)
+_TZ_NAME_RE = re.compile(r"^(?:UTC|[A-Za-z_]+(?:/[A-Za-z0-9_+\-]+){1,2})$")
+
+
 def fetch_intraday_history(symbol):
     """
     Real intraday bars for the 1D chart (5-minute bars, including pre/post market),
@@ -437,6 +547,10 @@ def fetch_intraday_history(symbol):
         hist = hist.dropna(subset=["Close"])
         if hist.empty:
             return []
+        _INTRADAY_TZ.pop(symbol, None)
+        tz = str(getattr(hist.index, "tz", None) or "")      # yfinance deja el índice en la hora local del mercado
+        if _TZ_NAME_RE.match(tz):
+            _INTRADAY_TZ[symbol] = tz
         return [
             {"time": idx.strftime("%Y-%m-%d %H:%M"), "close": round(float(row["Close"]), 4)}
             for idx, row in hist.iterrows()
@@ -462,7 +576,12 @@ def attach_histories(items, prev_rows=None):
                 s["history_stale"] = True
                 print(f"  ! {s['symbol']}: sin histórico hoy, se reutiliza el del feed anterior (history_stale)", file=sys.stderr)
         s["history"] = h
+        _INTRADAY_TZ.pop(s["symbol"], None)
         s["intraday"] = fetch_intraday_history(s["symbol"])
+        # `time` de cada barra es la hora local del mercado, sin zona: `intraday_tz` (IANA, p. ej. America/New_York) dice cuál, para que el
+        # cliente pueda alinear mercados distintos (BE-20). Aditivo: el formato de `time` no cambia.
+        if s["intraday"] and _INTRADAY_TZ.get(s["symbol"]):
+            s["intraday_tz"] = _INTRADAY_TZ[s["symbol"]]
     return items
 
 
@@ -668,21 +787,29 @@ def fetch_stock_profile(symbol):
     """Yahoo: Ticker.info (profile, margins, balance sheet...) + the Valuation Measures table (market cap, EV, P/Es, EV/EBITDA)
     -> parse + merge. {} on total failure (caller falls back to the previous feed). The valuation table failing alone is not
     fatal: `info` figures are used and the `_valuation` marker says so (popped by attach_profiles, logged, never published)."""
-    if time.monotonic() > _DEADLINE:
+    if _budget_exhausted(_DEADLINE) or _YF_ABANDONED:
         return {}
     for i in range(2):
         try:
+            _yf_pace()
             t = yf.Ticker(symbol)
             prof = parse_stock_profile(t.info)
+            _yf_ok()
             if prof:
                 val = {}
                 for j in range(2):   # the table is a separate request: one retry before falling back to `info`
                     try:
+                        _yf_pace()
                         val = parse_valuation_measures(t.get_valuation_measures(freq="trailing", periods=0))
                         if _val_usable(val):
                             break
+                    except YahooStop:
+                        val = {}
+                        break
                     except Exception as e:
                         print(f"  ! valuation table attempt {j + 1} failed for {symbol}: {type(e).__name__}: {e}", file=sys.stderr)
+                        if _is_rate_limit(e):
+                            _yf_rate_limited(symbol, pause=False)    # se cuenta (puede abandonar Yahoo); el reintento ya espera abajo
                     val = {}
                     if j == 0:
                         time.sleep(random.uniform(0.5, 1.5))
@@ -704,8 +831,14 @@ def fetch_stock_profile(symbol):
                 prof = merge_valuation(prof, val)
                 prof["_valuation"] = _val_usable(val)
                 return prof
+        except YahooStop:
+            return {}
         except Exception as e:
             print(f"  ! profile attempt {i + 1} failed for {symbol}: {type(e).__name__}: {e}", file=sys.stderr)
+            if _is_rate_limit(e):
+                if not _yf_rate_limited(symbol, pause=i == 0):
+                    return {}
+                continue
         if i == 0:
             time.sleep(random.uniform(0.5, 1.5))
     return {}
@@ -863,16 +996,18 @@ def _fred_get(params, tries=3):
     """GET a FRED observations con reintentos (5xx/429/timeout transitorios). Lanza la última excepción si todos fallan."""
     last = None
     for i in range(tries):
+        if _budget_exhausted():
+            raise TimeoutError("presupuesto de tiempo del job agotado")
         try:
-            res = requests.get("https://api.stlouisfed.org/fred/series/observations", params=params, timeout=15)
+            res = requests.get("https://api.stlouisfed.org/fred/series/observations", params=params, timeout=_net_timeout(15))
             if res.status_code in (429, 500, 502, 503, 504) and i < tries - 1:
-                time.sleep(2 * (i + 1)); continue
+                _nap(2 * (i + 1)); continue
             res.raise_for_status()
             return res
         except requests.RequestException as e:
             last = e
             if i < tries - 1:
-                time.sleep(2 * (i + 1))
+                _nap(2 * (i + 1))
     raise last
 
 
@@ -1044,9 +1179,26 @@ def reuse_previous_fred(rates, cpi, cpi_meta, prev):
     return rates, cpi, cpi_meta
 
 
+def _plain_text(value, limit):
+    """Texto de un feed RSS (no fiable) reducido a texto plano: se des-escapan las entidades (hasta 3 pasadas, por si vienen doblemente
+    codificadas: `&amp;lt;img&amp;gt;` => `&lt;img&gt;` => `<img>`), se quitan las etiquetas, se descartan los `<` `>` sueltos y los
+    caracteres de control y se recorta (BE-14). Lo que sale ya no contiene marcado ni entidades de marcado, con independencia de cómo
+    lo pinte el dashboard (textContent o innerHTML)."""
+    t = str(value or "")
+    for _ in range(3):
+        u = html.unescape(t)
+        if u == t:
+            break
+        t = u
+    t = re.sub(r"<[^>]*>", "", t)
+    t = re.sub(r"[<>]", "", t)
+    t = re.sub(r"[\x00-\x1f\x7f]+", " ", t)
+    return re.sub(r" {2,}", " ", t).strip()[:limit]
+
+
 def parse_feed(url, limit=8):
     # Presupuesto global: pasado _NEWS_DEADLINE (o _DEADLINE) no se hace ninguna petición más.
-    if time.monotonic() > (_NEWS_DEADLINE or _DEADLINE):
+    if _budget_exhausted(_NEWS_DEADLINE or _DEADLINE):
         print(f"  ! presupuesto de tiempo agotado, se omite el feed {url}", file=sys.stderr)
         return []
     try:
@@ -1057,10 +1209,10 @@ def parse_feed(url, limit=8):
             if not link.lower().startswith(("http://", "https://")):
                 continue  # nunca publicar javascript:/data: etc. (el dashboard ya lo filtra; defensa en profundidad)
             items.append({
-                "title": re.sub(r"<[^>]*>", "", str(entry.get("title", "") or "")).strip()[:300],
+                "title": _plain_text(entry.get("title", ""), 300),
                 "link": link[:1000],
-                "source": re.sub(r"<[^>]*>", "", str(parsed.feed.get("title", url))).strip()[:120],
-                "published": entry.get("published", entry.get("updated", "")),
+                "source": _plain_text(parsed.feed.get("title", url), 120),
+                "published": _plain_text(entry.get("published", entry.get("updated", "")), 100),
             })
         return items
     except Exception as e:
@@ -1202,8 +1354,11 @@ def parse_ishares_nav(plain, isin, today=None):
     (variación, rango 52 semanas) se parsean cada uno en su propio try: si uno viene malformado
     se descarta ese campo, pero NO se pierde el NAV válido.
     """
-    nav_match = re.search(r'NAV as of\s+(\d{1,2}\s+[A-Za-z]{3,10}\.?\s+\d{4}|[\w/.\-]+)\s+EUR\s*([\d.,]+)', plain)
-    if not (nav_match and isin in plain):
+    nav_re = r'NAV as of\s+(\d{1,2}\s+[A-Za-z]{3,10}\.?\s+\d{4}|[\w/.\-]+)\s+EUR\s*([\d.,]+)'
+    nav_match = re.search(nav_re, plain)
+    # El ISIN debe aparecer como token entero (no dentro de otro código más largo), no como simple subcadena.
+    isin_ok = bool(isin) and re.search(r'(?<![A-Za-z0-9])' + re.escape(isin) + r'(?![A-Za-z0-9])', plain) is not None
+    if not (nav_match and isin_ok):
         print(f"  ! could not find expected NAV pattern for {isin} -- falling back to proxy", file=sys.stderr)
         return None
     price = _parse_num(nav_match.group(2))
@@ -1212,6 +1367,9 @@ def parse_ishares_nav(plain, isin, today=None):
         print(f"  ! implausible NAV {nav_match.group(2)!r} for {isin} -- falling back to proxy", file=sys.stderr)
         return None
     result = {"price": round(price, 4), "nav_date": nav_match.group(1)}
+    others = {(m.group(1), m.group(2)) for m in re.finditer(nav_re, plain)} - {(nav_match.group(1), nav_match.group(2))}
+    if others:   # una página con varios «NAV as of» distintos (¿varias clases?): se sigue usando el primero (decisión previa), pero se deja rastro
+        print(f"  ! {isin}: la página trae {len(others) + 1} «NAV as of» distintos; se usa el primero ({nav_match.group(1)} EUR {nav_match.group(2)})", file=sys.stderr)
 
     # Antigüedad del NAV: si iShares congela la página, el NAV de hace días no debe pasar por "de hoy".
     # Sin fecha creíble (ilegible, imposible o futura) NO se inventa ni nav_stale ni nav_date_iso: el sanity-check lo avisa.
@@ -1258,33 +1416,59 @@ ISHARES_TRIES = 2           # un fallo transitorio (timeout, 5xx, corte de red) 
 ISHARES_RETRY_WAIT = 4      # segundos entre intentos
 
 
+_ISHARES_PAGES = {}   # url -> texto plano de la ficha, o la excepción con la que falló: UNA descarga por URL y run (BE-17)
+
+
+def _ishares_plain(product_url, label="ficha"):
+    """Texto plano (sin etiquetas) de la ficha de producto de iShares, con UNA sola descarga por URL y por run: el NAV y la ficha de
+    «Key Facts» salen de la misma página y antes la bajaban dos veces (el doble de peticiones a ishares.com, y los facts sin reintento).
+    Reintenta UNA vez solo ante fallos transitorios (timeout, error de conexión, HTTP 5xx/429): un 403/404 o una página de captcha
+    (200 sin el patrón) no se arreglan reintentando. El fallo también se recuerda (no se vuelve a pedir una página que ya ha fallado).
+    Lanza la excepción si no se pudo."""
+    hit = _ISHARES_PAGES.get(product_url)
+    if isinstance(hit, Exception):
+        raise hit
+    if hit is not None:
+        return hit
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
+    err = None
+    for attempt in range(ISHARES_TRIES):
+        if _budget_exhausted():
+            err = TimeoutError("presupuesto de tiempo del job agotado")
+            break
+        try:
+            res = requests.get(product_url, headers=headers, timeout=_net_timeout(20))
+            res.raise_for_status()
+            # Strip tags to plain text so we don't depend on exact HTML structure/classes.
+            plain = re.sub(r'<[^>]+>', ' ', res.text)
+            plain = re.sub(r'\s+', ' ', plain)
+            _ISHARES_PAGES[product_url] = plain
+            return plain
+        except Exception as e:
+            err = e
+            code = getattr(getattr(e, "response", None), "status_code", None)
+            transient = isinstance(e, (requests.Timeout, requests.ConnectionError)) or (code is not None and (code >= 500 or code == 429))
+            if transient and attempt < ISHARES_TRIES - 1:
+                print(f"  ! ishares scrape {label}: {type(e).__name__} transitorio, reintento", file=sys.stderr)
+                _nap(ISHARES_RETRY_WAIT)
+                continue
+            break
+    if not isinstance(err, TimeoutError):      # un fallo por falta de presupuesto no es de la página: no se recuerda
+        _ISHARES_PAGES[product_url] = err
+    raise err
+
+
 def fetch_ishares_nav(product_url, isin):
     """
     Scrapes the exact Class S NAV straight off the fund's public ishares.com product
     page. Returns None (never raises) if the page layout doesn't match what we expect,
     so callers can fall back to the proxy-ETF approximation instead of crashing.
-    Reintenta UNA vez solo ante fallos transitorios (timeout, error de conexión, HTTP 5xx/429): un 403/404 o una página
-    de captcha (200 sin el patrón) no se arreglan reintentando.
     """
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
-    for attempt in range(ISHARES_TRIES):
-        try:
-            res = requests.get(product_url, headers=headers, timeout=20)
-            res.raise_for_status()
-            # Strip tags to plain text so we don't depend on exact HTML structure/classes.
-            plain = re.sub(r'<[^>]+>', ' ', res.text)
-            plain = re.sub(r'\s+', ' ', plain)
-            return parse_ishares_nav(plain, isin)
-        except Exception as e:
-            code = getattr(getattr(e, "response", None), "status_code", None)
-            transient = isinstance(e, (requests.Timeout, requests.ConnectionError)) or (code is not None and (code >= 500 or code == 429))
-            if transient and attempt < ISHARES_TRIES - 1:
-                print(f"  ! ishares scrape {isin}: {type(e).__name__} transitorio, reintento", file=sys.stderr)
-                time.sleep(ISHARES_RETRY_WAIT)
-                continue
-            print(f"  ! ishares scrape failed for {isin}: {e} -- falling back to proxy", file=sys.stderr)
-            return None
-    return None
+    try:
+        return parse_ishares_nav(_ishares_plain(product_url, isin), isin)
+    except Exception as e:
+        print(f"  ! ishares scrape failed for {isin}: {e} -- falling back to proxy", file=sys.stderr)
+        return None
 
 
 # La unidad viene en cualquier capitalización ("EUR 1.20 B", "USD 29.5 bn", "EUR 820.50 M"). Sin unidad, iShares escribe el número
@@ -1376,12 +1560,7 @@ def fetch_ishares_fund_facts(product_url):
     any field that isn't found (or if the page structure changes) is simply left out, never raises.
     """
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
-        res = requests.get(product_url, headers=headers, timeout=20)
-        res.raise_for_status()
-        plain = re.sub(r'<[^>]+>', ' ', res.text)
-        plain = re.sub(r'\s+', ' ', plain)
-        return scan_fund_facts(plain)
+        return scan_fund_facts(_ishares_plain(product_url, product_url))
     except Exception as e:
         print(f"  ! fund facts scrape failed for {product_url}: {e}", file=sys.stderr)
         return {}
@@ -1588,11 +1767,13 @@ def _cg_markets(params, tries=3):
     """GET CoinGecko /coins/markets (public, no key) with retries on 429/5xx. Returns the JSON list or raises."""
     last = None
     for i in range(tries):
+        if _budget_exhausted():
+            raise TimeoutError("presupuesto de tiempo del job agotado")
         try:
             res = requests.get("https://api.coingecko.com/api/v3/coins/markets", params=params,
-                               headers=_CG_HEADERS, timeout=20)
+                               headers=_CG_HEADERS, timeout=_net_timeout(20))
             if res.status_code in (429, 500, 502, 503, 504) and i < tries - 1:
-                time.sleep(8 * (i + 1)); continue
+                _nap(8 * (i + 1)); continue
             res.raise_for_status()
             data = res.json()
             if not isinstance(data, list):
@@ -1601,7 +1782,7 @@ def _cg_markets(params, tries=3):
         except (requests.RequestException, ValueError) as e:
             last = e
             if i < tries - 1:
-                time.sleep(4 * (i + 1))
+                _nap(4 * (i + 1))
     raise last
 
 
@@ -1610,12 +1791,14 @@ def _alt_excluded_ids():
     a category call that fails just contributes nothing (the static symbol list still covers the big ones)."""
     ids = set()
     for cat in ALT_EXCLUDE_CATEGORIES:
+        if _budget_exhausted():
+            break
         try:
             rows = _cg_markets({"vs_currency": "usd", "category": cat, "order": "market_cap_desc", "per_page": 250, "page": 1})
             ids.update(str(r.get("id")) for r in rows if isinstance(r, dict) and r.get("id"))
         except Exception as e:
             print(f"  ! altcoin season: categoría {cat} no disponible ({type(e).__name__})", file=sys.stderr)
-        time.sleep(2.5)  # sin clave el límite de CoinGecko es bajo: no se le martillea
+        _nap(2.5)  # sin clave el límite de CoinGecko es bajo: no se le martillea
     return ids
 
 
@@ -1699,7 +1882,7 @@ def build_altcoin_season(prev=None):
     streak = _YF_FAIL_STREAK  # many unmapped tickers would trip the Yahoo circuit breaker for the rest of the run
     try:
         coins = _cg_markets({"vs_currency": "usd", "order": "market_cap_desc", "per_page": 100, "page": 1})
-        time.sleep(2.5)
+        _nap(2.5)
         result = compute_altcoin_season(coins, _alt_excluded_ids())
         if result:
             return result
@@ -1731,6 +1914,81 @@ def cnn_put_call_ratio(block):
         return None
 
 
+# --- Frescura de market_mood y staking (BE-15). Un endpoint «congelado» (CNN no está documentado, alternative.me y Lido guardan
+# un timestamp que nadie miraba) pasaba por actual. Si la fuente trae fecha y es más vieja que esto, la entrada se publica `stale`.
+MOOD_MAX_AGE_DAYS = 3
+# Una entrada de market_mood que falla hoy se arrastra del feed anterior (marcada `stale`) solo si lleva como mucho este tiempo así:
+# pasado, mejor que desaparezca (y lo vea el sanity-check) que enseñar un VIX de hace una semana como vigente.
+MOOD_MAX_CARRY_DAYS = 3
+_MOOD_KEYS = ("vix", "vix_50ma", "stock_fear_greed", "market_momentum", "put_call", "junk_bond_demand", "safe_haven_demand",
+              "crypto_fear_greed")
+
+
+def _source_date(ts):
+    """Fecha (date, UTC) de un timestamp de una fuente externa: epoch en segundos o milisegundos, o ISO 8601. None si no se entiende."""
+    try:
+        if isinstance(ts, bool):
+            return None
+        if isinstance(ts, (int, float)) or (isinstance(ts, str) and re.fullmatch(r"\d{9,13}(\.\d+)?", ts.strip())):
+            v = float(ts)
+            if v > 1e11:        # milisegundos
+                v /= 1000.0
+            d = datetime.fromtimestamp(v, tz=timezone.utc).date()
+        elif isinstance(ts, str):
+            d = datetime.fromisoformat(ts.strip().replace("Z", "+00:00")).date()
+        else:
+            return None
+        return d if datetime(2000, 1, 1).date() <= d <= datetime.now(timezone.utc).date() + timedelta(days=2) else None
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _stamp_freshness(entry, ts, today=None, publish_date=False):
+    """Si `ts` se entiende, y es más vieja que MOOD_MAX_AGE_DAYS, marca la entrada `stale` (+ `stale_since`). Con publish_date, además
+    publica `as_of` (YYYY-MM-DD). Sin fecha utilizable no toca nada (no se inventa ni frescura ni antigüedad). Devuelve la entrada."""
+    d = _source_date(ts)
+    if d is None or not isinstance(entry, dict):
+        return entry
+    today = today or datetime.now(timezone.utc).date()
+    if publish_date:
+        entry["as_of"] = d.isoformat()
+    if (today - d).days > MOOD_MAX_AGE_DAYS:
+        entry["stale"] = True
+        entry["stale_since"] = d.isoformat()
+        print(f"  ! dato de {d.isoformat()} ({(today - d).days} días): se publica marcado como antiguo", file=sys.stderr)
+    return entry
+
+
+def carry_previous_mood(mood, prev, today=None):
+    """Para cada indicador de `market_mood` que hoy ha fallado (VIX, Fear & Greed de bolsa y sus componentes, Fear & Greed cripto) y que
+    el feed anterior sí tenía, reutiliza el anterior marcado `stale` (+ `stale_since`, que se conserva entre reutilizaciones). Como el
+    resto de secciones (tipos, IPC, altcoin season, staking): antes, si VIX y CNN fallaban a la vez, `market_mood` quedaba sin VIX ni Fear
+    & Greed de bolsa y el sanity-check bloqueaba TODA la publicación. Pasados MOOD_MAX_CARRY_DAYS no se arrastra. Devuelve `mood`."""
+    today = today or datetime.now(timezone.utc).date()
+    try:
+        old_mood = (prev or {}).get("market_mood")
+        old_mood = old_mood if isinstance(old_mood, dict) else {}
+        since_default = str((prev or {}).get("generated_at", ""))[:10] or None
+        for key in _MOOD_KEYS:
+            old = old_mood.get(key)
+            if key in mood or not (isinstance(old, dict) and isinstance(old.get("value"), (int, float)) and not isinstance(old.get("value"), bool)):
+                continue
+            since = old.get("stale_since") or since_default
+            try:
+                if (today - datetime.strptime(str(since)[:10], "%Y-%m-%d").date()).days > MOOD_MAX_CARRY_DAYS:
+                    continue
+            except ValueError:
+                continue
+            row = dict(old)
+            row["stale"] = True
+            row["stale_since"] = since
+            mood[key] = row
+            print(f"  ! market_mood.{key}: se reutiliza el valor del feed anterior (stale desde {since})", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001 - nunca debe tirar el run
+        print(f"  ! no se pudo reutilizar el market_mood anterior: {type(e).__name__}", file=sys.stderr)
+    return mood
+
+
 LIDO_API = "https://eth-api.lido.fi/v1/protocol/steth/apr"
 _STAKING_HEADERS = {"User-Agent": "personal-portfolio-dashboard/1.0"}
 
@@ -1758,11 +2016,13 @@ def parse_lido_apr(last_json, sma_json):
 
 def fetch_lido_apr():
     """Keyless public API. Returns the parsed dict or None (the caller handles the stale fallback)."""
-    last = requests.get(f"{LIDO_API}/last", headers=_STAKING_HEADERS, timeout=15)
+    if _budget_exhausted():
+        raise TimeoutError("presupuesto de tiempo del job agotado")
+    last = requests.get(f"{LIDO_API}/last", headers=_STAKING_HEADERS, timeout=_net_timeout(15))
     last.raise_for_status()
     sma_json = None
     try:
-        sma = requests.get(f"{LIDO_API}/sma", headers=_STAKING_HEADERS, timeout=15)
+        sma = requests.get(f"{LIDO_API}/sma", headers=_STAKING_HEADERS, timeout=_net_timeout(15))
         sma.raise_for_status()
         sma_json = sma.json()
     except Exception as e:
@@ -1791,7 +2051,7 @@ def build_staking(prev=None):
         try:
             parsed = fetch()
             if parsed:
-                staking[key] = parsed
+                staking[key] = _stamp_freshness(parsed, parsed.get("as_of"))
         except Exception as e:
             print(f"  ! staking {key} failed: {type(e).__name__}: {e}", file=sys.stderr)
         if key in staking:
@@ -1832,28 +2092,35 @@ def build_market_mood():
         print(f"  ! VIX fetch failed: {e}", file=sys.stderr)
 
     try:
-        res = requests.get("https://api.alternative.me/fng/?limit=1", timeout=15)
+        if _budget_exhausted():
+            raise TimeoutError("presupuesto de tiempo del job agotado")
+        res = requests.get("https://api.alternative.me/fng/?limit=1", timeout=_net_timeout(15))
         res.raise_for_status()
         d = res.json()["data"][0]
         mood["crypto_fear_greed"] = {"value": int(d["value"]), "classification": d["value_classification"]}
         try:
             mood["crypto_fear_greed"]["timestamp"] = int(d["timestamp"])  # unix, 00:00 UTC del día de la lectura (alternative.me)
+            _stamp_freshness(mood["crypto_fear_greed"], mood["crypto_fear_greed"]["timestamp"])
         except (KeyError, TypeError, ValueError):
             pass
     except Exception as e:
         print(f"  ! fear & greed fetch failed: {e}", file=sys.stderr)
 
     try:
+        if _budget_exhausted():
+            raise TimeoutError("presupuesto de tiempo del job agotado")
         headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
-        res = requests.get("https://production.dataviz.cnn.io/index/fearandgreed/graphdata", headers=headers, timeout=15)
+        res = requests.get("https://production.dataviz.cnn.io/index/fearandgreed/graphdata", headers=headers, timeout=_net_timeout(15))
         res.raise_for_status()
         d = res.json()
         def sub(key):
             try:
                 v = d[key]
-                return {"value": round(float(v.get("score")), 1), "rating": v.get("rating")}
+                out = {"value": round(float(v.get("score")), 1), "rating": v.get("rating")}
             except Exception:
                 return None
+            # CNN trae `timestamp` en el bloque (endpoint no documentado: si no se entiende, no se publica ni se juzga la frescura)
+            return _stamp_freshness(out, v.get("timestamp"), publish_date=True)
         fg = sub("fear_and_greed")
         if fg: mood["stock_fear_greed"] = fg
         mom = sub("market_momentum_sp500")
@@ -1871,11 +2138,12 @@ def build_market_mood():
     except Exception as e:
         print(f"  ! CNN fear & greed fetch failed (unofficial endpoint, best-effort): {e}", file=sys.stderr)
 
-    alt = build_altcoin_season(_load_prev_feed())
+    prev = _load_prev_feed()
+    alt = build_altcoin_season(prev)
     if alt:
         mood["altcoin_season"] = alt
 
-    return mood
+    return carry_previous_mood(mood, prev)
 
 
 def build_benchmarks():
@@ -2027,6 +2295,7 @@ def main():
     }
     data["health"] = compute_health(data)
     data["health"]["fx_stale"] = fx_stale
+    data["health"]["budget_exhausted"] = bool(_BUDGET_HIT)     # alguna fase se saltó trabajo por falta de tiempo (BE-12)
     h = data["health"]
     print(f"HEALTH: {len(h['stale_symbols'])} símbolos con precio antiguo {h['stale_symbols'] or ''}; "
           f"{len(h['history_reused'])} con histórico reutilizado {h['history_reused'] or ''}; "

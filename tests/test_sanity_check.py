@@ -5,6 +5,7 @@ Cada caso de A1 (el feed degradado que antes PASABA) debe fallar ahora; el feed 
 import copy
 import datetime as dt
 import json
+import os
 
 import pytest
 
@@ -289,7 +290,7 @@ def test_main_feed_ilegible_y_anterior_ilegible(tmp_path, capsys):
 def test_main_anterior_corrupto_se_ignora_con_aviso(tmp_path, capsys, monkeypatch):
     d, m = healthy()
     # tamaño mínimo real: relleno para superar los 3 MB reales del fichero
-    d["padding"] = "x" * 3_100_000
+    d["stocks"][0]["sparkline"] = [1.0] * 800_000     # relleno de tamaño con un campo permitido (el esquema rechaza claves nuevas)
     p = tmp_path / "d.json"
     p.write_text(json.dumps(d))
     m["data_bytes"] = p.stat().st_size
@@ -646,7 +647,7 @@ def test_BE06_prev_valido_con_expect_prev_pasa():
 
 def test_BE06_main_lee_expect_prev_del_entorno(tmp_path, capsys, monkeypatch):
     d, m = healthy()
-    d["padding"] = "x" * 3_100_000
+    d["stocks"][0]["sparkline"] = [1.0] * 800_000     # relleno de tamaño con un campo permitido (el esquema rechaza claves nuevas)
     p = tmp_path / "d.json"; p.write_text(json.dumps(d))
     m["data_bytes"] = p.stat().st_size
     (tmp_path / "m.json").write_text(json.dumps(m))
@@ -660,3 +661,125 @@ def test_BE06_main_lee_expect_prev_del_entorno(tmp_path, capsys, monkeypatch):
     assert "feed anterior" in capsys.readouterr().out
     monkeypatch.setenv("SANITY_ALLOW_REGRESSION", "true")
     assert sc.main(args) == 0
+
+
+# ====================================================================== BE-07: esquema (lista blanca de claves y strings)
+def test_R6_clave_o_string_no_permitidos_deben_bloquear():
+    d, m = healthy()
+    d["stocks"][0]["name"] = "<img src=x onerror=alert(1)>"
+    d["extra_blob"] = "A" * 1000
+    errs, _ = run(d, m, None)
+    assert any("esquema" in e for e in errs)
+
+
+def test_BE07_clave_nueva_en_una_fila_bloquea():
+    d, m = healthy()
+    d["stocks"][3]["payload"] = 1
+    assert any("payload" in e for e in run(d, m, None)[0])
+
+
+@pytest.mark.parametrize("campo,valor", [
+    ("name", "<script>alert(1)</script>"),
+    ("name", "&lt;img src=x onerror=alert(1)&gt;"),          # entidades: tras des-escapar es marcado
+    ("name", "x" * 201),
+    ("name", "a\x00b"),
+    ("symbol", "AB CD"),
+    ("symbol", "<b>"),
+    ("symbol", "A" * 16),
+])
+def test_BE07_strings_hostiles_en_una_fila_bloquean(campo, valor):
+    d, m = healthy()
+    d["indices"][0][campo] = valor
+    assert run(d, m, None)[0]
+
+
+def test_BE07_noticias_enlaces_y_titulos():
+    d, m = healthy()
+    d["news"]["general"][0]["title"] = "ok < 5000 y &amp; más"          # un «<» suelto no es marcado
+    assert run(d, m, None)[0] == []
+    d["news"]["general"][0]["title"] = "<img src=x onerror=alert(1)>"
+    assert run(d, m, None)[0]
+    d, m = healthy()
+    d["news"]["general"][0]["link"] = "javascript:alert(1)"
+    assert run(d, m, None)[0]
+    d, m = healthy()
+    d["news"]["general"][0]["extra"] = "x"
+    assert run(d, m, None)[0]
+
+
+def test_BE07_claves_extra_en_secciones_anidadas_bloquean():
+    for path, key in [("market_mood", "inyectado"), ("cpi_meta", "x"), ("news", "x")]:
+        d, m = healthy()
+        d[path][key] = {"a": 1} if path != "news" else []
+        assert run(d, m, None)[0], path
+    d, m = healthy()
+    d["your_funds"][0]["facts"] = {"ongoing_charges_pct": 0.2, "otra": "x"}
+    assert any("facts" in e for e in run(d, m, None)[0])
+    d, m = healthy()
+    d["stocks"][0]["history"][5]["extra"] = 1
+    assert any("history" in e for e in run(d, m, None)[0])
+
+
+def test_BE07_isin_mal_formado_bloquea():
+    d, m = healthy()
+    d["your_funds"][0]["isin"] = "IE0000000001<"
+    assert run(d, m, None)[0]
+
+
+def test_BE07_la_lista_blanca_cubre_lo_que_publica_el_backend():
+    """Si el backend añade un campo y nadie actualiza la lista blanca, el run dejaría de publicar: este test lo detecta antes."""
+    import fetch_market_data as fm
+    assert set(fm.PROFILE_FIELDS) <= sc._STOCK_EXTRA
+    assert {"market_cap_usd", "fcf_yield", "profile_as_of"} <= sc._STOCK_EXTRA
+    fixtures = json.load(open(os.path.join(os.path.dirname(__file__), "fixtures_fund_facts.json"), encoding="utf-8"))
+    assert fixtures
+    for plain in fixtures.values():
+        assert set(fm.scan_fund_facts(plain)) <= sc._FACTS_KEYS
+
+
+# ====================================================================== BE-12: health.budget_exhausted
+def test_BE12_presupuesto_agotado_avisa_con_alert_sin_bloquear():
+    d, m = healthy()
+    d["health"] = {"stale_symbols": [], "history_reused": [], "budget_exhausted": True}
+    errs, warns = run(d, m, None)
+    assert errs == [] and any(isinstance(w, sc.Alert) and "presupuesto de tiempo" in w for w in warns)
+    d["health"]["budget_exhausted"] = False
+    errs, warns = run(d, m, None)
+    assert errs == [] and not any("presupuesto de tiempo" in w for w in warns)
+    d["health"]["budget_exhausted"] = "si"
+    assert any("budget_exhausted" in e for e in run(d, m, None)[0])
+
+
+# ====================================================================== BE-15: market_mood / staking antiguos o arrastrados
+def test_BE15_mood_arrastrado_reciente_avisa_sin_alert_y_antiguo_con_alert():
+    d, m = healthy()
+    hace1 = (TODAY - dt.timedelta(days=1)).isoformat()
+    hace5 = (TODAY - dt.timedelta(days=5)).isoformat()
+    d["market_mood"]["vix"] = {"value": 15.0, "stale": True, "stale_since": hace1}
+    errs, warns = run(d, m, None)
+    assert errs == [] and any("antiguos o reutilizados" in w for w in warns) and not any(isinstance(w, sc.Alert) and "market_mood.vix" in w for w in warns)
+    d["market_mood"]["vix"]["stale_since"] = hace5
+    d["staking"] = {"eth_lido": {"apr": 2.5, "as_of": 1760000000, "source": "lido", "stale": True, "stale_since": hace5}}
+    errs, warns = run(d, m, None)
+    assert errs == [] and any(isinstance(w, sc.Alert) and "market_mood.vix" in w and "staking.eth_lido" in w for w in warns)
+
+
+def test_BE15_el_esquema_acepta_as_of_y_stale_en_mood_y_rechaza_fechas_raras():
+    d, m = healthy()
+    d["market_mood"]["stock_fear_greed"] = {"value": 55.0, "rating": "greed", "as_of": "2026-10-05"}
+    assert run(d, m, None)[0] == []
+    d["market_mood"]["stock_fear_greed"]["as_of"] = "ayer"
+    assert any("fecha" in e for e in run(d, m, None)[0])
+    d["market_mood"]["stock_fear_greed"]["as_of"] = "2026-10-05"
+    d["market_mood"]["stock_fear_greed"]["otro"] = 1
+    assert run(d, m, None)[0]
+
+
+# ====================================================================== BE-20: intraday_tz
+def test_BE20_intraday_tz_valida():
+    d, m = healthy()
+    d["indices"][0]["intraday_tz"] = "America/New_York"
+    assert run(d, m, None)[0] == []
+    for malo in ("Nueva York", "<b>", "UTC+09:00", "x" * 50):
+        d["indices"][0]["intraday_tz"] = malo
+        assert run(d, m, None)[0], malo

@@ -27,10 +27,13 @@ jobs:
       - name: Python syntax
         run: python -m py_compile scripts/*.py tests/*.py
 
-      # Dependencias reales del script (los tests importan fetch_market_data) + herramientas de CI con versión fija
-      # (PyYAML: lo usan los tests de los workflows).
+      # Dependencias reales del script (los tests importan fetch_market_data) + herramientas de CI (pytest, ruff, PyYAML: lo usan los
+      # tests de los workflows), todas con versión exacta y hashes. Las herramientas viven en requirements-dev.txt (y no inline aquí)
+      # para que Dependabot las vea y proponga las subidas (BE-16).
       - name: Install dependencies
-        run: pip install -r requirements.txt "pytest==9.1.1" "ruff==0.15.11" "PyYAML==6.0.3"
+        run: |
+          pip install --require-hashes --no-deps -r requirements.txt
+          pip install --require-hashes --no-deps -r requirements-dev.txt
 
       - name: Ruff (solo reglas F de pyflakes)
         run: ruff check --select F scripts tests

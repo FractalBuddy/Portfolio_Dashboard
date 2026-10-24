@@ -89,11 +89,17 @@ repo se queda en ~2 MB para siempre. `main` solo lleva código y, como mucho, un
 
 ## Dependencias
 
-`requirements.txt` fija una cota superior (`yfinance>=1.7.0,<2`...) para que un salto de versión mayor no entre solo en
-un run programado. **No hay lock con hashes**: las versiones menores y parches de `yfinance`, `requests`, `feedparser`
-y sus transitivas se instalan flotantes en cada run del job `fetch`, que corre con `FRED_API_KEY` en el entorno. Es un
-riesgo de cadena de suministro asumido; si se quiere cerrar, genera un `requirements.lock` con
-`pip-compile --generate-hashes` e instálalo con `pip install --require-hashes`.
+`requirements.in` lista las dependencias directas con rango (`yfinance>=1.7.0,<2`...: un salto de versión mayor no entra solo).
+`requirements.txt` se **genera** desde él con versiones exactas y hashes de todas las transitivas, y el job `fetch` (el único que
+ejecuta código de terceros, con `FRED_API_KEY` en el entorno) lo instala con `pip install --require-hashes --no-deps`: un archivo
+cuyo hash no coincida no se instala. Para regenerarlo tras cambiar `requirements.in`:
+
+```bash
+uv pip compile requirements.in --generate-hashes --universal --python-version 3.14 --no-header -o requirements.txt
+```
+
+Dependabot lee el par `.in`/`.txt`. Además, `sanity_check.py` valida la **forma** del feed (lista blanca de claves, strings sin
+marcado ni caracteres de control, tope de longitud): si añades un campo al backend, añádelo también ahí (hay un test que lo recuerda).
 
 ## Configuración inicial
 
@@ -118,7 +124,7 @@ export FRED_API_KEY=tu_clave   # opcional
 python scripts/fetch_market_data.py   # escribe data.json + meta.json
 python3 scripts/sanity_check.py --data data.json --meta meta.json   # añade --prev prev.json para las reglas de regresión
 
-pip install pytest ruff
+pip install -r requirements-dev.txt   # pytest, ruff y PyYAML con la versión exacta de la CI
 ruff check --select F scripts tests
 python -m pytest -q
 ```

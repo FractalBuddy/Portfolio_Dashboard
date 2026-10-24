@@ -91,6 +91,9 @@ def _patch_main(monkeypatch, tmp_path):
     monkeypatch.setattr(fm, "build_position_news", lambda: [])
     monkeypatch.setattr(fm, "build_benchmarks", lambda: {"sp500": [], "msci_world": []})
     monkeypatch.setattr(fm, "build_market_mood", lambda: {})
+    # Lido: STAKING_PROVIDERS guarda la referencia a la función al importar, así que parchear solo el atributo del módulo no basta.
+    monkeypatch.setattr(fm, "fetch_lido_apr", lambda: None)
+    monkeypatch.setitem(fm.STAKING_PROVIDERS, "eth_lido", fm.fetch_lido_apr)
 
 
 def test_main_con_fred_caido_publica_tipos_e_ipc_del_anterior(tmp_path, monkeypatch):
@@ -193,7 +196,7 @@ def test_fetch_ishares_nav_con_html_sintetico(monkeypatch):
     assert r["price"] == 12.3456 and r["nav_date"] == "03/Oct/2026"
     def boom(*a, **k): raise RuntimeError("red caída")  # noqa: E301,E704
     monkeypatch.setattr(fm.requests, "get", boom)
-    assert fm.fetch_ishares_nav("https://x.test", ISIN) is None
+    assert fm.fetch_ishares_nav("https://otra.test", ISIN) is None             # otra URL: la de arriba ya está en la caché del run (BE-17)
 
 
 def test_build_your_funds_propaga_nav_stale(monkeypatch):

@@ -1,0 +1,8 @@
+# Dependencias directas, con rango (cota superior = la siguiente versión mayor: Dependabot propone las subidas mayores en un PR aparte).
+# `requirements.txt` se GENERA desde este fichero con versiones exactas y hashes (BE-07); el job `fetch` (que ejecuta este código con
+# FRED_API_KEY en el entorno) lo instala con `pip install --require-hashes`. Para regenerarlo:
+#   uv pip compile requirements.in --generate-hashes --universal --python-version 3.14 --no-header -o requirements.txt
+# (o `pip-compile --generate-hashes requirements.in`). Dependabot lee el par .in/.txt y propone las subidas sobre ambos.
+yfinance>=1.7.0,<2
+requests>=2.34.2,<3
+feedparser>=6.0.14,<7
