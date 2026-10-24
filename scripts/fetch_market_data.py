@@ -230,6 +230,26 @@ def _drop_phantom_bars(hist, max_dev=0.15):
         return hist
 
 
+# Cotizaciones en la subunidad de la divisa (peniques, centavos...): el precio es 100 veces el de la divisa mayor.
+# Distingue mayúsculas a propósito: «GBp» (peniques) y «GBP» (libras) son cosas distintas.
+PRICE_UNIT_DIVISORS = {"GBp": 100, "GBX": 100, "ZAc": 100, "ILA": 100}
+
+
+def price_unit_divisor(currency):
+    return PRICE_UNIT_DIVISORS.get(currency, 1)
+
+
+def _tag_currency(hist, ticker):
+    """Guarda en `hist.attrs["currency"]` la divisa de cotización TAL CUAL la da Yahoo (p. ej. «GBp»). Sale de
+    `history_metadata`, que `history()` ya ha cargado: no cuesta una petición extra. Nunca lanza."""
+    try:
+        cur = ticker.history_metadata.get("currency")
+        if isinstance(cur, str) and re.fullmatch(r"[A-Za-z]{3,4}", cur):
+            hist.attrs["currency"] = cur
+    except Exception:
+        pass
+
+
 def yf_history(symbol, tries=3, **kw):
     """yf.Ticker(symbol).history(**kw) with retries on exceptions AND on empty results.
     Returns a DataFrame (possibly empty); raises only if every attempt raised."""
@@ -240,10 +260,12 @@ def yf_history(symbol, tries=3, **kw):
     attempts = 1 if _YF_FAIL_STREAK >= 15 else tries
     for i in range(attempts):
         try:
-            hist = yf.Ticker(symbol).history(**kw)
+            tk = yf.Ticker(symbol)
+            hist = tk.history(**kw)
             hist = _drop_phantom_bars(hist.dropna(subset=["Close"]))
             if not hist.empty:
                 _YF_FAIL_STREAK = 0
+                _tag_currency(hist, tk)
                 return hist
         except Exception as e:  # network, rate limit, parsing...
             last_exc = e
@@ -259,6 +281,7 @@ def fetch_symbol(symbol):
     """Returns price / 1-day change / 7-day change / volume ratio for a yfinance symbol."""
     try:
         hist = yf_history(symbol, period="8d", interval="1d")
+        currency = hist.attrs.get("currency")  # antes del dropna: así no depende de que pandas propague attrs
         hist = hist.dropna(subset=["Close"])  # a NaN last close would become null in the feed and break the charts
         if hist.empty or len(hist) < 2:
             print(f"  ! no data for {symbol}", file=sys.stderr)
@@ -281,6 +304,9 @@ def fetch_symbol(symbol):
             "volume_ratio": round(vol_ratio, 2) if vol_ratio else None,
             "sparkline": [round(float(c), 4) for c in hist["Close"].tolist()],
         }
+        if isinstance(currency, str) and re.fullmatch(r"[A-Za-z]{3,4}", currency):
+            out["currency"] = currency                            # tal cual («GBp» ≠ «GBP»); el .upper() solo para consultar tipos de cambio
+            out["price_unit_divisor"] = price_unit_divisor(currency)
         try:  # fecha de la última barra: permite detectar precios congelados / símbolos deslistados
             as_of = hist.index[-1].strftime("%Y-%m-%d")
             out["as_of"] = as_of
