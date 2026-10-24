@@ -91,6 +91,9 @@ def _patch_main(monkeypatch, tmp_path):
     monkeypatch.setattr(fm, "build_position_news", lambda: [])
     monkeypatch.setattr(fm, "build_benchmarks", lambda: {"sp500": [], "msci_world": []})
     monkeypatch.setattr(fm, "build_market_mood", lambda: {})
+    # Lido: STAKING_PROVIDERS guarda la referencia a la función al importar, así que parchear solo el atributo del módulo no basta.
+    monkeypatch.setattr(fm, "fetch_lido_apr", lambda: None)
+    monkeypatch.setitem(fm.STAKING_PROVIDERS, "eth_lido", fm.fetch_lido_apr)
 
 
 def test_main_con_fred_caido_publica_tipos_e_ipc_del_anterior(tmp_path, monkeypatch):
