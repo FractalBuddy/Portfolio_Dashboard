@@ -83,6 +83,14 @@ def test_ci_ejecuta_ruff_pytest_y_actionlint():
     assert "ruff check --select F" in text and "pytest" in text and "actionlint" in text
 
 
+def test_ci_tambien_corre_en_push_a_main():
+    # BE-02: la mayoría de commits entran directos a main por la web; sin `push` la CI no los vigilaba.
+    wf = load("ci.yml")
+    triggers = wf.get("on", wf.get(True))            # PyYAML (YAML 1.1) interpreta `on` como True
+    assert "pull_request" in triggers and "workflow_dispatch" in triggers
+    assert triggers["push"]["branches"] == ["main"]
+
+
 # ------------------------------------------------------------------ ejecución en bash con comandos falsos
 def _exe(path, body):
     path.write_text("#!/bin/bash\n" + body)

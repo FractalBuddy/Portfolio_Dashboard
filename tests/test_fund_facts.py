@@ -1,9 +1,7 @@
 """Fichas de fondos: scraper de «Key Facts» contra extractos REALES de iShares (22-10-2026), proxies EUR y extras de Explorar."""
 import json
 import os
-import re
 import sys
-import types
 
 import pytest
 
@@ -64,7 +62,6 @@ def test_proxies_de_tus_fondos_son_lineas_en_eur():
 def test_extras_de_explorar_con_fallback_al_feed_anterior():
     funds = [{"symbol": "SWDA.L"}, {"symbol": "EIMI.L"}, {"symbol": "ZZZ"}]
     prev = [{"symbol": "EIMI.L", "facts": {"a": 1, "b": 2, "c": 3}, "analytics": {"period_returns": {"ytd": 1.0}}}]
-    facts = {"SWDA.L": {"ongoing_charges_pct": 0.2, "x": 1, "y": 2}, "https://eimi": {}}
     out = fm.attach_fund_extras(
         funds, prev,
         fetch_facts=lambda url: {"ongoing_charges_pct": 0.2, "x": 1, "y": 2} if "251882" in url else {},
