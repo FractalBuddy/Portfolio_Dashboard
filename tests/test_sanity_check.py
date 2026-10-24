@@ -735,3 +735,16 @@ def test_BE07_la_lista_blanca_cubre_lo_que_publica_el_backend():
     assert fixtures
     for plain in fixtures.values():
         assert set(fm.scan_fund_facts(plain)) <= sc._FACTS_KEYS
+
+
+# ====================================================================== BE-12: health.budget_exhausted
+def test_BE12_presupuesto_agotado_avisa_con_alert_sin_bloquear():
+    d, m = healthy()
+    d["health"] = {"stale_symbols": [], "history_reused": [], "budget_exhausted": True}
+    errs, warns = run(d, m, None)
+    assert errs == [] and any(isinstance(w, sc.Alert) and "presupuesto de tiempo" in w for w in warns)
+    d["health"]["budget_exhausted"] = False
+    errs, warns = run(d, m, None)
+    assert errs == [] and not any("presupuesto de tiempo" in w for w in warns)
+    d["health"]["budget_exhausted"] = "si"
+    assert any("budget_exhausted" in e for e in run(d, m, None)[0])

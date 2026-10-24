@@ -116,3 +116,103 @@ def test_BE08_el_perfil_de_acciones_tambien_respeta_el_429(monkeypatch, sleeps):
     assert fm._YF_ABANDONED and any(s >= fm.YF_RATE_LIMIT_PAUSE[0] for s in sleeps)
     antes = n["t"]
     assert fm.fetch_stock_profile("MSFT") == {} and n["t"] == antes     # abandonado: no se construye ni un Ticker más
+
+
+# ------------------------------------------------------------------ BE-12: presupuesto global de tiempo
+class _Reloj:
+    """Reloj falso: sleep() lo adelanta y las peticiones colgadas consumen su timeout entero (el peor caso de la auditoría)."""
+    def __init__(self, t0=1000.0):
+        self.t = t0
+
+    def monotonic(self):
+        return self.t
+
+    def sleep(self, s):
+        self.t += max(0.0, s)
+
+
+@pytest.fixture
+def reloj(monkeypatch):
+    import types
+    r = _Reloj()
+    monkeypatch.setattr(fm, "time", types.SimpleNamespace(monotonic=r.monotonic, sleep=r.sleep))
+    monkeypatch.setattr(fm, "_HARD_DEADLINE", r.t + fm.HARD_BUDGET_SECONDS, raising=False)
+    monkeypatch.setattr(fm, "_DEADLINE", r.t + 14 * 60)
+    monkeypatch.setattr(fm, "_BUDGET_HIT", False, raising=False)
+    return r
+
+
+@pytest.fixture
+def red_colgada(monkeypatch, reloj):
+    """requests.get que siempre se cuelga hasta su timeout y falla: registra (url, timeout)."""
+    import requests
+    llamadas = []
+
+    def get(url, *a, **k):
+        t = k.get("timeout", 15)
+        t = max(t) if isinstance(t, tuple) else t
+        llamadas.append((url, t))
+        reloj.t += t
+        raise requests.Timeout("colgado")
+    monkeypatch.setattr(fm.requests, "get", get)
+    return llamadas
+
+
+def test_BE12_con_el_presupuesto_agotado_ninguna_fase_toca_la_red(monkeypatch, reloj, red_colgada):
+    reloj.t = fm._HARD_DEADLINE + 1
+    monkeypatch.setattr(fm, "FRED_API_KEY", "clave")
+    assert fm.fetch_ishares_nav("https://x.test/p", "IE0000000001") is None
+    assert fm.fetch_ishares_fund_facts("https://x.test/p") == {}
+    assert fm.fetch_fred_series("DGS10") is None
+    assert fm.fetch_cpi_history()[0] == []
+    with pytest.raises(TimeoutError):
+        fm._cg_markets({"vs_currency": "usd"})
+    with pytest.raises(TimeoutError):
+        fm.fetch_lido_apr()
+    monkeypatch.setattr(fm, "yf_history", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("sin yahoo")))
+    monkeypatch.setattr(fm, "build_altcoin_season", lambda prev=None: None)
+    fm.build_market_mood()
+    assert red_colgada == []
+    assert fm._BUDGET_HIT is True
+
+
+def test_BE12_peor_caso_con_todo_colgado_cabe_en_el_timeout_del_job(monkeypatch, reloj, red_colgada):
+    """Yahoo gasta sus 14 min enteros y TODAS las demás fuentes se cuelgan hasta su timeout: antes el job pasaba de 31 min."""
+    inicio = reloj.t
+    reloj.t = fm._DEADLINE                                          # Yahoo ya ha consumido su presupuesto
+    monkeypatch.setattr(fm, "FRED_API_KEY", "clave")
+    monkeypatch.setattr(fm, "YOUR_FUNDS", [{"isin": "IE0000000001", "name": "n", "product_url": "https://x.test/a", "proxy_symbol": "P"},
+                                           {"isin": "IE0000000002", "name": "m", "product_url": "https://x.test/b", "proxy_symbol": "Q"}])
+    monkeypatch.setattr(fm, "yf_history", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("sin yahoo")))
+    fm.build_your_funds(None)
+    fm.attach_fund_extras([{"symbol": s} for s in fm.FUND_FACT_URLS], None)
+    fm.build_rates()
+    fm.fetch_cpi_history()
+    fm.build_altcoin_season(None)
+    fm.build_staking(None)
+    fm.build_market_mood()
+    assert reloj.t - inicio <= fm.HARD_BUDGET_SECONDS + 5            # la última petición recortada a ≥ 1 s es todo lo que puede pasarse
+    assert reloj.t - inicio < 20 * 60 - 60                           # y queda margen dentro del timeout-minutes: 20 del job
+
+
+def test_BE12_timeout_de_peticion_y_esperas_se_recortan_al_presupuesto(monkeypatch, reloj, red_colgada):
+    reloj.t = fm._HARD_DEADLINE - 3                                  # quedan 3 s
+    monkeypatch.setattr(fm, "FRED_API_KEY", "clave")
+    with pytest.raises(Exception):
+        fm._fred_get({"series_id": "X"})
+    assert red_colgada and all(t <= 3.01 for _, t in red_colgada)
+    assert reloj.t <= fm._HARD_DEADLINE + 1.5
+
+
+def test_BE12_main_publica_health_budget_exhausted(tmp_path, monkeypatch, reloj):
+    import json
+    from test_fetch_market_data import _patch_main
+    _patch_main(monkeypatch, tmp_path)
+    monkeypatch.setenv("PREV_FEED_PATH", str(tmp_path / "nada.json"))
+    monkeypatch.setattr(fm, "FRED_API_KEY", "")
+    fm.main()
+    assert json.loads((tmp_path / "data.json").read_text())["health"]["budget_exhausted"] is False
+    reloj.t = fm._HARD_DEADLINE + 1
+    monkeypatch.setattr(fm, "build_market_mood", lambda: (fm._budget_exhausted(), {})[1])    # una fase choca con el tope
+    fm.main()
+    assert json.loads((tmp_path / "data.json").read_text())["health"]["budget_exhausted"] is True

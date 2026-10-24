@@ -203,6 +203,32 @@ _YF_ABANDONED = False
 # Presupuesto de tiempo global (el job tiene timeout de 20 min): pasado este límite se deja de llamar a Yahoo y
 # se falla limpio (sanity-check) en vez de morir por timeout a mitad de publicación.
 _DEADLINE = time.monotonic() + 14 * 60
+# Presupuesto GLOBAL del job (BE-12). `_DEADLINE` (14 min) solo manda sobre Yahoo; el resto de fases (iShares, FRED, CoinGecko, Lido, CNN)
+# no tenían tope y, en el peor caso con todo fallando, sumaban ~17,8 min más: el job moría por timeout (20 min) sin publicar nada.
+# Pasado `_HARD_DEADLINE` ninguna fase hace ya peticiones ni esperas: se devuelve lo que haya (o «sin dato») y el sanity-check decide.
+# Quedan ~2 min de margen para escribir los ficheros y subir el artefacto.
+HARD_BUDGET_SECONDS = 18 * 60
+_HARD_DEADLINE = time.monotonic() + HARD_BUDGET_SECONDS
+_BUDGET_HIT = False                  # alguna fase se saltó trabajo por falta de tiempo (se publica en health.budget_exhausted)
+
+
+def _budget_exhausted(deadline=None):
+    """True (y queda anotado) si ya pasó `deadline` (por defecto, el tope duro del job)."""
+    global _BUDGET_HIT
+    if time.monotonic() > (_HARD_DEADLINE if deadline is None else deadline):
+        _BUDGET_HIT = True
+        return True
+    return False
+
+
+def _net_timeout(default):
+    """Timeout de una petición: el habitual, recortado a lo que queda de presupuesto (mínimo 1 s)."""
+    return max(1.0, min(float(default), _HARD_DEADLINE - time.monotonic()))
+
+
+def _nap(seconds):
+    """Espera entre reintentos que nunca sobrepasa el presupuesto global."""
+    time.sleep(max(0.0, min(seconds, _HARD_DEADLINE - time.monotonic())))
 # Presupuesto propio de las noticias (secundarias): main() lo fija al empezarlas como min(_DEADLINE, ahora + 5 min).
 # Pasado ese límite parse_feed() devuelve [] sin tocar la red.
 NEWS_BUDGET_SECONDS = 5 * 60
@@ -283,7 +309,7 @@ def _yf_pace():
     global _YF_LAST_REQ, _YF_REQS
     if _YF_ABANDONED:
         raise YahooStop("Yahoo limita (429): se abandona para el resto del run")
-    if time.monotonic() > _DEADLINE:
+    if _budget_exhausted(_DEADLINE):
         raise YahooStop('presupuesto de tiempo de fetch agotado')
     wait = YF_REQ_GAP[0] + random.random() * (YF_REQ_GAP[1] - YF_REQ_GAP[0]) - (time.monotonic() - _YF_LAST_REQ)
     if wait > 0:
@@ -323,7 +349,7 @@ def yf_history(symbol, tries=3, **kw):
     Returns a DataFrame (possibly empty); raises only if every attempt raised.
     Un 429 se trata aparte (pausa larga y, si persiste, abandono de Yahoo): ver _yf_rate_limited."""
     global _YF_FAIL_STREAK
-    if time.monotonic() > _DEADLINE:
+    if _budget_exhausted(_DEADLINE):
         raise TimeoutError('presupuesto de tiempo de fetch agotado')
     last_exc, hist = None, None
     attempts = 1 if _YF_FAIL_STREAK >= 15 else tries
@@ -747,7 +773,7 @@ def fetch_stock_profile(symbol):
     """Yahoo: Ticker.info (profile, margins, balance sheet...) + the Valuation Measures table (market cap, EV, P/Es, EV/EBITDA)
     -> parse + merge. {} on total failure (caller falls back to the previous feed). The valuation table failing alone is not
     fatal: `info` figures are used and the `_valuation` marker says so (popped by attach_profiles, logged, never published)."""
-    if time.monotonic() > _DEADLINE or _YF_ABANDONED:
+    if _budget_exhausted(_DEADLINE) or _YF_ABANDONED:
         return {}
     for i in range(2):
         try:
@@ -956,16 +982,18 @@ def _fred_get(params, tries=3):
     """GET a FRED observations con reintentos (5xx/429/timeout transitorios). Lanza la última excepción si todos fallan."""
     last = None
     for i in range(tries):
+        if _budget_exhausted():
+            raise TimeoutError("presupuesto de tiempo del job agotado")
         try:
-            res = requests.get("https://api.stlouisfed.org/fred/series/observations", params=params, timeout=15)
+            res = requests.get("https://api.stlouisfed.org/fred/series/observations", params=params, timeout=_net_timeout(15))
             if res.status_code in (429, 500, 502, 503, 504) and i < tries - 1:
-                time.sleep(2 * (i + 1)); continue
+                _nap(2 * (i + 1)); continue
             res.raise_for_status()
             return res
         except requests.RequestException as e:
             last = e
             if i < tries - 1:
-                time.sleep(2 * (i + 1))
+                _nap(2 * (i + 1))
     raise last
 
 
@@ -1139,7 +1167,7 @@ def reuse_previous_fred(rates, cpi, cpi_meta, prev):
 
 def parse_feed(url, limit=8):
     # Presupuesto global: pasado _NEWS_DEADLINE (o _DEADLINE) no se hace ninguna petición más.
-    if time.monotonic() > (_NEWS_DEADLINE or _DEADLINE):
+    if _budget_exhausted(_NEWS_DEADLINE or _DEADLINE):
         print(f"  ! presupuesto de tiempo agotado, se omite el feed {url}", file=sys.stderr)
         return []
     try:
@@ -1361,8 +1389,11 @@ def fetch_ishares_nav(product_url, isin):
     """
     headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
     for attempt in range(ISHARES_TRIES):
+        if _budget_exhausted():
+            print(f"  ! ishares scrape {isin}: presupuesto de tiempo del job agotado -- falling back to proxy", file=sys.stderr)
+            return None
         try:
-            res = requests.get(product_url, headers=headers, timeout=20)
+            res = requests.get(product_url, headers=headers, timeout=_net_timeout(20))
             res.raise_for_status()
             # Strip tags to plain text so we don't depend on exact HTML structure/classes.
             plain = re.sub(r'<[^>]+>', ' ', res.text)
@@ -1373,7 +1404,7 @@ def fetch_ishares_nav(product_url, isin):
             transient = isinstance(e, (requests.Timeout, requests.ConnectionError)) or (code is not None and (code >= 500 or code == 429))
             if transient and attempt < ISHARES_TRIES - 1:
                 print(f"  ! ishares scrape {isin}: {type(e).__name__} transitorio, reintento", file=sys.stderr)
-                time.sleep(ISHARES_RETRY_WAIT)
+                _nap(ISHARES_RETRY_WAIT)
                 continue
             print(f"  ! ishares scrape failed for {isin}: {e} -- falling back to proxy", file=sys.stderr)
             return None
@@ -1468,9 +1499,11 @@ def fetch_ishares_fund_facts(product_url):
     Scrapes the 'Key Facts' block of the fund's ishares.com product page (scan_fund_facts). Best-effort and resilient --
     any field that isn't found (or if the page structure changes) is simply left out, never raises.
     """
+    if _budget_exhausted():
+        return {}
     try:
         headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
-        res = requests.get(product_url, headers=headers, timeout=20)
+        res = requests.get(product_url, headers=headers, timeout=_net_timeout(20))
         res.raise_for_status()
         plain = re.sub(r'<[^>]+>', ' ', res.text)
         plain = re.sub(r'\s+', ' ', plain)
@@ -1681,11 +1714,13 @@ def _cg_markets(params, tries=3):
     """GET CoinGecko /coins/markets (public, no key) with retries on 429/5xx. Returns the JSON list or raises."""
     last = None
     for i in range(tries):
+        if _budget_exhausted():
+            raise TimeoutError("presupuesto de tiempo del job agotado")
         try:
             res = requests.get("https://api.coingecko.com/api/v3/coins/markets", params=params,
-                               headers=_CG_HEADERS, timeout=20)
+                               headers=_CG_HEADERS, timeout=_net_timeout(20))
             if res.status_code in (429, 500, 502, 503, 504) and i < tries - 1:
-                time.sleep(8 * (i + 1)); continue
+                _nap(8 * (i + 1)); continue
             res.raise_for_status()
             data = res.json()
             if not isinstance(data, list):
@@ -1694,7 +1729,7 @@ def _cg_markets(params, tries=3):
         except (requests.RequestException, ValueError) as e:
             last = e
             if i < tries - 1:
-                time.sleep(4 * (i + 1))
+                _nap(4 * (i + 1))
     raise last
 
 
@@ -1703,12 +1738,14 @@ def _alt_excluded_ids():
     a category call that fails just contributes nothing (the static symbol list still covers the big ones)."""
     ids = set()
     for cat in ALT_EXCLUDE_CATEGORIES:
+        if _budget_exhausted():
+            break
         try:
             rows = _cg_markets({"vs_currency": "usd", "category": cat, "order": "market_cap_desc", "per_page": 250, "page": 1})
             ids.update(str(r.get("id")) for r in rows if isinstance(r, dict) and r.get("id"))
         except Exception as e:
             print(f"  ! altcoin season: categoría {cat} no disponible ({type(e).__name__})", file=sys.stderr)
-        time.sleep(2.5)  # sin clave el límite de CoinGecko es bajo: no se le martillea
+        _nap(2.5)  # sin clave el límite de CoinGecko es bajo: no se le martillea
     return ids
 
 
@@ -1792,7 +1829,7 @@ def build_altcoin_season(prev=None):
     streak = _YF_FAIL_STREAK  # many unmapped tickers would trip the Yahoo circuit breaker for the rest of the run
     try:
         coins = _cg_markets({"vs_currency": "usd", "order": "market_cap_desc", "per_page": 100, "page": 1})
-        time.sleep(2.5)
+        _nap(2.5)
         result = compute_altcoin_season(coins, _alt_excluded_ids())
         if result:
             return result
@@ -1851,11 +1888,13 @@ def parse_lido_apr(last_json, sma_json):
 
 def fetch_lido_apr():
     """Keyless public API. Returns the parsed dict or None (the caller handles the stale fallback)."""
-    last = requests.get(f"{LIDO_API}/last", headers=_STAKING_HEADERS, timeout=15)
+    if _budget_exhausted():
+        raise TimeoutError("presupuesto de tiempo del job agotado")
+    last = requests.get(f"{LIDO_API}/last", headers=_STAKING_HEADERS, timeout=_net_timeout(15))
     last.raise_for_status()
     sma_json = None
     try:
-        sma = requests.get(f"{LIDO_API}/sma", headers=_STAKING_HEADERS, timeout=15)
+        sma = requests.get(f"{LIDO_API}/sma", headers=_STAKING_HEADERS, timeout=_net_timeout(15))
         sma.raise_for_status()
         sma_json = sma.json()
     except Exception as e:
@@ -1925,7 +1964,9 @@ def build_market_mood():
         print(f"  ! VIX fetch failed: {e}", file=sys.stderr)
 
     try:
-        res = requests.get("https://api.alternative.me/fng/?limit=1", timeout=15)
+        if _budget_exhausted():
+            raise TimeoutError("presupuesto de tiempo del job agotado")
+        res = requests.get("https://api.alternative.me/fng/?limit=1", timeout=_net_timeout(15))
         res.raise_for_status()
         d = res.json()["data"][0]
         mood["crypto_fear_greed"] = {"value": int(d["value"]), "classification": d["value_classification"]}
@@ -1937,8 +1978,10 @@ def build_market_mood():
         print(f"  ! fear & greed fetch failed: {e}", file=sys.stderr)
 
     try:
+        if _budget_exhausted():
+            raise TimeoutError("presupuesto de tiempo del job agotado")
         headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
-        res = requests.get("https://production.dataviz.cnn.io/index/fearandgreed/graphdata", headers=headers, timeout=15)
+        res = requests.get("https://production.dataviz.cnn.io/index/fearandgreed/graphdata", headers=headers, timeout=_net_timeout(15))
         res.raise_for_status()
         d = res.json()
         def sub(key):
@@ -2120,6 +2163,7 @@ def main():
     }
     data["health"] = compute_health(data)
     data["health"]["fx_stale"] = fx_stale
+    data["health"]["budget_exhausted"] = bool(_BUDGET_HIT)     # alguna fase se saltó trabajo por falta de tiempo (BE-12)
     h = data["health"]
     print(f"HEALTH: {len(h['stale_symbols'])} símbolos con precio antiguo {h['stale_symbols'] or ''}; "
           f"{len(h['history_reused'])} con histórico reutilizado {h['history_reused'] or ''}; "

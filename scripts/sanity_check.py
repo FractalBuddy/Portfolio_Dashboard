@@ -286,7 +286,7 @@ _DICT_SCHEMA = {   # secciones de un solo objeto: ruta -> claves permitidas
     "market_mood.altcoin_season": frozenset({"value", "outperforming", "total", "window_days", "btc_change_pct", "source"}) | _STALE,
     "staking": frozenset({"eth_lido"}),
     "staking.eth_lido": frozenset({"apr", "apr_sma7", "as_of", "source"}) | _STALE,
-    "health": frozenset({"stale_symbols", "history_reused", "profiles", "fx_stale"}),
+    "health": frozenset({"stale_symbols", "history_reused", "profiles", "fx_stale", "budget_exhausted"}),
     "health.profiles": frozenset({"stocks", "with_data", "valuation_table", "oldest_days", "older_than_7d"}),
 }
 _SYMBOL_RE = re.compile(r"^[A-Za-z0-9.^=\-]{1,15}$")
@@ -575,6 +575,11 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
         if fresh_with >= 5 and h_prof["valuation_table"] < 0.6 * fresh_with:
             warnings.append(Alert("tabla de valoración de Yahoo (Ticker.valuation) en solo %d de %d perfiles: capitalización/EV/P/E vienen de `info`, menos fiable (¿cambió yfinance o Yahoo?)"
                             % (h_prof["valuation_table"], fresh_with)))
+    # BE-12: el backend anota si alguna fase se saltó trabajo porque se acabó el presupuesto de tiempo del job.
+    hl = d.get("health") if isinstance(d.get("health"), dict) else {}
+    need(not ("budget_exhausted" in hl and not isinstance(hl["budget_exhausted"], bool)), "health.budget_exhausted debe ser booleano")
+    if hl.get("budget_exhausted") is True:
+        warnings.append(Alert("se agotó el presupuesto de tiempo del job: alguna fase (Yahoo, iShares, FRED, CoinGecko...) se saltó peticiones; el feed está incompleto o con datos arrastrados"))
     odd_ev = []
     for x in stocks:
         mc, ev = x.get("market_cap"), x.get("enterprise_value")
