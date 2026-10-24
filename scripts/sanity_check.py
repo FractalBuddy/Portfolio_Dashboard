@@ -27,6 +27,7 @@ Código de salida: 0 = publicable, 1 = no publicar.
 import argparse
 import datetime as dt
 import json
+import math
 import os
 import re
 import statistics
@@ -61,6 +62,15 @@ PROFILE_COVERAGE_DROP = 0.6      # aviso si el nº de acciones con perfil cae po
 NAV_STALE_DAYS = 6               # edad > 6 días naturales (>= 7): NAV «antiguo» -> aviso en el log (igual que el nav_stale del backend)
 NAV_ALERT_DAYS = 8               # >= 8 días en CUALQUIER fondo (o todos «antiguos»): ya no es un festivo, es una página congelada -> Alert (/fail)
 NAV_FUTURE_DAYS = 1              # fecha del NAV más allá de «mañana»: no es creíble
+
+# Series (BE-05). Una barra con fecha a más de «mañana» (huso horario) es imposible; antes de 1900 no hay datos de Yahoo.
+MAX_FUTURE_DAYS = 1
+MIN_BAR_DATE = dt.date(1900, 1, 1)
+MAX_UNORDERED_SYMBOLS = 2        # fechas repetidas/desordenadas: hasta 2 símbolos solo avisan (un tropiezo de Yahoo); más, bloquea
+# Salto de nivel respecto al feed anterior: un cambio de unidad (GBp<->GBP, x100) o un reescalado cae muy fuera de cualquier
+# movimiento real entre dos runs. Un split legítimo (10:1) también lo dispara: es una regla de REGRESIÓN, se desbloquea a mano
+# con allow_regression.
+MAX_PRICE_JUMP = 5.0
 
 # Límites de plausibilidad de los campos de perfil de las acciones (más holgados que los del parser: aquí solo se
 # atrapa un fetch roto o manipulado, no un dato raro de Yahoo). El job `publish` no se fía de la salida de `fetch`.
@@ -107,6 +117,58 @@ def _last_date(x):
 
 def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _bar_date(b):
+    """Fecha (date) de una barra: solo 'YYYY-MM-DD' en texto. None si falta, no es texto o no es una fecha real."""
+    raw = b.get("date")
+    if not (isinstance(raw, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw)):
+        return None
+    try:
+        return dt.date.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def _series_problems(x, today, allow_non_positive=False):
+    """Revisa el histórico de un símbolo barra a barra. Devuelve (close_malo, fecha_mala, fecha_futura, desordenado).
+    `close` debe ser un número finito y > 0 (en materias primas basta con finito: los futuros pueden cotizar negativo,
+    el WTI cerró en -37,63 el 2020-04-20). Las fechas deben ser ISO, razonables y estrictamente crecientes."""
+    bad_close = bad_date = future = unordered = False
+    limit = today + dt.timedelta(days=MAX_FUTURE_DAYS)
+    last = None
+    for b in _hist(x):
+        c = b.get("close")
+        if not _num(c) or not math.isfinite(c) or (c <= 0 and not allow_non_positive):
+            bad_close = True
+        v = _bar_date(b)
+        if v is None or v < MIN_BAR_DATE:
+            bad_date = True
+            continue
+        if v > limit:
+            future = True
+        if last is not None and v <= last:
+            unordered = True
+        last = v
+    return bad_close, bad_date, future, unordered
+
+
+def _last_close(x):
+    """Cierre de la barra más reciente (por fecha) con fecha legible y close finito > 0, o None."""
+    best = None
+    for b in _hist(x):
+        v, c = _bar_date(b), b.get("close")
+        if v is not None and _num(c) and math.isfinite(c) and c > 0 and (best is None or v > best[0]):
+            best = (v, c)
+    return best[1] if best else None
+
+
+def _jumped(new, old):
+    """True si el nivel cambió más de MAX_PRICE_JUMP veces (arriba o abajo). Con algún valor no utilizable no opina."""
+    if not (_num(new) and _num(old) and math.isfinite(new) and math.isfinite(old) and new > 0 and old > 0):
+        return False
+    r = new / old
+    return r > MAX_PRICE_JUMP or r < 1.0 / MAX_PRICE_JUMP
 
 
 # Mismos meses y mismas reglas que fetch_market_data._parse_nav_date (copia a propósito: este script es solo-stdlib y no importa el otro;
@@ -360,6 +422,26 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
     need(data_bytes < MAX_DATA_BYTES, "data.json demasiado grande para jsDelivr (%s bytes)" % data_bytes)
     need(data_bytes >= MIN_DATA_BYTES, "data.json sospechosamente pequeño (%s bytes < %s)" % (data_bytes, MIN_DATA_BYTES))
 
+    # Series barra a barra (BE-05): close finito > 0, fechas ISO razonables y crecientes. Sin esto un 0/None/-5 o una barra a +400 días
+    # llegaban al dashboard con luz verde (y la barra futura además enmascaraba un histórico congelado).
+    bad_close, bad_date, future_bar, unordered = [], [], [], []
+    for k in HISTORY_LISTS:
+        for x in _rows(d, k):
+            c_, d_, f_, o_ = _series_problems(x, today, allow_non_positive=(k == "commodities"))
+            sym = x.get("symbol")
+            for flag, lst in ((c_, bad_close), (d_, bad_date), (f_, future_bar), (o_, unordered)):
+                if flag:
+                    lst.append(sym)
+    need(not bad_close, "histórico con close nulo, no numérico o no positivo: %s" % bad_close[:6])
+    need(not bad_date, "histórico con fecha de barra ilegible o anterior a %d: %s" % (MIN_BAR_DATE.year, bad_date[:6]))
+    need(not future_bar, "histórico con barra de fecha futura (> hoy+%d): %s" % (MAX_FUTURE_DAYS, future_bar[:6]))
+    if unordered:
+        msg = "histórico con fechas repetidas o fuera de orden en %d símbolos: %s" % (len(unordered), unordered[:6])
+        if len(unordered) > MAX_UNORDERED_SYMBOLS:
+            errors.append(msg)
+        else:
+            warnings.append(msg)
+
     # Histórico congelado: la última barra de la MAYORÍA de símbolos no puede tener > 6 días.
     # Tolerante con fines de semana y festivos (por eso 6 días y "mayoría", no todos).
     ages = []
@@ -400,6 +482,20 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
                                and len(_hist(ns[s])) < (1 - MAX_HISTORY_LOSS) * len(_hist(x)))
                 if len(short) > tol:
                     reg.append("%s: histórico acortado >%d %% en %d símbolos (tolerancia %d): %s" % (k, int(MAX_HISTORY_LOSS * 100), len(short), tol, short[:6]))
+        # Salto de nivel (BE-05): ×10/×100 respecto al feed anterior = cambio de unidad o reescalado, no un movimiento de mercado.
+        # Se mira el precio de la fila y el último cierre del histórico (este último, por si solo se reescala la serie).
+        for k in HISTORY_LISTS:
+            ps = {x.get("symbol"): x for x in _rows(prev, k) if x.get("symbol")}
+            jumps = sorted(str(x.get("symbol")) for x in _rows(d, k)
+                           if x.get("symbol") in ps
+                           and (_jumped(x.get("price"), ps[x.get("symbol")].get("price"))
+                                or _jumped(_last_close(x), _last_close(ps[x.get("symbol")]))))
+            if jumps:
+                reg.append("%s: salto de nivel (>×%g) respecto al feed anterior, ¿cambio de unidad, reescalado o split?: %s" % (k, MAX_PRICE_JUMP, jumps[:6]))
+        prev_nav = {f.get("isin"): f.get("price") for f in _rows(prev, "your_funds")}
+        nav_jumps = [str(f.get("isin")) for f in yf_rows if _jumped(f.get("price"), prev_nav.get(f.get("isin")))]
+        if nav_jumps:
+            reg.append("your_funds: salto de NAV (>×%g) respecto al feed anterior: %s" % (MAX_PRICE_JUMP, nav_jumps[:6]))
         # Perfiles: si de golpe muchas menos acciones traen fundamentales, Yahoo .info está fallando (solo aviso: los
         # precios y gráficos no dependen de ello y el dashboard conserva el último perfil bueno).
         n_prev = sum(1 for x in _rows(prev, "stocks") if "market_cap" in x)

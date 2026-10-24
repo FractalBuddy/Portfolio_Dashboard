@@ -495,3 +495,115 @@ def test_fx_usd_forma_capitalizacion_sin_usd_y_tipos_reutilizados():
     d["fx_usd"] = {"DKK": 0.15}
     d["stocks"][0]["market_cap_usd"] = -3
     assert any("perfil de acción" in e for e in run(d, m, None)[0])
+
+
+# =============================================================== BE-05: series y continuidad (auditoría 08)
+def _scale(x, k):
+    x["price"] *= k
+    for b in x["history"]:
+        b["close"] *= k
+
+
+def test_BE05_salto_de_unidad_x100_con_anterior_debe_bloquear():          # R2 del apéndice A
+    d, m = healthy(); prev, _ = healthy()
+    _scale(d["funds"][0], 100)
+    errs, _ = run(d, m, prev)
+    assert any("salto" in e and d["funds"][0]["symbol"] in e for e in errs)
+
+
+@pytest.mark.parametrize("k", [10, 100, 0.1, 0.01])
+def test_BE05_salto_x10_x100_en_cualquier_direccion(k):
+    d, m = healthy(); prev, _ = healthy()
+    _scale(d["stocks"][3], k)
+    assert any("salto" in e for e in run(d, m, prev)[0])
+
+
+def test_BE05_salto_solo_en_el_historico_tambien_se_detecta():
+    d, m = healthy(); prev, _ = healthy()
+    for b in d["indices"][0]["history"]:
+        b["close"] *= 100                                      # el precio de la fila no cambia
+    assert any("salto" in e for e in run(d, m, prev)[0])
+
+
+def test_BE05_movimientos_normales_no_bloquean():
+    d, m = healthy(); prev, _ = healthy()
+    _scale(d["stocks"][0], 1.4)                                # +40 %: raro, pero no es un cambio de unidad
+    _scale(d["stocks"][1], 0.7)
+    assert run(d, m, prev)[0] == []
+
+
+def test_BE05_el_salto_es_regresion_y_se_puede_permitir():
+    d, m = healthy(); prev, _ = healthy()
+    _scale(d["funds"][0], 100)
+    errs, warns = run(d, m, prev, allow_regression=True)       # split real: workflow_dispatch con allow_regression
+    assert errs == [] and any("salto" in w for w in warns)
+
+
+def test_BE05_sin_anterior_no_hay_regla_de_salto():
+    d, m = healthy()
+    _scale(d["funds"][0], 100)
+    assert run(d, m, None)[0] == []
+
+
+@pytest.mark.parametrize("bad", [0, None, -5, "12.3", True, float("inf")])
+def test_BE05_historico_con_close_no_positivo_o_nulo_debe_bloquear(bad):   # R3
+    d, m = healthy(); h = d["stocks"][0]["history"]
+    h[10]["close"] = bad
+    errs, _ = run(d, m, None)
+    assert any("close" in e and d["stocks"][0]["symbol"] in e for e in errs)
+
+
+def test_BE05_materias_primas_pueden_cotizar_negativo_pero_no_nulo():
+    # WTI cerró en -37,63 el 2020-04-20: bloquear un cierre negativo de futuros pararía la publicación para siempre.
+    d, m = healthy()
+    d["commodities"][0]["history"][5]["close"] = -37.63
+    assert run(d, m, None)[0] == []
+    d["commodities"][0]["history"][6]["close"] = None
+    assert any("close" in e for e in run(d, m, None)[0])
+
+
+@pytest.mark.parametrize("fecha", ["no-es-fecha", "", None, "1850-01-01", 20261001])
+def test_BE05_fecha_de_barra_ilegible_o_absurda_bloquea(fecha):
+    d, m = healthy()
+    d["stocks"][0]["history"][20]["date"] = fecha
+    assert any("fecha" in e for e in run(d, m, None)[0])
+
+
+def test_BE05_barra_con_fecha_futura_no_enmascara_historico_congelado():   # R5
+    d, m = healthy()
+    for k in sc.HISTORY_LISTS:
+        for x in d[k]:
+            x["history"][-1]["date"] = (TODAY + dt.timedelta(days=400)).isoformat()
+    errs, _ = run(d, m, None)
+    assert any("futura" in e for e in errs)
+
+
+def test_BE05_manana_si_es_razonable_por_la_zona_horaria():
+    d, m = healthy()
+    d["stocks"][0]["history"][-1]["date"] = (TODAY + dt.timedelta(days=1)).isoformat()
+    assert run(d, m, None)[0] == []
+
+
+def test_BE05_fechas_repetidas_o_desordenadas_toleran_dos_simbolos():
+    d, m = healthy()
+    h = d["stocks"][0]["history"]; h[50]["date"] = h[49]["date"]     # duplicado
+    h = d["stocks"][1]["history"]; h[60], h[61] = h[61], h[60]       # orden inverso local
+    errs, warns = run(d, m, None)
+    assert errs == [] and any("orden" in w for w in warns)
+    for i in (2, 3):
+        h = d["stocks"][i]["history"]; h[50]["date"] = h[49]["date"]
+    assert any("orden" in e for e in run(d, m, None)[0])
+
+
+def test_BE05_nav_x10_respecto_al_anterior_debe_bloquear_o_alertar():      # R4
+    d, m = healthy(); prev, _ = healthy()
+    d["your_funds"][0]["price"] *= 10
+    errs, warns = run(d, m, prev)
+    assert any("NAV" in e and "salto" in e for e in errs)
+
+
+def test_BE05_nav_normal_o_sin_anterior_no_molesta():
+    d, m = healthy(); prev, _ = healthy()
+    d["your_funds"][0]["price"] *= 1.02
+    prev["your_funds"][1]["price"] = None
+    assert run(d, m, prev)[0] == []
