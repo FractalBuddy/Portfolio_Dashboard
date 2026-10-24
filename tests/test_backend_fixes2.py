@@ -250,3 +250,129 @@ def test_BE14_source_y_published_tambien_son_texto_plano(monkeypatch):
 def test_BE14_el_titulo_limpio_pasa_el_validador():
     import sanity_check as sc
     assert sc._text_problem("title", "S&P 500 5000 y AT&T") is None
+
+
+# ------------------------------------------------------------------ BE-15: frescura y arrastre de market_mood / staking
+import datetime as _dt
+import json as _json
+import types as _types
+
+
+def _hoy():
+    return _dt.datetime.now(_dt.timezone.utc).date()
+
+
+def _prev_mood(tmp_path, monkeypatch, mood, generated_at=None):
+    p = tmp_path / "prev.json"
+    p.write_text(_json.dumps({"generated_at": generated_at or (_hoy() - _dt.timedelta(days=1)).isoformat() + "T20:17:00+00:00",
+                              "market_mood": mood}))
+    monkeypatch.setenv("PREV_FEED_PATH", str(p))
+
+
+def _sin_fuentes(monkeypatch):
+    """Yahoo, alternative.me y CNN fallan; altcoin season se salta."""
+    monkeypatch.setattr(fm, "yf_history", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("sin yahoo")))
+    monkeypatch.setattr(fm.requests, "get", lambda *a, **k: (_ for _ in ()).throw(fm.requests.ConnectionError("caído")))
+    monkeypatch.setattr(fm, "build_altcoin_season", lambda prev=None: None)
+
+
+def test_BE15_vix_y_fear_greed_caidos_se_arrastran_del_feed_anterior_como_stale(tmp_path, monkeypatch):
+    _sin_fuentes(monkeypatch)
+    _prev_mood(tmp_path, monkeypatch, {"vix": {"value": 16.2, "change_pct": 1.0}, "vix_50ma": {"value": 15.0},
+                                       "stock_fear_greed": {"value": 55.0, "rating": "greed"},
+                                       "crypto_fear_greed": {"value": 40, "classification": "Fear", "timestamp": 1}})
+    mood = fm.build_market_mood()
+    ayer = (_hoy() - _dt.timedelta(days=1)).isoformat()
+    for k, v in (("vix", 16.2), ("vix_50ma", 15.0), ("stock_fear_greed", 55.0), ("crypto_fear_greed", 40)):
+        assert mood[k]["value"] == v and mood[k]["stale"] is True and mood[k]["stale_since"] == ayer
+    assert mood["vix"]["change_pct"] == 1.0 and mood["stock_fear_greed"]["rating"] == "greed"     # el resto del campo se conserva
+
+
+def test_BE15_el_stale_since_se_conserva_y_pasados_los_dias_tope_no_se_arrastra(tmp_path, monkeypatch):
+    _sin_fuentes(monkeypatch)
+    hace2 = (_hoy() - _dt.timedelta(days=2)).isoformat()
+    hace9 = (_hoy() - _dt.timedelta(days=9)).isoformat()
+    _prev_mood(tmp_path, monkeypatch, {"vix": {"value": 16.2, "stale": True, "stale_since": hace2},
+                                       "stock_fear_greed": {"value": 55.0, "stale": True, "stale_since": hace9}})
+    mood = fm.build_market_mood()
+    assert mood["vix"]["stale_since"] == hace2
+    assert "stock_fear_greed" not in mood                       # llevaba demasiado tiempo así: mejor que desaparezca y lo vea el sanity-check
+
+
+def test_BE15_un_valor_fresco_no_se_marca_ni_se_pisa(tmp_path, monkeypatch):
+    import pandas as pd
+    monkeypatch.setattr(fm, "yf_history", lambda *a, **k: pd.DataFrame({"Close": [15.0, 16.0]}))
+    monkeypatch.setattr(fm.requests, "get", lambda *a, **k: (_ for _ in ()).throw(fm.requests.ConnectionError("caído")))
+    monkeypatch.setattr(fm, "build_altcoin_season", lambda prev=None: None)
+    _prev_mood(tmp_path, monkeypatch, {"vix": {"value": 99.0}, "stock_fear_greed": {"value": 55.0}})
+    mood = fm.build_market_mood()
+    assert mood["vix"]["value"] == 16.0 and "stale" not in mood["vix"]
+    assert mood["stock_fear_greed"]["stale"] is True            # CNN sí cayó
+
+
+def test_BE15_sin_feed_anterior_no_se_inventa_nada(tmp_path, monkeypatch):
+    _sin_fuentes(monkeypatch)
+    monkeypatch.setenv("PREV_FEED_PATH", str(tmp_path / "no_existe.json"))
+    assert fm.build_market_mood() == {}
+
+
+def _resp(payload):
+    return _types.SimpleNamespace(json=lambda: payload, raise_for_status=lambda: None, status_code=200)
+
+
+@pytest.mark.parametrize("dias,antiguo", [(1, False), (3, False), (5, True)])
+def test_BE15_el_timestamp_de_alternative_me_decide_si_esta_congelado(tmp_path, monkeypatch, dias, antiguo):
+    import calendar
+    monkeypatch.setattr(fm, "yf_history", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("sin yahoo")))
+    monkeypatch.setattr(fm, "build_altcoin_season", lambda prev=None: None)
+    monkeypatch.setenv("PREV_FEED_PATH", str(tmp_path / "no_existe.json"))
+    dia = _hoy() - _dt.timedelta(days=dias)
+    ts = calendar.timegm(dia.timetuple())
+
+    def get(url, *a, **k):
+        if "alternative.me" in url:
+            return _resp({"data": [{"value": "50", "value_classification": "Neutral", "timestamp": str(ts)}]})
+        raise fm.requests.ConnectionError("caído")
+    monkeypatch.setattr(fm.requests, "get", get)
+    cfg = fm.build_market_mood()["crypto_fear_greed"]
+    assert cfg.get("stale", False) is antiguo
+    if antiguo:
+        assert cfg["stale_since"] == dia.isoformat()
+
+
+def test_BE15_el_timestamp_de_cnn_se_publica_como_as_of_y_marca_lo_congelado(tmp_path, monkeypatch):
+    monkeypatch.setattr(fm, "yf_history", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("sin yahoo")))
+    monkeypatch.setattr(fm, "build_altcoin_season", lambda prev=None: None)
+    monkeypatch.setenv("PREV_FEED_PATH", str(tmp_path / "no_existe.json"))
+    viejo = (_hoy() - _dt.timedelta(days=10)).isoformat() + "T23:59:00+00:00"
+    nuevo = _hoy().isoformat() + "T00:30:00+00:00"
+    cnn = {"fear_and_greed": {"score": 60, "rating": "greed", "timestamp": viejo},
+           "market_momentum_sp500": {"score": 70, "rating": "greed", "timestamp": nuevo},
+           "junk_bond_demand": {"score": 40, "rating": "fear"}}                                  # sin timestamp: ni se publica ni se juzga
+
+    def get(url, *a, **k):
+        if "cnn.io" in url:
+            return _resp(cnn)
+        raise fm.requests.ConnectionError("caído")
+    monkeypatch.setattr(fm.requests, "get", get)
+    mood = fm.build_market_mood()
+    assert mood["stock_fear_greed"]["stale"] is True and mood["stock_fear_greed"]["as_of"] == viejo[:10]
+    assert mood["market_momentum"]["as_of"] == _hoy().isoformat() and "stale" not in mood["market_momentum"]
+    assert "as_of" not in mood["junk_bond_demand"] and "stale" not in mood["junk_bond_demand"]
+
+
+def test_BE15_lido_con_as_of_antiguo_se_publica_stale(monkeypatch):
+    import calendar
+    viejo = calendar.timegm((_hoy() - _dt.timedelta(days=9)).timetuple())
+    monkeypatch.setitem(fm.STAKING_PROVIDERS, "eth_lido", lambda: {"apr": 2.5, "as_of": viejo, "source": "lido"})
+    st = fm.build_staking(None)["eth_lido"]
+    assert st["stale"] is True and st["stale_since"] == (_hoy() - _dt.timedelta(days=9)).isoformat()
+    monkeypatch.setitem(fm.STAKING_PROVIDERS, "eth_lido", lambda: {"apr": 2.5, "as_of": calendar.timegm(_hoy().timetuple()), "source": "lido"})
+    assert "stale" not in fm.build_staking(None)["eth_lido"]
+
+
+@pytest.mark.parametrize("valor,esperado", [(None, None), (True, None), ("x", None), ("2026-10-05T10:00:00Z", _dt.date(2026, 10, 5)),
+                                            (1760000000, _dt.date(2025, 10, 9)), (1760000000000, _dt.date(2025, 10, 9)),
+                                            ("1760000000", _dt.date(2025, 10, 9)), (4102444800, None), (5, None)])
+def test_BE15_source_date_entiende_epoch_en_s_y_ms_e_iso(valor, esperado):
+    assert fm._source_date(valor) == esperado

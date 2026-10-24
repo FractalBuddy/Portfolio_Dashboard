@@ -1879,6 +1879,81 @@ def cnn_put_call_ratio(block):
         return None
 
 
+# --- Frescura de market_mood y staking (BE-15). Un endpoint «congelado» (CNN no está documentado, alternative.me y Lido guardan
+# un timestamp que nadie miraba) pasaba por actual. Si la fuente trae fecha y es más vieja que esto, la entrada se publica `stale`.
+MOOD_MAX_AGE_DAYS = 3
+# Una entrada de market_mood que falla hoy se arrastra del feed anterior (marcada `stale`) solo si lleva como mucho este tiempo así:
+# pasado, mejor que desaparezca (y lo vea el sanity-check) que enseñar un VIX de hace una semana como vigente.
+MOOD_MAX_CARRY_DAYS = 3
+_MOOD_KEYS = ("vix", "vix_50ma", "stock_fear_greed", "market_momentum", "put_call", "junk_bond_demand", "safe_haven_demand",
+              "crypto_fear_greed")
+
+
+def _source_date(ts):
+    """Fecha (date, UTC) de un timestamp de una fuente externa: epoch en segundos o milisegundos, o ISO 8601. None si no se entiende."""
+    try:
+        if isinstance(ts, bool):
+            return None
+        if isinstance(ts, (int, float)) or (isinstance(ts, str) and re.fullmatch(r"\d{9,13}(\.\d+)?", ts.strip())):
+            v = float(ts)
+            if v > 1e11:        # milisegundos
+                v /= 1000.0
+            d = datetime.fromtimestamp(v, tz=timezone.utc).date()
+        elif isinstance(ts, str):
+            d = datetime.fromisoformat(ts.strip().replace("Z", "+00:00")).date()
+        else:
+            return None
+        return d if datetime(2000, 1, 1).date() <= d <= datetime.now(timezone.utc).date() + timedelta(days=2) else None
+    except (ValueError, OverflowError, OSError):
+        return None
+
+
+def _stamp_freshness(entry, ts, today=None, publish_date=False):
+    """Si `ts` se entiende, y es más vieja que MOOD_MAX_AGE_DAYS, marca la entrada `stale` (+ `stale_since`). Con publish_date, además
+    publica `as_of` (YYYY-MM-DD). Sin fecha utilizable no toca nada (no se inventa ni frescura ni antigüedad). Devuelve la entrada."""
+    d = _source_date(ts)
+    if d is None or not isinstance(entry, dict):
+        return entry
+    today = today or datetime.now(timezone.utc).date()
+    if publish_date:
+        entry["as_of"] = d.isoformat()
+    if (today - d).days > MOOD_MAX_AGE_DAYS:
+        entry["stale"] = True
+        entry["stale_since"] = d.isoformat()
+        print(f"  ! dato de {d.isoformat()} ({(today - d).days} días): se publica marcado como antiguo", file=sys.stderr)
+    return entry
+
+
+def carry_previous_mood(mood, prev, today=None):
+    """Para cada indicador de `market_mood` que hoy ha fallado (VIX, Fear & Greed de bolsa y sus componentes, Fear & Greed cripto) y que
+    el feed anterior sí tenía, reutiliza el anterior marcado `stale` (+ `stale_since`, que se conserva entre reutilizaciones). Como el
+    resto de secciones (tipos, IPC, altcoin season, staking): antes, si VIX y CNN fallaban a la vez, `market_mood` quedaba sin VIX ni Fear
+    & Greed de bolsa y el sanity-check bloqueaba TODA la publicación. Pasados MOOD_MAX_CARRY_DAYS no se arrastra. Devuelve `mood`."""
+    today = today or datetime.now(timezone.utc).date()
+    try:
+        old_mood = (prev or {}).get("market_mood")
+        old_mood = old_mood if isinstance(old_mood, dict) else {}
+        since_default = str((prev or {}).get("generated_at", ""))[:10] or None
+        for key in _MOOD_KEYS:
+            old = old_mood.get(key)
+            if key in mood or not (isinstance(old, dict) and isinstance(old.get("value"), (int, float)) and not isinstance(old.get("value"), bool)):
+                continue
+            since = old.get("stale_since") or since_default
+            try:
+                if (today - datetime.strptime(str(since)[:10], "%Y-%m-%d").date()).days > MOOD_MAX_CARRY_DAYS:
+                    continue
+            except ValueError:
+                continue
+            row = dict(old)
+            row["stale"] = True
+            row["stale_since"] = since
+            mood[key] = row
+            print(f"  ! market_mood.{key}: se reutiliza el valor del feed anterior (stale desde {since})", file=sys.stderr)
+    except Exception as e:  # noqa: BLE001 - nunca debe tirar el run
+        print(f"  ! no se pudo reutilizar el market_mood anterior: {type(e).__name__}", file=sys.stderr)
+    return mood
+
+
 LIDO_API = "https://eth-api.lido.fi/v1/protocol/steth/apr"
 _STAKING_HEADERS = {"User-Agent": "personal-portfolio-dashboard/1.0"}
 
@@ -1941,7 +2016,7 @@ def build_staking(prev=None):
         try:
             parsed = fetch()
             if parsed:
-                staking[key] = parsed
+                staking[key] = _stamp_freshness(parsed, parsed.get("as_of"))
         except Exception as e:
             print(f"  ! staking {key} failed: {type(e).__name__}: {e}", file=sys.stderr)
         if key in staking:
@@ -1990,6 +2065,7 @@ def build_market_mood():
         mood["crypto_fear_greed"] = {"value": int(d["value"]), "classification": d["value_classification"]}
         try:
             mood["crypto_fear_greed"]["timestamp"] = int(d["timestamp"])  # unix, 00:00 UTC del día de la lectura (alternative.me)
+            _stamp_freshness(mood["crypto_fear_greed"], mood["crypto_fear_greed"]["timestamp"])
         except (KeyError, TypeError, ValueError):
             pass
     except Exception as e:
@@ -2005,9 +2081,11 @@ def build_market_mood():
         def sub(key):
             try:
                 v = d[key]
-                return {"value": round(float(v.get("score")), 1), "rating": v.get("rating")}
+                out = {"value": round(float(v.get("score")), 1), "rating": v.get("rating")}
             except Exception:
                 return None
+            # CNN trae `timestamp` en el bloque (endpoint no documentado: si no se entiende, no se publica ni se juzga la frescura)
+            return _stamp_freshness(out, v.get("timestamp"), publish_date=True)
         fg = sub("fear_and_greed")
         if fg: mood["stock_fear_greed"] = fg
         mom = sub("market_momentum_sp500")
@@ -2025,11 +2103,12 @@ def build_market_mood():
     except Exception as e:
         print(f"  ! CNN fear & greed fetch failed (unofficial endpoint, best-effort): {e}", file=sys.stderr)
 
-    alt = build_altcoin_season(_load_prev_feed())
+    prev = _load_prev_feed()
+    alt = build_altcoin_season(prev)
     if alt:
         mood["altcoin_season"] = alt
 
-    return mood
+    return carry_previous_mood(mood, prev)
 
 
 def build_benchmarks():

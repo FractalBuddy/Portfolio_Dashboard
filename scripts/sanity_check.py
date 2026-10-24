@@ -275,14 +275,14 @@ _DICT_SCHEMA = {   # secciones de un solo objeto: ruta -> claves permitidas
     "benchmarks": frozenset({"sp500", "msci_world"}),
     "market_mood": frozenset({"vix", "vix_50ma", "crypto_fear_greed", "stock_fear_greed", "market_momentum", "put_call",
                               "junk_bond_demand", "safe_haven_demand", "altcoin_season"}),
-    "market_mood.vix": frozenset({"value", "change_pct"}),
-    "market_mood.vix_50ma": frozenset({"value"}),
-    "market_mood.crypto_fear_greed": frozenset({"value", "classification", "timestamp"}),
-    "market_mood.stock_fear_greed": frozenset({"value", "rating"}),
-    "market_mood.market_momentum": frozenset({"value", "rating"}),
-    "market_mood.junk_bond_demand": frozenset({"value", "rating"}),
-    "market_mood.safe_haven_demand": frozenset({"value", "rating"}),
-    "market_mood.put_call": frozenset({"value", "rating", "ratio"}),
+    "market_mood.vix": frozenset({"value", "change_pct"}) | _STALE,
+    "market_mood.vix_50ma": frozenset({"value"}) | _STALE,
+    "market_mood.crypto_fear_greed": frozenset({"value", "classification", "timestamp"}) | _STALE,
+    "market_mood.stock_fear_greed": frozenset({"value", "rating", "as_of"}) | _STALE,
+    "market_mood.market_momentum": frozenset({"value", "rating", "as_of"}) | _STALE,
+    "market_mood.junk_bond_demand": frozenset({"value", "rating", "as_of"}) | _STALE,
+    "market_mood.safe_haven_demand": frozenset({"value", "rating", "as_of"}) | _STALE,
+    "market_mood.put_call": frozenset({"value", "rating", "ratio", "as_of"}) | _STALE,
     "market_mood.altcoin_season": frozenset({"value", "outperforming", "total", "window_days", "btc_change_pct", "source"}) | _STALE,
     "staking": frozenset({"eth_lido"}),
     "staking.eth_lido": frozenset({"apr", "apr_sma7", "as_of", "source"}) | _STALE,
@@ -290,6 +290,7 @@ _DICT_SCHEMA = {   # secciones de un solo objeto: ruta -> claves permitidas
     "health.profiles": frozenset({"stocks", "with_data", "valuation_table", "oldest_days", "older_than_7d"}),
 }
 _SYMBOL_RE = re.compile(r"^[A-Za-z0-9.^=\-]{1,15}$")
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
 _TAGLIKE_RE = re.compile(r"<\s*[/!?]?\s*[A-Za-z]")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -331,6 +332,8 @@ def _schema_problems(d):
         why = _text_problem(key, v)
         if why:
             add("%s.%s: %s" % (where, key, why))
+        elif key in ("as_of", "stale_since") and not _DATE_RE.match(v):
+            add("%s.%s no es una fecha YYYY-MM-DD" % (where, key))
         elif key in _SYMBOL_FIELDS and not _SYMBOL_RE.match(v):
             add("%s.%s con formato de símbolo inválido" % (where, key))
         elif key == "isin" and not _ISIN_RE.match(v):
@@ -575,6 +578,23 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
         if fresh_with >= 5 and h_prof["valuation_table"] < 0.6 * fresh_with:
             warnings.append(Alert("tabla de valoración de Yahoo (Ticker.valuation) en solo %d de %d perfiles: capitalización/EV/P/E vienen de `info`, menos fiable (¿cambió yfinance o Yahoo?)"
                             % (h_prof["valuation_table"], fresh_with)))
+    # BE-15: market_mood / staking con datos antiguos o arrastrados del feed anterior (VIX, Fear & Greed, tasa de Lido...).
+    stale_mood = []
+    for sec in ("market_mood", "staking"):
+        node = d.get(sec) if isinstance(d.get(sec), dict) else {}
+        for k, v in node.items():
+            if isinstance(v, dict) and v.get("stale"):
+                stale_mood.append((sec + "." + k, v.get("stale_since")))
+    if stale_mood:
+        old_m = []
+        for name_m, since in stale_mood:
+            try:
+                if (today - dt.date.fromisoformat(str(since)[:10])).days >= STALE_ALERT_DAYS:
+                    old_m.append(name_m)
+            except ValueError:
+                old_m.append(name_m)         # sin fecha de origen utilizable no se puede saber cuánto lleva así: se avisa
+        msg = "datos antiguos o reutilizados del feed anterior: %s" % [n for n, _ in stale_mood][:8]
+        warnings.append(Alert(msg + " — desde hace %d+ días: %s" % (STALE_ALERT_DAYS, old_m[:8])) if old_m else msg)
     # BE-12: el backend anota si alguna fase se saltó trabajo porque se acabó el presupuesto de tiempo del job.
     hl = d.get("health") if isinstance(d.get("health"), dict) else {}
     need(not ("budget_exhausted" in hl and not isinstance(hl["budget_exhausted"], bool)), "health.budget_exhausted debe ser booleano")

@@ -748,3 +748,28 @@ def test_BE12_presupuesto_agotado_avisa_con_alert_sin_bloquear():
     assert errs == [] and not any("presupuesto de tiempo" in w for w in warns)
     d["health"]["budget_exhausted"] = "si"
     assert any("budget_exhausted" in e for e in run(d, m, None)[0])
+
+
+# ====================================================================== BE-15: market_mood / staking antiguos o arrastrados
+def test_BE15_mood_arrastrado_reciente_avisa_sin_alert_y_antiguo_con_alert():
+    d, m = healthy()
+    hace1 = (TODAY - dt.timedelta(days=1)).isoformat()
+    hace5 = (TODAY - dt.timedelta(days=5)).isoformat()
+    d["market_mood"]["vix"] = {"value": 15.0, "stale": True, "stale_since": hace1}
+    errs, warns = run(d, m, None)
+    assert errs == [] and any("antiguos o reutilizados" in w for w in warns) and not any(isinstance(w, sc.Alert) and "market_mood.vix" in w for w in warns)
+    d["market_mood"]["vix"]["stale_since"] = hace5
+    d["staking"] = {"eth_lido": {"apr": 2.5, "as_of": 1760000000, "source": "lido", "stale": True, "stale_since": hace5}}
+    errs, warns = run(d, m, None)
+    assert errs == [] and any(isinstance(w, sc.Alert) and "market_mood.vix" in w and "staking.eth_lido" in w for w in warns)
+
+
+def test_BE15_el_esquema_acepta_as_of_y_stale_en_mood_y_rechaza_fechas_raras():
+    d, m = healthy()
+    d["market_mood"]["stock_fear_greed"] = {"value": 55.0, "rating": "greed", "as_of": "2026-10-05"}
+    assert run(d, m, None)[0] == []
+    d["market_mood"]["stock_fear_greed"]["as_of"] = "ayer"
+    assert any("fecha" in e for e in run(d, m, None)[0])
+    d["market_mood"]["stock_fear_greed"]["as_of"] = "2026-10-05"
+    d["market_mood"]["stock_fear_greed"]["otro"] = 1
+    assert run(d, m, None)[0]
