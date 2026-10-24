@@ -82,3 +82,17 @@ def test_BE01_cap_currency_no_cambia_de_contrato():
     # El campo ya publicado (para tipos de cambio) sigue normalizado; la divisa de COTIZACIÓN va en `currency`.
     out = fm.parse_stock_profile({"marketCap": 5e9, "currency": "GBp", "currentPrice": 1234.0})
     assert out["cap_currency"] == "GBP"
+
+
+# ------------------------------------------------------------------ BE-13
+def test_BE13_cierre_previo_negativo_no_produce_variacion_absurda(monkeypatch):
+    monkeypatch.setattr(fm, "yf_history", lambda *a, **k: _ohlc([20, 20, 20, -37, 18]))   # precedente: WTI, 2020-04-20
+    row = fm.fetch_symbol("CL=F")
+    assert row["change_pct"] is None                  # antes: -148.65
+    assert row["price"] == 18.0
+
+
+def test_BE13_cierre_previo_normal_sigue_igual(monkeypatch):
+    monkeypatch.setattr(fm, "yf_history", lambda *a, **k: _ohlc([10, 10, 10, 10, 11]))
+    row = fm.fetch_symbol("X")
+    assert row["change_pct"] == 10.0

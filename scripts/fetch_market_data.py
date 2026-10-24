@@ -292,15 +292,16 @@ def fetch_symbol(symbol):
         if not (math.isfinite(last) and last > 0):  # un Close 0/negativo de Yahoo no es un precio: mejor «sin datos» (se arrastra la fila anterior)
             print(f"  ! {symbol}: último cierre no válido ({last}): se trata como sin datos", file=sys.stderr)
             return None
-        change_pct = (last / prev - 1) * 100 if prev else 0.0
-        change_pct_7d = (last / week_ago - 1) * 100 if week_ago else 0.0
+        # un cierre de referencia ≤ 0 (WTI, 2020-04-20: -37) no es base de una variación: sin dato en vez de -148 %
+        change_pct = (last / prev - 1) * 100 if prev > 0 else None
+        change_pct_7d = (last / week_ago - 1) * 100 if week_ago > 0 else None
         vol = float(hist["Volume"].iloc[-1]) if "Volume" in hist else None
         avg_vol = float(hist["Volume"].mean()) if "Volume" in hist else None
         vol_ratio = (vol / avg_vol) if (vol and avg_vol) else None
         out = {
             "price": round(last, 4),
-            "change_pct": round(change_pct, 2),
-            "change_pct_7d": round(change_pct_7d, 2),
+            "change_pct": round(change_pct, 2) if change_pct is not None else None,
+            "change_pct_7d": round(change_pct_7d, 2) if change_pct_7d is not None else None,
             "volume_ratio": round(vol_ratio, 2) if vol_ratio else None,
             "sparkline": [round(float(c), 4) for c in hist["Close"].tolist()],
         }
