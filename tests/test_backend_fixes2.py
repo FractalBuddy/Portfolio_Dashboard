@@ -376,3 +376,95 @@ def test_BE15_lido_con_as_of_antiguo_se_publica_stale(monkeypatch):
                                             ("1760000000", _dt.date(2025, 10, 9)), (4102444800, None), (5, None)])
 def test_BE15_source_date_entiende_epoch_en_s_y_ms_e_iso(valor, esperado):
     assert fm._source_date(valor) == esperado
+
+
+# ------------------------------------------------------------------ BE-17: scrape de iShares
+ISIN_T = "IE000ZYRH0Q7"
+PAGINA = ("<html><body>Fund {I} NAV as of 22/Oct/2026 EUR 12.3456 1 Day NAV Change as of 22/Oct/2026 EUR -0.10 (-0.80%) "
+          "Ongoing Charges Figures 0.06 % Management Fee 0.04 % Base Currency USD ISIN {I}</body></html>").replace("{I}", ISIN_T)
+
+
+def _get_contando(monkeypatch, respuestas):
+    """requests.get falso: devuelve/lanza en orden lo de `respuestas` (la última se repite) y cuenta las llamadas."""
+    n = {"n": 0}
+
+    def get(url, *a, **k):
+        item = respuestas[min(n["n"], len(respuestas) - 1)]
+        n["n"] += 1
+        if isinstance(item, Exception):
+            raise item
+        return item
+    monkeypatch.setattr(fm.requests, "get", get)
+    return n
+
+
+def _ok(text=PAGINA):
+    return _types.SimpleNamespace(text=text, raise_for_status=lambda: None, status_code=200)
+
+
+def _http(code):
+    err = fm.requests.HTTPError("HTTP %d" % code)
+    err.response = _types.SimpleNamespace(status_code=code)
+    return _types.SimpleNamespace(text="", raise_for_status=lambda: (_ for _ in ()).throw(err), status_code=code)
+
+
+def test_BE17_nav_y_ficha_salen_de_una_sola_descarga(monkeypatch, sleeps):
+    n = _get_contando(monkeypatch, [_ok()])
+    nav = fm.fetch_ishares_nav("https://x.test/p", ISIN_T)
+    facts = fm.fetch_ishares_fund_facts("https://x.test/p")
+    assert nav["price"] == 12.3456 and facts["ongoing_charges_pct"] == 0.06
+    assert n["n"] == 1                                                  # antes: 2 (una por función)
+
+
+def test_BE17_urls_distintas_se_descargan_por_separado(monkeypatch, sleeps):
+    n = _get_contando(monkeypatch, [_ok()])
+    fm.fetch_ishares_nav("https://x.test/a", ISIN_T)
+    fm.fetch_ishares_fund_facts("https://x.test/b")
+    assert n["n"] == 2
+
+
+def test_BE17_la_ficha_hereda_el_reintento_ante_fallos_transitorios(monkeypatch, sleeps):
+    n = _get_contando(monkeypatch, [_http(503), _ok()])
+    assert fm.fetch_ishares_fund_facts("https://x.test/p")["management_fee_pct"] == 0.04     # antes: sin reintento => {}
+    assert n["n"] == 2 and sleeps                                                              # y esperó entre intentos
+
+
+def test_BE17_un_fallo_no_transitorio_no_se_repite_ni_para_el_nav_ni_para_la_ficha(monkeypatch, sleeps):
+    n = _get_contando(monkeypatch, [_http(403)])
+    assert fm.fetch_ishares_nav("https://x.test/p", ISIN_T) is None
+    assert fm.fetch_ishares_fund_facts("https://x.test/p") == {}
+    assert n["n"] == 1
+
+
+@pytest.mark.parametrize("pagina", [
+    "XIE000ZYRH0Q7Y NAV as of 22/Oct/2026 EUR 12.34",            # el ISIN solo aparece dentro de otro código
+    "IE000ZYRH0Q7X NAV as of 22/Oct/2026 EUR 12.34",
+    "NAV as of 22/Oct/2026 EUR 12.34",
+])
+def test_BE17_el_isin_debe_aparecer_como_token_entero(pagina):
+    assert fm.parse_ishares_nav(pagina, ISIN_T) is None
+
+
+@pytest.mark.parametrize("pagina", ["ISIN IE000ZYRH0Q7 NAV as of 22/Oct/2026 EUR 12.34", "(IE000ZYRH0Q7) NAV as of 22/Oct/2026 EUR 12.34",
+                                    "NAV as of 22/Oct/2026 EUR 12.34 ISIN IE000ZYRH0Q7"])
+def test_BE17_el_isin_como_token_sigue_valiendo(pagina):
+    assert fm.parse_ishares_nav(pagina, ISIN_T)["price"] == 12.34
+
+
+def test_BE17_varias_navs_distintas_se_usa_la_primera_pero_se_avisa(capsys):
+    page = "%s NAV as of 22/Oct/2026 EUR 12.34 otra clase NAV as of 22/Oct/2026 EUR 99.99" % ISIN_T
+    assert fm.parse_ishares_nav(page, ISIN_T)["price"] == 12.34
+    assert "2 «NAV as of» distintos" in capsys.readouterr().err
+    same = "%s NAV as of 22/Oct/2026 EUR 12.34 NAV as of 22/Oct/2026 EUR 12.34" % ISIN_T      # repetido e idéntico: sin aviso
+    fm.parse_ishares_nav(same, ISIN_T)
+    assert "distintos" not in capsys.readouterr().err
+
+
+def test_BE17_build_your_funds_pide_cada_ficha_una_vez(monkeypatch, sleeps):
+    monkeypatch.setattr(fm, "YOUR_FUNDS", [{"isin": ISIN_T, "name": "n", "product_url": "https://x.test/a", "proxy_symbol": "P"}])
+    monkeypatch.setattr(fm, "fetch_full_history", lambda s: [])
+    monkeypatch.setattr(fm, "compute_fund_analytics", lambda s: {})
+    n = _get_contando(monkeypatch, [_ok()])
+    out = fm.build_your_funds(None)
+    assert out[0]["source"] == "ishares_nav_scrape" and out[0]["facts"]["ongoing_charges_pct"] == 0.06
+    assert n["n"] == 1

@@ -196,7 +196,7 @@ def test_fetch_ishares_nav_con_html_sintetico(monkeypatch):
     assert r["price"] == 12.3456 and r["nav_date"] == "03/Oct/2026"
     def boom(*a, **k): raise RuntimeError("red caída")  # noqa: E301,E704
     monkeypatch.setattr(fm.requests, "get", boom)
-    assert fm.fetch_ishares_nav("https://x.test", ISIN) is None
+    assert fm.fetch_ishares_nav("https://otra.test", ISIN) is None             # otra URL: la de arriba ya está en la caché del run (BE-17)
 
 
 def test_build_your_funds_propaga_nav_stale(monkeypatch):

@@ -1341,8 +1341,11 @@ def parse_ishares_nav(plain, isin, today=None):
     (variación, rango 52 semanas) se parsean cada uno en su propio try: si uno viene malformado
     se descarta ese campo, pero NO se pierde el NAV válido.
     """
-    nav_match = re.search(r'NAV as of\s+(\d{1,2}\s+[A-Za-z]{3,10}\.?\s+\d{4}|[\w/.\-]+)\s+EUR\s*([\d.,]+)', plain)
-    if not (nav_match and isin in plain):
+    nav_re = r'NAV as of\s+(\d{1,2}\s+[A-Za-z]{3,10}\.?\s+\d{4}|[\w/.\-]+)\s+EUR\s*([\d.,]+)'
+    nav_match = re.search(nav_re, plain)
+    # El ISIN debe aparecer como token entero (no dentro de otro código más largo), no como simple subcadena.
+    isin_ok = bool(isin) and re.search(r'(?<![A-Za-z0-9])' + re.escape(isin) + r'(?![A-Za-z0-9])', plain) is not None
+    if not (nav_match and isin_ok):
         print(f"  ! could not find expected NAV pattern for {isin} -- falling back to proxy", file=sys.stderr)
         return None
     price = _parse_num(nav_match.group(2))
@@ -1351,6 +1354,9 @@ def parse_ishares_nav(plain, isin, today=None):
         print(f"  ! implausible NAV {nav_match.group(2)!r} for {isin} -- falling back to proxy", file=sys.stderr)
         return None
     result = {"price": round(price, 4), "nav_date": nav_match.group(1)}
+    others = {(m.group(1), m.group(2)) for m in re.finditer(nav_re, plain)} - {(nav_match.group(1), nav_match.group(2))}
+    if others:   # una página con varios «NAV as of» distintos (¿varias clases?): se sigue usando el primero (decisión previa), pero se deja rastro
+        print(f"  ! {isin}: la página trae {len(others) + 1} «NAV as of» distintos; se usa el primero ({nav_match.group(1)} EUR {nav_match.group(2)})", file=sys.stderr)
 
     # Antigüedad del NAV: si iShares congela la página, el NAV de hace días no debe pasar por "de hoy".
     # Sin fecha creíble (ilegible, imposible o futura) NO se inventa ni nav_stale ni nav_date_iso: el sanity-check lo avisa.
@@ -1397,36 +1403,59 @@ ISHARES_TRIES = 2           # un fallo transitorio (timeout, 5xx, corte de red) 
 ISHARES_RETRY_WAIT = 4      # segundos entre intentos
 
 
-def fetch_ishares_nav(product_url, isin):
-    """
-    Scrapes the exact Class S NAV straight off the fund's public ishares.com product
-    page. Returns None (never raises) if the page layout doesn't match what we expect,
-    so callers can fall back to the proxy-ETF approximation instead of crashing.
-    Reintenta UNA vez solo ante fallos transitorios (timeout, error de conexión, HTTP 5xx/429): un 403/404 o una página
-    de captcha (200 sin el patrón) no se arreglan reintentando.
-    """
+_ISHARES_PAGES = {}   # url -> texto plano de la ficha, o la excepción con la que falló: UNA descarga por URL y run (BE-17)
+
+
+def _ishares_plain(product_url, label="ficha"):
+    """Texto plano (sin etiquetas) de la ficha de producto de iShares, con UNA sola descarga por URL y por run: el NAV y la ficha de
+    «Key Facts» salen de la misma página y antes la bajaban dos veces (el doble de peticiones a ishares.com, y los facts sin reintento).
+    Reintenta UNA vez solo ante fallos transitorios (timeout, error de conexión, HTTP 5xx/429): un 403/404 o una página de captcha
+    (200 sin el patrón) no se arreglan reintentando. El fallo también se recuerda (no se vuelve a pedir una página que ya ha fallado).
+    Lanza la excepción si no se pudo."""
+    hit = _ISHARES_PAGES.get(product_url)
+    if isinstance(hit, Exception):
+        raise hit
+    if hit is not None:
+        return hit
     headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
+    err = None
     for attempt in range(ISHARES_TRIES):
         if _budget_exhausted():
-            print(f"  ! ishares scrape {isin}: presupuesto de tiempo del job agotado -- falling back to proxy", file=sys.stderr)
-            return None
+            err = TimeoutError("presupuesto de tiempo del job agotado")
+            break
         try:
             res = requests.get(product_url, headers=headers, timeout=_net_timeout(20))
             res.raise_for_status()
             # Strip tags to plain text so we don't depend on exact HTML structure/classes.
             plain = re.sub(r'<[^>]+>', ' ', res.text)
             plain = re.sub(r'\s+', ' ', plain)
-            return parse_ishares_nav(plain, isin)
+            _ISHARES_PAGES[product_url] = plain
+            return plain
         except Exception as e:
+            err = e
             code = getattr(getattr(e, "response", None), "status_code", None)
             transient = isinstance(e, (requests.Timeout, requests.ConnectionError)) or (code is not None and (code >= 500 or code == 429))
             if transient and attempt < ISHARES_TRIES - 1:
-                print(f"  ! ishares scrape {isin}: {type(e).__name__} transitorio, reintento", file=sys.stderr)
+                print(f"  ! ishares scrape {label}: {type(e).__name__} transitorio, reintento", file=sys.stderr)
                 _nap(ISHARES_RETRY_WAIT)
                 continue
-            print(f"  ! ishares scrape failed for {isin}: {e} -- falling back to proxy", file=sys.stderr)
-            return None
-    return None
+            break
+    if not isinstance(err, TimeoutError):      # un fallo por falta de presupuesto no es de la página: no se recuerda
+        _ISHARES_PAGES[product_url] = err
+    raise err
+
+
+def fetch_ishares_nav(product_url, isin):
+    """
+    Scrapes the exact Class S NAV straight off the fund's public ishares.com product
+    page. Returns None (never raises) if the page layout doesn't match what we expect,
+    so callers can fall back to the proxy-ETF approximation instead of crashing.
+    """
+    try:
+        return parse_ishares_nav(_ishares_plain(product_url, isin), isin)
+    except Exception as e:
+        print(f"  ! ishares scrape failed for {isin}: {e} -- falling back to proxy", file=sys.stderr)
+        return None
 
 
 # La unidad viene en cualquier capitalización ("EUR 1.20 B", "USD 29.5 bn", "EUR 820.50 M"). Sin unidad, iShares escribe el número
@@ -1517,15 +1546,8 @@ def fetch_ishares_fund_facts(product_url):
     Scrapes the 'Key Facts' block of the fund's ishares.com product page (scan_fund_facts). Best-effort and resilient --
     any field that isn't found (or if the page structure changes) is simply left out, never raises.
     """
-    if _budget_exhausted():
-        return {}
     try:
-        headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
-        res = requests.get(product_url, headers=headers, timeout=_net_timeout(20))
-        res.raise_for_status()
-        plain = re.sub(r'<[^>]+>', ' ', res.text)
-        plain = re.sub(r'\s+', ' ', plain)
-        return scan_fund_facts(plain)
+        return scan_fund_facts(_ishares_plain(product_url, product_url))
     except Exception as e:
         print(f"  ! fund facts scrape failed for {product_url}: {e}", file=sys.stderr)
         return {}

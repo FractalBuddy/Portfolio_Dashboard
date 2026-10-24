@@ -66,5 +66,5 @@ def _estado_yahoo_limpio(monkeypatch):
     """El estado de Yahoo (racha de fallos, 429, ritmo) es global del módulo, como en un run real: cada test parte de cero."""
     import fetch_market_data as fm
     for name, value in (("_YF_FAIL_STREAK", 0), ("_YF_429_CONSECUTIVE", 0), ("_YF_429_TOTAL", 0), ("_YF_ABANDONED", False),
-                        ("_YF_REQS", 0), ("_YF_LAST_REQ", 0.0)):
-        monkeypatch.setattr(fm, name, value, raising=False)
+                        ("_YF_REQS", 0), ("_YF_LAST_REQ", 0.0), ("_ISHARES_PAGES", {}), ("_BUDGET_HIT", False)):
+        monkeypatch.setattr(fm, name, dict(value) if isinstance(value, dict) else value, raising=False)
