@@ -45,8 +45,10 @@ jobs:
           python-version: '3.14'
           cache: pip
 
-      - name: Install dependencies
-        run: pip install -r requirements.txt
+      # Este es el job que ejecuta código de terceros con FRED_API_KEY en el entorno: se instala SOLO lo fijado en requirements.txt
+      # (versiones exactas + hashes, generado desde requirements.in) y pip rechaza cualquier archivo cuyo hash no coincida (BE-07).
+      - name: Install dependencies (hash-pinned)
+        run: pip install --require-hashes --no-deps -r requirements.txt
 
       # Feed publicado anteriormente (repo público, sin token). Solo lo usa el script para reutilizar tipos/IPC
       # (marcados stale) si FRED falla. Primer run / rama borrada (404): '{}'. Cualquier otro fallo: '{}' + aviso (la decisión es del job `publish`).

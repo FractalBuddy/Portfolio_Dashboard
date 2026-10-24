@@ -28,6 +28,7 @@ Código de salida: 0 = publicable, 1 = no publicar.
 """
 import argparse
 import datetime as dt
+import html
 import json
 import math
 import os
@@ -227,6 +228,180 @@ def _nav_date(f):
     except ValueError:
         pass
     return None
+
+
+# ---------------------------------------------------------------------------------------------------------------------------
+# Esquema del feed (BE-07). El job `fetch` ejecuta dependencias de terceros: un paquete comprometido podría fabricar un data.json que
+# pase las reglas numéricas de arriba y añada claves o textos nuevos (HTML, blobs) que el dashboard acabase pintando. Por eso, además de
+# los números, se valida la FORMA: lista blanca de claves por sección, regex por tipo de string, tope de longitud por campo y nada que
+# parezca marcado. Todo lo que no esté aquí bloquea la publicación; si el backend añade un campo, se añade también aquí (y su test).
+# ---------------------------------------------------------------------------------------------------------------------------
+_PRICE_ROW = frozenset({"symbol", "name", "price", "change_pct", "change_pct_7d", "volume_ratio", "sparkline", "currency",
+                        "price_unit_divisor", "as_of", "region", "stale", "stale_since"})
+_HISTORY_ROW = frozenset({"history", "intraday", "history_stale"})
+_STOCK_EXTRA = frozenset({
+    "sector", "industry", "employees", "market_cap", "enterprise_value", "cap_currency", "pe_trailing", "pe_forward", "ev_ebitda",
+    "profit_margin", "operating_margin", "beta", "insiders_pct", "dividend_yield", "dividend_rate", "dividend_5y_avg", "ebitda",
+    "quarterly_earnings_growth", "total_cash", "total_debt", "financial_currency", "peg", "ps", "pb", "ev_revenue", "gross_margin",
+    "revenue_growth", "roe", "free_cashflow", "target_mean", "analyst_count", "recommendation_mean", "market_cap_usd", "fcf_yield",
+    "profile_as_of"})
+_FACTS_KEYS = frozenset({
+    "class_launch_date", "class_inception_date", "fund_launch_date", "class_aum", "fund_aum", "benchmark", "management_company",
+    "morningstar_category", "ongoing_charges_pct", "management_fee_pct", "performance_fee_pct", "initial_charge_pct", "base_currency",
+    "share_class_currency", "use_of_income", "structure", "methodology", "holdings", "domicile"})
+_ANALYTICS_KEYS = frozenset({"annual_returns", "period_returns", "volatility"})
+_NEWS_KEYS = frozenset({"title", "link", "source", "published"})
+_STALE = frozenset({"stale", "stale_since"})
+
+# (lista, claves permitidas en sus filas). `facts` y `analytics` las llevan `funds` y `your_funds`.
+_LIST_SCHEMA = {
+    "indices": _PRICE_ROW | _HISTORY_ROW,
+    "stocks": _PRICE_ROW | _HISTORY_ROW | _STOCK_EXTRA,
+    "funds": _PRICE_ROW | _HISTORY_ROW | {"facts", "analytics"},
+    "commodities": _PRICE_ROW | _HISTORY_ROW,
+    "forex": _PRICE_ROW | _HISTORY_ROW,
+    "heatmap": _PRICE_ROW,
+    "sector_heatmap": _PRICE_ROW,
+    "your_funds": frozenset({"isin", "name", "facts", "analytics", "history", "history_scaled", "price", "change_pct", "nav_date",
+                             "nav_date_iso", "nav_stale", "wk52_low", "wk52_high", "proxy_symbol", "source"}),
+    "rates": frozenset({"series", "name", "value", "prev", "date"}) | _STALE,
+    "cpi": frozenset({"date", "value"}),
+}
+_TOP_KEYS = frozenset(set(_LIST_SCHEMA) | {"generated_at", "cpi_meta", "news", "benchmarks", "market_mood", "staking", "fx_usd", "health"})
+_BAR_KEYS = frozenset({"date", "close", "open", "high", "low", "volume"})
+_DICT_SCHEMA = {   # secciones de un solo objeto: ruta -> claves permitidas
+    "cpi_meta": frozenset({"source", "series", "last_date", "stale", "reused_from_previous", "stale_since"}),
+    "news": frozenset({"general", "positions"}),
+    "benchmarks": frozenset({"sp500", "msci_world"}),
+    "market_mood": frozenset({"vix", "vix_50ma", "crypto_fear_greed", "stock_fear_greed", "market_momentum", "put_call",
+                              "junk_bond_demand", "safe_haven_demand", "altcoin_season"}),
+    "market_mood.vix": frozenset({"value", "change_pct"}),
+    "market_mood.vix_50ma": frozenset({"value"}),
+    "market_mood.crypto_fear_greed": frozenset({"value", "classification", "timestamp"}),
+    "market_mood.stock_fear_greed": frozenset({"value", "rating"}),
+    "market_mood.market_momentum": frozenset({"value", "rating"}),
+    "market_mood.junk_bond_demand": frozenset({"value", "rating"}),
+    "market_mood.safe_haven_demand": frozenset({"value", "rating"}),
+    "market_mood.put_call": frozenset({"value", "rating", "ratio"}),
+    "market_mood.altcoin_season": frozenset({"value", "outperforming", "total", "window_days", "btc_change_pct", "source"}) | _STALE,
+    "staking": frozenset({"eth_lido"}),
+    "staking.eth_lido": frozenset({"apr", "apr_sma7", "as_of", "source"}) | _STALE,
+    "health": frozenset({"stale_symbols", "history_reused", "profiles", "fx_stale"}),
+    "health.profiles": frozenset({"stocks", "with_data", "valuation_table", "oldest_days", "older_than_7d"}),
+}
+_SYMBOL_RE = re.compile(r"^[A-Za-z0-9.^=\-]{1,15}$")
+_ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
+_TAGLIKE_RE = re.compile(r"<\s*[/!?]?\s*[A-Za-z]")
+_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
+MAX_STR_LEN = 200                # tope por defecto de un string del feed (nombres, sectores, fichas...)
+_MAX_STR_LEN = {"link": 1000, "title": 300}
+_SYMBOL_FIELDS = frozenset({"symbol", "proxy_symbol"})
+
+
+def _text_problem(key, v):
+    """Motivo por el que un string del feed no es admisible, o None. Sin marcado (ni siquiera tras des-escapar entidades), sin
+    caracteres de control y con tope de longitud por campo."""
+    if len(v) > _MAX_STR_LEN.get(key, MAX_STR_LEN):
+        return "demasiado largo (%d)" % len(v)
+    if _CONTROL_RE.search(v):
+        return "caracteres de control"
+    if _TAGLIKE_RE.search(v) or _TAGLIKE_RE.search(html.unescape(v)):
+        return "contiene marcado"
+    return None
+
+
+def _schema_problems(d):
+    """Lista de textos (uno por defecto, sin repetir) con lo que sobra o está mal formado en el feed: claves fuera de la lista blanca,
+    strings con marcado/control/longitud excesiva y campos con formato fijo (símbolo, ISIN, enlace) inválidos."""
+    out, seen = [], set()
+
+    def add(msg):
+        if msg not in seen:
+            seen.add(msg)
+            out.append(msg)
+
+    def keys(obj, allowed, where):
+        if not isinstance(obj, dict):
+            return
+        extra = sorted(str(k) for k in obj if k not in allowed)
+        if extra:
+            add("clave(s) no permitida(s) en %s: %s" % (where, extra[:4]))
+
+    def text(key, v, where):
+        why = _text_problem(key, v)
+        if why:
+            add("%s.%s: %s" % (where, key, why))
+        elif key in _SYMBOL_FIELDS and not _SYMBOL_RE.match(v):
+            add("%s.%s con formato de símbolo inválido" % (where, key))
+        elif key == "isin" and not _ISIN_RE.match(v):
+            add("%s.isin con formato inválido" % where)
+        elif key == "link" and not v.lower().startswith(("http://", "https://")):
+            add("%s.link no es http(s)" % where)
+
+    def scan(obj, where, depth=0):
+        """Todos los strings del subárbol (claves incluidas): no hay campo del feed que pueda llevar marcado."""
+        if depth > 8:
+            add("%s: anidamiento excesivo" % where)
+        elif isinstance(obj, dict):
+            for k, v in obj.items():
+                if not isinstance(k, str) or _text_problem("key", k):
+                    add("%s: clave ilegible o con marcado" % where)
+                elif isinstance(v, str):
+                    text(k, v, where)
+                else:
+                    scan(v, where, depth + 1)
+        elif isinstance(obj, list):
+            for v in obj:
+                if isinstance(v, str):
+                    text("item", v, where)
+                elif isinstance(v, (dict, list)):
+                    scan(v, where, depth + 1)
+
+    keys(d, _TOP_KEYS, "raíz")
+    for name, allowed in _LIST_SCHEMA.items():
+        for row in _rows(d, name):
+            keys(row, allowed, name)
+            for b in (row.get("history") if isinstance(row.get("history"), list) else []):
+                keys(b, _BAR_KEYS, "%s.history" % name)
+            for b in (row.get("intraday") if isinstance(row.get("intraday"), list) else []):
+                keys(b, frozenset({"time", "close"}), "%s.intraday" % name)
+            if isinstance(row.get("facts"), dict):
+                keys(row["facts"], _FACTS_KEYS, "%s.facts" % name)
+            an = row.get("analytics")
+            if isinstance(an, dict):
+                keys(an, _ANALYTICS_KEYS, "%s.analytics" % name)
+                keys(an.get("period_returns"), frozenset({"ytd", "1y", "2y", "3y", "5y", "10y"}), "%s.analytics.period_returns" % name)
+                keys(an.get("volatility"), frozenset({"12m", "3y", "5y"}), "%s.analytics.volatility" % name)
+                ar = an.get("annual_returns")
+                if isinstance(ar, dict) and any(not re.fullmatch(r"\d{4}", str(k)) for k in ar):
+                    add("%s.analytics.annual_returns con claves que no son años" % name)
+    for path, allowed in _DICT_SCHEMA.items():
+        node = d
+        for part in path.split("."):
+            node = node.get(part) if isinstance(node, dict) else None
+        keys(node, allowed, path)
+    news = d.get("news") if isinstance(d.get("news"), dict) else {}
+    for k in ("general", "positions"):
+        for n in (news.get(k) if isinstance(news.get(k), list) else []):
+            keys(n, _NEWS_KEYS | ({"symbol", "asset_name"} if k == "positions" else frozenset()), "news.%s" % k)
+    for k in ("sp500", "msci_world"):
+        for b in ((d.get("benchmarks") or {}).get(k) if isinstance(d.get("benchmarks"), dict) else None) or []:
+            keys(b, frozenset({"date", "close"}), "benchmarks.%s" % k)
+    fx = d.get("fx_usd")
+    if isinstance(fx, dict) and any(not re.fullmatch(r"[A-Z]{3}", str(k)) for k in fx):
+        add("fx_usd con claves que no son divisas")
+    # Strings: solo los de las secciones de texto (no las series numéricas, que son decenas de miles de barras sin texto libre).
+    for name in list(_LIST_SCHEMA) + ["cpi_meta", "news", "market_mood", "staking", "health"]:
+        node = d.get(name)
+        if isinstance(node, list):
+            for row in node:
+                if isinstance(row, dict):
+                    scan({k: v for k, v in row.items() if k not in ("history", "intraday", "sparkline")}, name)
+        elif isinstance(node, (dict, list)):
+            scan(node, name)
+    if isinstance(d.get("generated_at"), str):
+        text("generated_at", d["generated_at"], "raíz")
+    return out
 
 
 def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, today=None,
@@ -434,6 +609,8 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
     links_ok = all(str(n.get("link", "")).startswith(("http://", "https://"))
                    for k in news for n in news[k] if isinstance(n, dict)) if news else True
     need(links_ok, "enlace de noticia no http(s)")
+    schema_bad = _schema_problems(d)
+    need(not schema_bad, "feed fuera del esquema (%d problemas): %s" % (len(schema_bad), "; ".join(schema_bad[:5])))
     need(m.get("generated_at") == d.get("generated_at"), "meta.json y data.json no coinciden (generated_at)")
     need(m.get("data_bytes") == data_bytes, "meta.data_bytes (%s) no coincide con el tamaño real (%s)" % (m.get("data_bytes"), data_bytes))
     need(data_bytes < MAX_DATA_BYTES, "data.json demasiado grande para jsDelivr (%s bytes)" % data_bytes)

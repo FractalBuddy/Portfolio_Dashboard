@@ -30,7 +30,9 @@ jobs:
       # Dependencias reales del script (los tests importan fetch_market_data) + herramientas de CI con versión fija
       # (PyYAML: lo usan los tests de los workflows).
       - name: Install dependencies
-        run: pip install -r requirements.txt "pytest==9.1.1" "ruff==0.15.11" "PyYAML==6.0.3"
+        run: |
+          pip install --require-hashes --no-deps -r requirements.txt
+          pip install "pytest==9.1.1" "ruff==0.15.11" "PyYAML==6.0.3"
 
       - name: Ruff (solo reglas F de pyflakes)
         run: ruff check --select F scripts tests

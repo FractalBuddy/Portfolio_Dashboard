@@ -413,3 +413,41 @@ def test_BE06_el_sanity_check_recibe_expect_prev():
     run = step(load("update-data.yml"), "publish", "Sanity-check feed")
     assert "EXPECT_PREV" in run["env"] or "EXPECT_PREV" in run["run"]
     assert "|| echo '{}'" not in (WF / "update-data.yml").read_text(encoding="utf-8")
+
+
+# ------------------------------------------------------------------ BE-07: lockfile con hashes en el job con secreto
+def _lock_pins():
+    txt = (ROOT / "requirements.txt").read_text(encoding="utf-8")
+    blocks = re.split(r"\n(?=[A-Za-z0-9_.\-]+==)", txt.strip())
+    return {re.match(r"([A-Za-z0-9_.\-]+)==", b).group(1).lower().replace("_", "-"): b for b in blocks if re.match(r"[A-Za-z0-9_.\-]+==", b)}
+
+
+def test_BE07_fetch_instala_solo_lo_fijado_con_hashes():
+    run = step(load("update-data.yml"), "fetch", "Install dependencies (hash-pinned)")["run"]
+    assert "--require-hashes" in run and "--no-deps" in run and "-r requirements.txt" in run
+    fetch_text = json.dumps(load("update-data.yml")["jobs"]["fetch"])
+    assert not re.search(r"pip install(?![^\"]*--require-hashes)", fetch_text)       # ninguna otra instalación sin hashes en ese job
+
+
+def test_BE07_requirements_txt_tiene_hash_en_cada_paquete_y_cubre_requirements_in():
+    pins = _lock_pins()
+    assert len(pins) >= 10
+    for name, block in pins.items():
+        assert re.search(r"--hash=sha256:[0-9a-f]{64}", block), name
+    directas = [l for l in (ROOT / "requirements.in").read_text(encoding="utf-8").splitlines() if l.strip() and not l.lstrip().startswith("#")]
+    assert {"yfinance", "requests", "feedparser"} <= {re.split(r"[<>=!~ ]", l)[0].lower() for l in directas}
+    for l in directas:
+        m = re.match(r"([A-Za-z0-9_.\-]+)>=([\d.]+),<([\d.]+)", l)
+        assert m, l
+        v = re.search(re.escape(m.group(1).lower()) + r"==([\d.]+)", "\n".join(b.split("\\")[0].lower() for b in pins.values()))
+        assert v, m.group(1)
+        t = lambda s: tuple(int(x) for x in s.split("."))        # noqa: E731
+        assert t(m.group(2)) <= t(v.group(1)) < t(m.group(3)), l   # el pin respeta el rango declarado
+
+
+def test_BE07_la_ci_no_mezcla_herramientas_sin_hash_con_requirements_txt():
+    # con hashes en requirements.txt, pip exige hash en TODO lo que se instala en esa misma orden: las herramientas van aparte.
+    run = step(load("ci.yml"), "checks", "Install dependencies")["run"]
+    lineas = [l.strip() for l in run.splitlines() if l.strip().startswith("pip install")]
+    con_req = [l for l in lineas if "requirements.txt" in l]
+    assert con_req and all("--require-hashes" in l and "pytest" not in l and "ruff" not in l for l in con_req)
