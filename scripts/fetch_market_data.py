@@ -531,6 +531,10 @@ def fetch_full_history(symbol, period="max"):
         return []
 
 
+_INTRADAY_TZ = {}   # símbolo -> zona horaria IANA de las barras de su último fetch_intraday_history (la lee attach_histories)
+_TZ_NAME_RE = re.compile(r"^(?:UTC|[A-Za-z_]+(?:/[A-Za-z0-9_+\-]+){1,2})$")
+
+
 def fetch_intraday_history(symbol):
     """
     Real intraday bars for the 1D chart (5-minute bars, including pre/post market),
@@ -543,6 +547,10 @@ def fetch_intraday_history(symbol):
         hist = hist.dropna(subset=["Close"])
         if hist.empty:
             return []
+        _INTRADAY_TZ.pop(symbol, None)
+        tz = str(getattr(hist.index, "tz", None) or "")      # yfinance deja el índice en la hora local del mercado
+        if _TZ_NAME_RE.match(tz):
+            _INTRADAY_TZ[symbol] = tz
         return [
             {"time": idx.strftime("%Y-%m-%d %H:%M"), "close": round(float(row["Close"]), 4)}
             for idx, row in hist.iterrows()
@@ -568,7 +576,12 @@ def attach_histories(items, prev_rows=None):
                 s["history_stale"] = True
                 print(f"  ! {s['symbol']}: sin histórico hoy, se reutiliza el del feed anterior (history_stale)", file=sys.stderr)
         s["history"] = h
+        _INTRADAY_TZ.pop(s["symbol"], None)
         s["intraday"] = fetch_intraday_history(s["symbol"])
+        # `time` de cada barra es la hora local del mercado, sin zona: `intraday_tz` (IANA, p. ej. America/New_York) dice cuál, para que el
+        # cliente pueda alinear mercados distintos (BE-20). Aditivo: el formato de `time` no cambia.
+        if s["intraday"] and _INTRADAY_TZ.get(s["symbol"]):
+            s["intraday_tz"] = _INTRADAY_TZ[s["symbol"]]
     return items
 
 

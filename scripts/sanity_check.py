@@ -238,7 +238,7 @@ def _nav_date(f):
 # ---------------------------------------------------------------------------------------------------------------------------
 _PRICE_ROW = frozenset({"symbol", "name", "price", "change_pct", "change_pct_7d", "volume_ratio", "sparkline", "currency",
                         "price_unit_divisor", "as_of", "region", "stale", "stale_since"})
-_HISTORY_ROW = frozenset({"history", "intraday", "history_stale"})
+_HISTORY_ROW = frozenset({"history", "intraday", "history_stale", "intraday_tz"})
 _STOCK_EXTRA = frozenset({
     "sector", "industry", "employees", "market_cap", "enterprise_value", "cap_currency", "pe_trailing", "pe_forward", "ev_ebitda",
     "profit_margin", "operating_margin", "beta", "insiders_pct", "dividend_yield", "dividend_rate", "dividend_5y_avg", "ebitda",
@@ -291,6 +291,7 @@ _DICT_SCHEMA = {   # secciones de un solo objeto: ruta -> claves permitidas
 }
 _SYMBOL_RE = re.compile(r"^[A-Za-z0-9.^=\-]{1,15}$")
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_TZ_RE = re.compile(r"^(?:UTC|[A-Za-z_]+(?:/[A-Za-z0-9_+\-]+){1,2})$")
 _ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
 _TAGLIKE_RE = re.compile(r"<\s*[/!?]?\s*[A-Za-z]")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
@@ -334,6 +335,8 @@ def _schema_problems(d):
             add("%s.%s: %s" % (where, key, why))
         elif key in ("as_of", "stale_since") and not _DATE_RE.match(v):
             add("%s.%s no es una fecha YYYY-MM-DD" % (where, key))
+        elif key == "intraday_tz" and not _TZ_RE.match(v):
+            add("%s.intraday_tz no es una zona horaria IANA" % where)
         elif key in _SYMBOL_FIELDS and not _SYMBOL_RE.match(v):
             add("%s.%s con formato de símbolo inválido" % (where, key))
         elif key == "isin" and not _ISIN_RE.match(v):

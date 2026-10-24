@@ -468,3 +468,63 @@ def test_BE17_build_your_funds_pide_cada_ficha_una_vez(monkeypatch, sleeps):
     out = fm.build_your_funds(None)
     assert out[0]["source"] == "ishares_nav_scrape" and out[0]["facts"]["ongoing_charges_pct"] == 0.06
     assert n["n"] == 1
+
+
+# ------------------------------------------------------------------ BE-20: zona horaria del intradía, cron y comentario de concurrency
+def _intradia(tz, n=6):
+    import pandas as pd
+    idx = pd.date_range("2026-10-22 09:30", periods=n, freq="5min", tz=tz) if tz else pd.date_range("2026-10-22 09:30", periods=n, freq="5min")
+    return pd.DataFrame({"Open": [1.0] * n, "High": [1.0] * n, "Low": [1.0] * n, "Close": [10.0 + i for i in range(n)], "Volume": [1.0] * n}, index=idx)
+
+
+@pytest.mark.parametrize("tz", ["America/New_York", "Asia/Tokyo", "Europe/London", "UTC"])
+def test_BE20_el_intradia_publica_su_zona_horaria_y_no_cambia_el_formato_de_time(monkeypatch, tz):
+    monkeypatch.setattr(fm, "fetch_full_history", lambda s: [{"date": "2026-10-22", "close": 1.0}])
+    monkeypatch.setattr(fm, "yf_history", lambda *a, **k: _intradia(tz))
+    row = fm.attach_histories([{"symbol": "^X"}])[0]
+    assert row["intraday_tz"] == tz
+    assert row["intraday"][0]["time"] == "2026-10-22 09:30"          # la hora local del mercado, igual que antes
+    assert set(row["intraday"][0]) == {"time", "close"}
+
+
+@pytest.mark.parametrize("desfase", [None, 9])
+def test_BE20_sin_zona_utilizable_no_se_inventa(monkeypatch, desfase):
+    """Índice sin zona, o con un desfase fijo (sin nombre IANA): no se publica `intraday_tz`."""
+    import datetime as dtm
+    monkeypatch.setattr(fm, "fetch_full_history", lambda s: [{"date": "2026-10-22", "close": 1.0}])
+    df = _intradia(None)
+    if desfase is not None:
+        df.index = df.index.tz_localize(dtm.timezone(dtm.timedelta(hours=desfase)))
+    monkeypatch.setattr(fm, "yf_history", lambda *a, **k: df)
+    row = fm.attach_histories([{"symbol": "^X"}])[0]
+    assert "intraday_tz" not in row and row["intraday"]
+
+
+def test_BE20_sin_intradia_no_hay_zona(monkeypatch):
+    monkeypatch.setattr(fm, "fetch_full_history", lambda s: [])
+    monkeypatch.setattr(fm, "fetch_intraday_history", lambda s: [])
+    assert "intraday_tz" not in fm.attach_histories([{"symbol": "A"}])[0]
+
+
+def test_BE20_la_zona_de_un_simbolo_no_se_hereda_al_siguiente(monkeypatch):
+    monkeypatch.setattr(fm, "fetch_full_history", lambda s: [{"date": "2026-10-22", "close": 1.0}])
+    dfs = {"^GSPC": _intradia("America/New_York"), "^N225": _intradia("Asia/Tokyo"), "^VACIO": _intradia("UTC").iloc[0:0]}
+    monkeypatch.setattr(fm, "yf_history", lambda s, *a, **k: dfs[s])
+    rows = fm.attach_histories([{"symbol": s} for s in ("^GSPC", "^N225", "^VACIO")])
+    assert [r.get("intraday_tz") for r in rows] == ["America/New_York", "Asia/Tokyo", None]
+
+
+def test_BE20_el_cron_de_la_tarde_es_posterior_al_cierre_de_wall_street_en_invierno():
+    # NYSE cierra 16:00 ET: 20:00 UTC en verano, 21:00 UTC en invierno. A las 20:17 la barra diaria de un día de invierno era parcial.
+    from test_workflows import load
+    wf = load("update-data.yml")
+    triggers = wf.get("on", wf.get(True))
+    horas = sorted({int(h) for c in triggers["schedule"] for h in c["cron"].split()[1].split(",")})
+    assert len(horas) == 4 and horas[-1] >= 21 and all(c["cron"].split()[0] == "17" for c in triggers["schedule"])
+
+
+def test_BE20_el_comentario_de_concurrency_no_promete_una_cola():
+    from test_workflows import WF, load
+    text = (WF / "update-data.yml").read_text(encoding="utf-8")
+    assert "Queue instead of cancel" not in text and "NO es una cola" in text
+    assert load("update-data.yml")["concurrency"]["cancel-in-progress"] is False

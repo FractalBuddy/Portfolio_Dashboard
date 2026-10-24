@@ -773,3 +773,13 @@ def test_BE15_el_esquema_acepta_as_of_y_stale_en_mood_y_rechaza_fechas_raras():
     d["market_mood"]["stock_fear_greed"]["as_of"] = "2026-10-05"
     d["market_mood"]["stock_fear_greed"]["otro"] = 1
     assert run(d, m, None)[0]
+
+
+# ====================================================================== BE-20: intraday_tz
+def test_BE20_intraday_tz_valida():
+    d, m = healthy()
+    d["indices"][0]["intraday_tz"] = "America/New_York"
+    assert run(d, m, None)[0] == []
+    for malo in ("Nueva York", "<b>", "UTC+09:00", "x" * 50):
+        d["indices"][0]["intraday_tz"] = malo
+        assert run(d, m, None)[0], malo
