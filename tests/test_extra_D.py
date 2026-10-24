@@ -382,12 +382,12 @@ def test_D31_nan_literal_confirmado_con_node(tmp_path):
     assert json.loads('{"a":NaN}')["a"] != json.loads('{"a":NaN}')["a"]     # Python sí lo traga: el validador no lo ve
 
 
-def test_D32_historico_con_cierre_cero_o_negativo_no_se_detecta():
+def test_D32_historico_con_cierre_cero_o_negativo_se_detecta():
     d, m = healthy()
     d["stocks"][0]["history"][100]["close"] = 0
     d["stocks"][1]["history"][100]["close"] = -5
     errs, _ = sc_run(d, m, None)
-    assert errs == []      # hueco: ninguna regla mira los cierres del histórico (solo fechas y cantidad)
+    assert any("close" in e and "S0" in e and "S1" in e for e in errs)      # BE-05: antes era un hueco (errs == [])
 
 
 def test_D33_generated_at_antiguo_pasa_si_meta_coincide():
@@ -397,12 +397,12 @@ def test_D33_generated_at_antiguo_pasa_si_meta_coincide():
     assert errs == []      # no hay regla «generated_at reciente / mayor que el del feed anterior»
 
 
-def test_D34_simbolo_duplicado_y_futuro_pasan():
+def test_D34_simbolo_duplicado_pasa_y_barra_futura_bloquea():
     d, m = healthy()
     d["stocks"][1]["symbol"] = d["stocks"][0]["symbol"]
+    assert sc_run(d, m, None)[0] == []      # hueco menor que sigue abierto: los símbolos duplicados no se validan
     d["stocks"][2]["history"][-1]["date"] = (TODAY + dt.timedelta(days=400)).isoformat()
-    errs, _ = sc_run(d, m, None)
-    assert errs == []      # hueco menor: duplicados y barras en el futuro no se validan
+    assert any("futura" in e and "S2" in e for e in sc_run(d, m, None)[0])      # BE-05: antes pasaba
 
 
 def test_D35_limites_exactos_de_tamano():

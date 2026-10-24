@@ -17,6 +17,8 @@ Uso:
 
 Variables de entorno opcionales:
     FRED_KEY_SET=true             la clave de FRED está configurada: se exigen tipos e IPC.
+    EXPECT_PREV=true              la rama `data` existe: si el feed anterior no se pudo bajar o leer, NO se
+                                  trata como primer run (bloquea; con SANITY_ALLOW_REGRESSION=true avisa con Alert).
     SANITY_ALLOW_REGRESSION=true  las reglas de REGRESIÓN pasan a ser avisos (para cambios
                                   intencionados del universo de símbolos; las absolutas siguen
                                   bloqueando). Se activa con la entrada `allow_regression` del
@@ -27,6 +29,7 @@ Código de salida: 0 = publicable, 1 = no publicar.
 import argparse
 import datetime as dt
 import json
+import math
 import os
 import re
 import statistics
@@ -61,6 +64,17 @@ PROFILE_COVERAGE_DROP = 0.6      # aviso si el nº de acciones con perfil cae po
 NAV_STALE_DAYS = 6               # edad > 6 días naturales (>= 7): NAV «antiguo» -> aviso en el log (igual que el nav_stale del backend)
 NAV_ALERT_DAYS = 8               # >= 8 días en CUALQUIER fondo (o todos «antiguos»): ya no es un festivo, es una página congelada -> Alert (/fail)
 NAV_FUTURE_DAYS = 1              # fecha del NAV más allá de «mañana»: no es creíble
+
+# Series (BE-05). Una barra con fecha a más de «mañana» (huso horario) es imposible; antes de 1900 no hay datos de Yahoo.
+MAX_FUTURE_DAYS = 1
+MIN_BAR_DATE = dt.date(1900, 1, 1)
+MAX_UNORDERED_SYMBOLS = 2        # fechas repetidas/desordenadas: hasta 2 símbolos solo avisan (un tropiezo de Yahoo); más, bloquea
+# Salto de nivel respecto al feed anterior: un cambio de unidad (GBp<->GBP, x100) o un reescalado cae muy fuera de cualquier
+# movimiento real entre dos runs. Un split legítimo (10:1) también lo dispara: es una regla de REGRESIÓN, se desbloquea a mano
+# con allow_regression.
+MAX_PRICE_JUMP = 5.0
+# Divisas cotizadas en subunidad (copia a propósito de fetch_market_data.PRICE_UNIT_DIVISORS: este script es solo-stdlib; un test las compara).
+SUBUNIT_CURRENCIES = frozenset({"GBp", "GBX", "ZAc", "ILA"})
 
 # Límites de plausibilidad de los campos de perfil de las acciones (más holgados que los del parser: aquí solo se
 # atrapa un fetch roto o manipulado, no un dato raro de Yahoo). El job `publish` no se fía de la salida de `fetch`.
@@ -109,6 +123,69 @@ def _num(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
 
+def _bar_date(b):
+    """Fecha (date) de una barra: solo 'YYYY-MM-DD' en texto. None si falta, no es texto o no es una fecha real."""
+    raw = b.get("date")
+    if not (isinstance(raw, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", raw)):
+        return None
+    try:
+        return dt.date.fromisoformat(raw)
+    except ValueError:
+        return None
+
+
+def _series_problems(x, today, allow_non_positive=False):
+    """Revisa el histórico de un símbolo barra a barra. Devuelve (close_malo, fecha_mala, fecha_futura, desordenado).
+    `close` debe ser un número finito y > 0 (en materias primas basta con finito: los futuros pueden cotizar negativo,
+    el WTI cerró en -37,63 el 2020-04-20). Las fechas deben ser ISO, razonables y estrictamente crecientes."""
+    bad_close = bad_date = future = unordered = False
+    limit = today + dt.timedelta(days=MAX_FUTURE_DAYS)
+    last = None
+    for b in _hist(x):
+        c = b.get("close")
+        if not _num(c) or not math.isfinite(c) or (c <= 0 and not allow_non_positive):
+            bad_close = True
+        v = _bar_date(b)
+        if v is None or v < MIN_BAR_DATE:
+            bad_date = True
+            continue
+        if v > limit:
+            future = True
+        if last is not None and v <= last:
+            unordered = True
+        last = v
+    return bad_close, bad_date, future, unordered
+
+
+def _last_close(x):
+    """Cierre de la barra más reciente (por fecha) con fecha legible y close finito > 0, o None."""
+    best = None
+    for b in _hist(x):
+        v, c = _bar_date(b), b.get("close")
+        if v is not None and _num(c) and math.isfinite(c) and c > 0 and (best is None or v > best[0]):
+            best = (v, c)
+    return best[1] if best else None
+
+
+def _jumped(new, old):
+    """True si el nivel cambió más de MAX_PRICE_JUMP veces (arriba o abajo). Con algún valor no utilizable no opina."""
+    if not (_num(new) and _num(old) and math.isfinite(new) and math.isfinite(old) and new > 0 and old > 0):
+        return False
+    r = new / old
+    return r > MAX_PRICE_JUMP or r < 1.0 / MAX_PRICE_JUMP
+
+
+def _bad_price_unit(x):
+    """`currency` / `price_unit_divisor` (BE-01): si una fila trae alguno, deben venir los dos y ser coherentes
+    (100 para las divisas en subunidad, 1 para el resto). Su ausencia no se exige (filas arrastradas de feeds anteriores)."""
+    if "currency" not in x and "price_unit_divisor" not in x:
+        return False
+    cur, div = x.get("currency"), x.get("price_unit_divisor")
+    if not (isinstance(cur, str) and re.fullmatch(r"[A-Za-z]{3,4}", cur)):
+        return True
+    return not (type(div) is int and div == (100 if cur in SUBUNIT_CURRENCIES else 1))
+
+
 # Mismos meses y mismas reglas que fetch_market_data._parse_nav_date (copia a propósito: este script es solo-stdlib y no importa el otro;
 # un test comprueba que ambos parsers coinciden). Prefijo >= 3 letras de un mes en inglés o español, sin ambigüedad.
 _MES_NOMBRES = {
@@ -153,7 +230,7 @@ def _nav_date(f):
 
 
 def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, today=None,
-          allow_regression=False):
+          allow_regression=False, expect_prev=False):
     """Devuelve (errores, avisos): listas de textos de una línea. Sin errores = publicable."""
     errors, warnings = [], []
     today = today or dt.datetime.now(dt.timezone.utc).date()
@@ -292,6 +369,8 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
                 dt.date.fromisoformat(str(x["profile_as_of"])[:10])
             except ValueError:
                 bad_prof.append("%s.profile_as_of" % x.get("symbol"))
+    bad_unit = [x.get("symbol") for k in SYMBOL_LISTS for x in _rows(d, k) if _bad_price_unit(x)]
+    need(not bad_unit, "currency/price_unit_divisor incoherentes o malformados: %s" % bad_unit[:6])
     need(not bad_prof, "perfil de acción con campos inverosímiles o de tipo erróneo: %s" % bad_prof[:6])
     # Tipos de cambio a USD (backend: comparar capitalizaciones y flujos de caja de acciones en distintas divisas).
     fx = d.get("fx_usd")
@@ -360,6 +439,26 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
     need(data_bytes < MAX_DATA_BYTES, "data.json demasiado grande para jsDelivr (%s bytes)" % data_bytes)
     need(data_bytes >= MIN_DATA_BYTES, "data.json sospechosamente pequeño (%s bytes < %s)" % (data_bytes, MIN_DATA_BYTES))
 
+    # Series barra a barra (BE-05): close finito > 0, fechas ISO razonables y crecientes. Sin esto un 0/None/-5 o una barra a +400 días
+    # llegaban al dashboard con luz verde (y la barra futura además enmascaraba un histórico congelado).
+    bad_close, bad_date, future_bar, unordered = [], [], [], []
+    for k in HISTORY_LISTS:
+        for x in _rows(d, k):
+            c_, d_, f_, o_ = _series_problems(x, today, allow_non_positive=(k == "commodities"))
+            sym = x.get("symbol")
+            for flag, lst in ((c_, bad_close), (d_, bad_date), (f_, future_bar), (o_, unordered)):
+                if flag:
+                    lst.append(sym)
+    need(not bad_close, "histórico con close nulo, no numérico o no positivo: %s" % bad_close[:6])
+    need(not bad_date, "histórico con fecha de barra ilegible o anterior a %d: %s" % (MIN_BAR_DATE.year, bad_date[:6]))
+    need(not future_bar, "histórico con barra de fecha futura (> hoy+%d): %s" % (MAX_FUTURE_DAYS, future_bar[:6]))
+    if unordered:
+        msg = "histórico con fechas repetidas o fuera de orden en %d símbolos: %s" % (len(unordered), unordered[:6])
+        if len(unordered) > MAX_UNORDERED_SYMBOLS:
+            errors.append(msg)
+        else:
+            warnings.append(msg)
+
     # Histórico congelado: la última barra de la MAYORÍA de símbolos no puede tener > 6 días.
     # Tolerante con fines de semana y festivos (por eso 6 días y "mayoría", no todos).
     ages = []
@@ -400,6 +499,20 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
                                and len(_hist(ns[s])) < (1 - MAX_HISTORY_LOSS) * len(_hist(x)))
                 if len(short) > tol:
                     reg.append("%s: histórico acortado >%d %% en %d símbolos (tolerancia %d): %s" % (k, int(MAX_HISTORY_LOSS * 100), len(short), tol, short[:6]))
+        # Salto de nivel (BE-05): ×10/×100 respecto al feed anterior = cambio de unidad o reescalado, no un movimiento de mercado.
+        # Se mira el precio de la fila y el último cierre del histórico (este último, por si solo se reescala la serie).
+        for k in HISTORY_LISTS:
+            ps = {x.get("symbol"): x for x in _rows(prev, k) if x.get("symbol")}
+            jumps = sorted(str(x.get("symbol")) for x in _rows(d, k)
+                           if x.get("symbol") in ps
+                           and (_jumped(x.get("price"), ps[x.get("symbol")].get("price"))
+                                or _jumped(_last_close(x), _last_close(ps[x.get("symbol")]))))
+            if jumps:
+                reg.append("%s: salto de nivel (>×%g) respecto al feed anterior, ¿cambio de unidad, reescalado o split?: %s" % (k, MAX_PRICE_JUMP, jumps[:6]))
+        prev_nav = {f.get("isin"): f.get("price") for f in _rows(prev, "your_funds")}
+        nav_jumps = [str(f.get("isin")) for f in yf_rows if _jumped(f.get("price"), prev_nav.get(f.get("isin")))]
+        if nav_jumps:
+            reg.append("your_funds: salto de NAV (>×%g) respecto al feed anterior: %s" % (MAX_PRICE_JUMP, nav_jumps[:6]))
         # Perfiles: si de golpe muchas menos acciones traen fundamentales, Yahoo .info está fallando (solo aviso: los
         # precios y gráficos no dependen de ello y el dashboard conserva el último perfil bueno).
         n_prev = sum(1 for x in _rows(prev, "stocks") if "market_cap" in x)
@@ -423,6 +536,14 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
         if prev_bytes:
             if data_bytes < MIN_RATIO_VS_PREV * prev_bytes:
                 reg.append("el feed nuevo pesa %s bytes, menos del %d %% del anterior (%s)" % (data_bytes, int(MIN_RATIO_VS_PREV * 100), prev_bytes))
+    elif expect_prev:
+        # BE-06: la rama `data` existe (el workflow bajó un 200 o falló la descarga), así que la falta de anterior NO es un primer run:
+        # sin esto, una descarga fallida desactivaba en silencio las reglas de regresión justo cuando Yahoo va peor.
+        msg = "feed anterior esperado pero no utilizable (descarga fallida o ilegible): las reglas de regresión no se pueden aplicar"
+        if allow_regression:
+            warnings.append(Alert(msg + " [allow_regression: se publica igualmente]"))
+        else:
+            errors.append(msg)
     else:
         warnings.append("sin feed anterior utilizable: solo se aplican las reglas absolutas")
 
@@ -479,6 +600,7 @@ def main(argv=None):
             data_bytes=os.path.getsize(a.data), prev_bytes=prev_bytes,
             fred_key_set=os.environ.get("FRED_KEY_SET", "").lower() in truthy,
             allow_regression=os.environ.get("SANITY_ALLOW_REGRESSION", "").lower() in truthy,
+            expect_prev=os.environ.get("EXPECT_PREV", "").lower() in truthy,
         )
     except Exception as e:  # noqa: BLE001 - feed con tipos inesperados = no publicable
         print("::error::feed malformado: %s" % _line(type(e).__name__))

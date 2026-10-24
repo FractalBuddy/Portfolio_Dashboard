@@ -83,6 +83,14 @@ def test_ci_ejecuta_ruff_pytest_y_actionlint():
     assert "ruff check --select F" in text and "pytest" in text and "actionlint" in text
 
 
+def test_ci_tambien_corre_en_push_a_main():
+    # BE-02: la mayoría de commits entran directos a main por la web; sin `push` la CI no los vigilaba.
+    wf = load("ci.yml")
+    triggers = wf.get("on", wf.get(True))            # PyYAML (YAML 1.1) interpreta `on` como True
+    assert "pull_request" in triggers and "workflow_dispatch" in triggers
+    assert triggers["push"]["branches"] == ["main"]
+
+
 # ------------------------------------------------------------------ ejecución en bash con comandos falsos
 def _exe(path, body):
     path.write_text("#!/bin/bash\n" + body)
@@ -171,19 +179,31 @@ def _verify_script():
     return step(load("update-data.yml"), "verify-cdn", "Purge jsDelivr CDN cache and verify")["run"]
 
 
+DATA_BYTES = 1234
+
+
 def _fake_curl_cdn(sb, mode, want="2026-10-06T06:30:00+00:00"):
+    # meta.json y data.json se piden por separado: `fresh` = ambos nuevos; `meta_nuevo_data_viejo` = el borde sirve el meta nuevo
+    # con el data.json antiguo (otro tamaño), el caso de BE-11.
     _exe(sb.bin / "curl", '''echo "curl $*" >> "$CALLS_LOG"
 case "$*" in
   *purge.jsdelivr.net*) echo '{"status":"finished"}'; exit 0;;
+  *cdn.jsdelivr.net*data.json*)
+    case "%s" in
+      fresh) head -c %d /dev/zero | tr '\\0' x; exit 0;;
+      meta_nuevo_data_viejo) head -c 999 /dev/zero | tr '\\0' x; exit 0;;
+      down) exit 22;;
+      *) head -c 5 /dev/zero | tr '\\0' x; exit 0;;
+    esac;;
   *cdn.jsdelivr.net*)
     case "%s" in
-      fresh) echo '{"generated_at":"%s"}'; exit 0;;
-      stale) echo '{"generated_at":"2000-01-01T00:00:00+00:00"}'; exit 0;;
+      fresh|meta_nuevo_data_viejo) echo '{"generated_at":"%s","data_bytes":%d}'; exit 0;;
+      stale) echo '{"generated_at":"2000-01-01T00:00:00+00:00","data_bytes":1}'; exit 0;;
       down) exit 22;;
     esac;;
   */log*) exit ${HC_LOG_RC:-0};;
 esac
-''' % (mode, want))
+''' % (mode, DATA_BYTES, mode, want, DATA_BYTES))
 
 
 WANT = "2026-10-06T06:30:00+00:00"
@@ -195,6 +215,26 @@ def test_verify_cdn_fresco_sale_sin_dormir(sandbox):
     assert r.returncode == 0 and "CDN sirve la versión nueva" in r.stdout
     assert not any(c.startswith("sleep") for c in calls(sandbox))
     assert not any("/log" in c for c in calls(sandbox))
+
+
+def test_verify_cdn_comprueba_tambien_data_json(sandbox):
+    _fake_curl_cdn(sandbox, "fresh")
+    r = bash(sandbox, _verify_script(), env={"WANT": WANT, "HC": ""})
+    assert r.returncode == 0 and "CDN sirve la versión nueva" in r.stdout
+    cdn = [c for c in calls(sandbox) if "cdn.jsdelivr.net" in c]
+    assert any("data.json" in c for c in cdn) and any("meta.json" in c for c in cdn)
+    assert any("data.json" in c and "--compressed" in c for c in cdn)      # el tamaño real, descomprimido, como data_bytes
+
+
+def test_verify_cdn_meta_nuevo_con_data_viejo_no_da_el_cdn_por_bueno(sandbox):   # BE-11
+    _fake_curl_cdn(sandbox, "meta_nuevo_data_viejo")
+    r = bash(sandbox, _verify_script(), env={"WANT": WANT, "HC": "https://hc.test/ping/abc/"})
+    assert r.returncode == 0, r.stdout + r.stderr                          # informativo: nunca falla el run
+    assert "CDN sirve la versión nueva" not in r.stdout
+    assert "::warning::" in r.stdout and "data.json" in r.stdout
+    logs = [c for c in calls(sandbox) if "/log" in c]
+    assert len(logs) == 1 and "cdn-stale" in logs[0]
+    assert "/fail" not in "".join(calls(sandbox))
 
 
 @pytest.mark.parametrize("mode", ["stale", "down"])
@@ -316,3 +356,60 @@ def test_keepalive_con_head_desacoplado_y_sin_rama_falla_claro(sandbox):
     _git("checkout", "-q", "--detach", cwd=work)
     r = bash(sandbox, _keepalive_script(), env={"BRANCH": ""}, cwd=work)
     assert r.returncode != 0 and "no se pudo determinar la rama" in r.stdout
+
+
+# ---- BE-06: descarga del feed anterior sin desactivar en silencio las reglas de regresión
+def _fake_curl_prev(sb, mode):
+    _exe(sb.bin / "curl", '''echo "curl $*" >> "$CALLS_LOG"
+out=""
+while [ $# -gt 0 ]; do
+  if [ "$1" = "-o" ]; then out="$2"; shift; fi
+  shift
+done
+case "%s" in
+  ok)  echo '{"indices":[{"symbol":"^GSPC"}]}' > "$out"; printf 200;;
+  nf)  echo 'Not Found' > "$out"; printf 404;;
+  s500) echo 'oops' > "$out"; printf 500;;
+  down) exit 6;;
+esac
+''' % mode)
+
+
+def _run_prev_step(sb, job, name, mode):
+    _fake_curl_prev(sb, mode)
+    genv = sb.tmp / "github_env"
+    genv.write_text("")
+    r = bash(sb, step(load("update-data.yml"), job, name)["run"], env={"GITHUB_ENV": str(genv)})
+    prev = (sb.work / "prev.json").read_text()
+    return r, prev, genv.read_text()
+
+
+@pytest.mark.parametrize("job,name", [("publish", "Download previous feed"),
+                                      ("fetch", "Download previous feed (for FRED fallback)")])
+def test_BE06_descarga_ok_espera_feed_anterior(sandbox, job, name):
+    r, prev, genv = _run_prev_step(sandbox, job, name, "ok")
+    assert r.returncode == 0 and "^GSPC" in prev and "EXPECT_PREV=true" in genv
+    assert "--retry-all-errors" in " ".join(calls(sandbox))     # --retry solo no cubre los fallos de conexión
+
+
+@pytest.mark.parametrize("job,name", [("publish", "Download previous feed"),
+                                      ("fetch", "Download previous feed (for FRED fallback)")])
+def test_BE06_404_es_primer_run_legitimo(sandbox, job, name):
+    r, prev, genv = _run_prev_step(sandbox, job, name, "nf")
+    assert r.returncode == 0 and prev.strip() == "{}" and "EXPECT_PREV" not in genv
+
+
+@pytest.mark.parametrize("mode", ["s500", "down"])
+@pytest.mark.parametrize("job,name", [("publish", "Download previous feed"),
+                                      ("fetch", "Download previous feed (for FRED fallback)")])
+def test_BE06_cualquier_otro_fallo_no_es_primer_run(sandbox, job, name, mode):
+    r, prev, genv = _run_prev_step(sandbox, job, name, mode)
+    assert r.returncode == 0 and prev.strip() == "{}"           # el paso no tira el job: lo decide el sanity-check
+    assert "EXPECT_PREV=true" in genv                           # ...que ya sabe que faltaba un anterior
+    assert "::warning::" in r.stdout
+
+
+def test_BE06_el_sanity_check_recibe_expect_prev():
+    run = step(load("update-data.yml"), "publish", "Sanity-check feed")
+    assert "EXPECT_PREV" in run["env"] or "EXPECT_PREV" in run["run"]
+    assert "|| echo '{}'" not in (WF / "update-data.yml").read_text(encoding="utf-8")
