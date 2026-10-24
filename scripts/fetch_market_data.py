@@ -32,6 +32,7 @@ import socket
 import threading
 import requests
 import yfinance as yf
+from yfinance import exceptions as yf_exceptions
 import feedparser
 
 # Red de seguridad para cualquier librería que abra sockets sin timeout propio (yfinance...). Las noticias ya no
@@ -185,6 +186,20 @@ CPI_STALE_DAYS = 100   # last observation older than this => flagged as stale in
 # workflow's sanity gate. Each history call now retries with jittered exponential backoff, but a
 # circuit breaker stops retrying once Yahoo is clearly down (so the 20-minute job timeout holds).
 _YF_FAIL_STREAK = 0
+# --- Yahoo desde una IP compartida de runner (BE-08): ritmo contenido y 429 tratado como lo que es.
+# Un 429 NO se arregla reintentando en 1-4 s: pausa larga (con jitter) y, si Yahoo sigue limitando, abandono limpio (el resto de
+# símbolos arrastra la fila anterior marcada `stale` en vez de seguir martilleando y alargar el bloqueo de la IP).
+YF_REQ_GAP = (0.15, 0.35)         # segundos entre dos peticiones a Yahoo (ráfaga acotada: ~4-5 peticiones/s como mucho)
+YF_BURST_SIZE = 40                # cada tantas peticiones...
+YF_BURST_PAUSE = 5.0              # ...una pausa, para que la ráfaga no sea continua
+YF_RATE_LIMIT_PAUSE = (30.0, 60.0)  # pausa tras un 429
+YF_RATE_LIMIT_MAX_CONSECUTIVE = 3   # 429 seguidos (sin ninguna respuesta buena entre medias) => se abandona Yahoo
+YF_RATE_LIMIT_MAX_TOTAL = 6         # o tantos 429 en total en el run
+_YF_LAST_REQ = 0.0
+_YF_REQS = 0
+_YF_429_CONSECUTIVE = 0
+_YF_429_TOTAL = 0
+_YF_ABANDONED = False
 # Presupuesto de tiempo global (el job tiene timeout de 20 min): pasado este límite se deja de llamar a Yahoo y
 # se falla limpio (sanity-check) en vez de morir por timeout a mitad de publicación.
 _DEADLINE = time.monotonic() + 14 * 60
@@ -250,25 +265,89 @@ def _tag_currency(hist, ticker):
         pass
 
 
+def _is_rate_limit(exc):
+    """¿Es un 429 de Yahoo? yfinance lo lanza como YFRateLimitError; si la librería cambia, se reconoce también por el texto."""
+    if isinstance(exc, getattr(yf_exceptions, "YFRateLimitError", ())):
+        return True
+    txt = f"{type(exc).__name__} {exc}".lower()
+    return "too many requests" in txt or "rate limit" in txt or "429" in txt
+
+
+class YahooStop(RuntimeError):
+    """No se hace (más) trabajo contra Yahoo en este run: abandonado por 429 o presupuesto de tiempo agotado."""
+
+
+def _yf_pace():
+    """Antes de CADA petición a Yahoo: separación mínima entre peticiones y una pausa cada YF_BURST_SIZE. Lanza si ya se abandonó
+    Yahoo por 429 (no se hace ninguna petición más) o si se agotó el presupuesto de tiempo."""
+    global _YF_LAST_REQ, _YF_REQS
+    if _YF_ABANDONED:
+        raise YahooStop("Yahoo limita (429): se abandona para el resto del run")
+    if time.monotonic() > _DEADLINE:
+        raise YahooStop('presupuesto de tiempo de fetch agotado')
+    wait = YF_REQ_GAP[0] + random.random() * (YF_REQ_GAP[1] - YF_REQ_GAP[0]) - (time.monotonic() - _YF_LAST_REQ)
+    if wait > 0:
+        time.sleep(wait)
+    _YF_REQS += 1
+    if _YF_REQS % YF_BURST_SIZE == 0:
+        time.sleep(YF_BURST_PAUSE)
+    _YF_LAST_REQ = time.monotonic()
+
+
+def _yf_ok():
+    """Una respuesta buena de Yahoo corta la racha de 429."""
+    global _YF_429_CONSECUTIVE
+    _YF_429_CONSECUTIVE = 0
+
+
+def _yf_rate_limited(symbol, pause=True):
+    """Registra un 429: pausa larga con jitter (recortada al presupuesto que quede) o, pasados los topes, abandona Yahoo. Devuelve True si
+    se puede reintentar. `pause=False` cuando no queda ningún intento (se cuenta el 429 pero no se espera en balde)."""
+    global _YF_429_CONSECUTIVE, _YF_429_TOTAL, _YF_ABANDONED
+    _YF_429_CONSECUTIVE += 1
+    _YF_429_TOTAL += 1
+    if _YF_429_CONSECUTIVE >= YF_RATE_LIMIT_MAX_CONSECUTIVE or _YF_429_TOTAL >= YF_RATE_LIMIT_MAX_TOTAL:
+        _YF_ABANDONED = True
+        print(f"  ! Yahoo responde 429 ({_YF_429_CONSECUTIVE} seguidos, {_YF_429_TOTAL} en total, último en {symbol}): "
+              "se abandona Yahoo en este run (las filas se arrastran del feed anterior)", file=sys.stderr)
+        return False
+    if pause:
+        secs = min(random.uniform(*YF_RATE_LIMIT_PAUSE), max(0.0, _DEADLINE - time.monotonic()))
+        print(f"  ! Yahoo responde 429 en {symbol}: pausa de {secs:.0f} s ({_YF_429_CONSECUTIVE}/{YF_RATE_LIMIT_MAX_CONSECUTIVE} seguidos)", file=sys.stderr)
+        time.sleep(secs)
+    return True
+
+
 def yf_history(symbol, tries=3, **kw):
     """yf.Ticker(symbol).history(**kw) with retries on exceptions AND on empty results.
-    Returns a DataFrame (possibly empty); raises only if every attempt raised."""
+    Returns a DataFrame (possibly empty); raises only if every attempt raised.
+    Un 429 se trata aparte (pausa larga y, si persiste, abandono de Yahoo): ver _yf_rate_limited."""
     global _YF_FAIL_STREAK
     if time.monotonic() > _DEADLINE:
         raise TimeoutError('presupuesto de tiempo de fetch agotado')
     last_exc, hist = None, None
     attempts = 1 if _YF_FAIL_STREAK >= 15 else tries
     for i in range(attempts):
+        limited = False
         try:
+            _yf_pace()
             tk = yf.Ticker(symbol)
             hist = tk.history(**kw)
             hist = _drop_phantom_bars(hist.dropna(subset=["Close"]))
+            _yf_ok()
             if not hist.empty:
                 _YF_FAIL_STREAK = 0
                 _tag_currency(hist, tk)
                 return hist
         except Exception as e:  # network, rate limit, parsing...
             last_exc = e
+            if isinstance(e, YahooStop):
+                break               # Yahoo ya abandonado o presupuesto agotado: no hay nada que reintentar
+            limited = _is_rate_limit(e)
+        if limited:
+            if not _yf_rate_limited(symbol, pause=i < attempts - 1):
+                break
+            continue
         if i < attempts - 1:
             time.sleep(random.uniform(0.5, 1.0 * 2 ** (i + 1)))
     _YF_FAIL_STREAK += 1
@@ -668,21 +747,29 @@ def fetch_stock_profile(symbol):
     """Yahoo: Ticker.info (profile, margins, balance sheet...) + the Valuation Measures table (market cap, EV, P/Es, EV/EBITDA)
     -> parse + merge. {} on total failure (caller falls back to the previous feed). The valuation table failing alone is not
     fatal: `info` figures are used and the `_valuation` marker says so (popped by attach_profiles, logged, never published)."""
-    if time.monotonic() > _DEADLINE:
+    if time.monotonic() > _DEADLINE or _YF_ABANDONED:
         return {}
     for i in range(2):
         try:
+            _yf_pace()
             t = yf.Ticker(symbol)
             prof = parse_stock_profile(t.info)
+            _yf_ok()
             if prof:
                 val = {}
                 for j in range(2):   # the table is a separate request: one retry before falling back to `info`
                     try:
+                        _yf_pace()
                         val = parse_valuation_measures(t.get_valuation_measures(freq="trailing", periods=0))
                         if _val_usable(val):
                             break
+                    except YahooStop:
+                        val = {}
+                        break
                     except Exception as e:
                         print(f"  ! valuation table attempt {j + 1} failed for {symbol}: {type(e).__name__}: {e}", file=sys.stderr)
+                        if _is_rate_limit(e):
+                            _yf_rate_limited(symbol, pause=False)    # se cuenta (puede abandonar Yahoo); el reintento ya espera abajo
                     val = {}
                     if j == 0:
                         time.sleep(random.uniform(0.5, 1.5))
@@ -704,8 +791,14 @@ def fetch_stock_profile(symbol):
                 prof = merge_valuation(prof, val)
                 prof["_valuation"] = _val_usable(val)
                 return prof
+        except YahooStop:
+            return {}
         except Exception as e:
             print(f"  ! profile attempt {i + 1} failed for {symbol}: {type(e).__name__}: {e}", file=sys.stderr)
+            if _is_rate_limit(e):
+                if not _yf_rate_limited(symbol, pause=i == 0):
+                    return {}
+                continue
         if i == 0:
             time.sleep(random.uniform(0.5, 1.5))
     return {}

@@ -59,3 +59,12 @@ def _sin_red_real(monkeypatch):
     yield
     # El código de producción se traga las excepciones de red (degrada a «sin dato»): por eso se comprueba aquí, no solo se lanza.
     assert not intentos, f"el test intentó salir a Internet: {sorted(set(intentos))}"
+
+
+@pytest.fixture(autouse=True)
+def _estado_yahoo_limpio(monkeypatch):
+    """El estado de Yahoo (racha de fallos, 429, ritmo) es global del módulo, como en un run real: cada test parte de cero."""
+    import fetch_market_data as fm
+    for name, value in (("_YF_FAIL_STREAK", 0), ("_YF_429_CONSECUTIVE", 0), ("_YF_429_TOTAL", 0), ("_YF_ABANDONED", False),
+                        ("_YF_REQS", 0), ("_YF_LAST_REQ", 0.0)):
+        monkeypatch.setattr(fm, name, value, raising=False)

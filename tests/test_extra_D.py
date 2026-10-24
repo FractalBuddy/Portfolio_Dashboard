@@ -93,7 +93,7 @@ def test_D06_yf_history_reintenta_se_rinde_y_respeta_presupuesto(monkeypatch):
         def __init__(self, s): pass
         def history(self, **kw):
             calls["n"] += 1
-            raise RuntimeError("429")
+            raise RuntimeError("conexión rota")        # fallo genérico (un 429 tiene su propio tratamiento: ver BE-08)
     monkeypatch.setattr(fm.yf, "Ticker", T)
     monkeypatch.setattr(fm, "_YF_FAIL_STREAK", 0)
     with pytest.raises(RuntimeError):
