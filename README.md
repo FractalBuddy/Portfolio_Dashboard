@@ -124,7 +124,7 @@ export FRED_API_KEY=tu_clave   # opcional
 python scripts/fetch_market_data.py   # escribe data.json + meta.json
 python3 scripts/sanity_check.py --data data.json --meta meta.json   # añade --prev prev.json para las reglas de regresión
 
-pip install pytest ruff
+pip install -r requirements-dev.txt   # pytest, ruff y PyYAML con la versión exacta de la CI
 ruff check --select F scripts tests
 python -m pytest -q
 ```

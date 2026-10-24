@@ -8,10 +8,17 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 
 import pytest
 
-yaml = pytest.importorskip("yaml")
+# Sin PyYAML estos tests (los de los workflows) se saltaban EN SILENCIO y la CI salía verde sin comprobarlos (BE-16): en CI es un fallo.
+try:
+    import yaml
+except ImportError:
+    if os.environ.get("CI"):
+        pytest.fail("PyYAML no está instalado en CI: los tests de los workflows no se pueden ejecutar (requirements-dev.txt)", pytrace=False)
+    pytest.skip("PyYAML no instalado: se omiten los tests de los workflows", allow_module_level=True)
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 WF = ROOT / ".github" / "workflows"
@@ -451,3 +458,38 @@ def test_BE07_la_ci_no_mezcla_herramientas_sin_hash_con_requirements_txt():
     lineas = [l.strip() for l in run.splitlines() if l.strip().startswith("pip install")]
     con_req = [l for l in lineas if "requirements.txt" in l]
     assert con_req and all("--require-hashes" in l and "pytest" not in l and "ruff" not in l for l in con_req)
+
+
+# ------------------------------------------------------------------ BE-16: herramientas de CI visibles para Dependabot y PyYAML obligatorio
+def test_BE16_las_herramientas_de_ci_estan_en_requirements_dev_con_hashes():
+    text = (WF / "ci.yml").read_text(encoding="utf-8")
+    assert not re.search(r"pip install[^\n]*\"(pytest|ruff|PyYAML)==", text)             # nada fijado a mano dentro del workflow
+    run = step(load("ci.yml"), "checks", "Install dependencies")["run"]
+    assert "--require-hashes" in run and "-r requirements-dev.txt" in run
+    dev = (ROOT / "requirements-dev.txt").read_text(encoding="utf-8")
+    ini = (ROOT / "requirements-dev.in").read_text(encoding="utf-8")
+    for tool in ("pytest", "ruff", "PyYAML"):
+        assert re.search(r"^%s==[\d.]+" % tool, ini, re.M | re.I), tool
+        assert re.search(r"^%s==[\d.]+ \\\n\s+--hash=sha256:[0-9a-f]{64}" % tool, dev, re.M | re.I), tool
+
+
+def _pytest_sin_yaml(tmp_path, ci):
+    stub = tmp_path / "stub"
+    stub.mkdir()
+    (stub / "yaml.py").write_text("raise ModuleNotFoundError(\"No module named 'yaml'\", name='yaml')\n")
+    env = {k: v for k, v in os.environ.items() if k != "CI"}
+    env["PYTHONPATH"] = str(stub)
+    if ci:
+        env["CI"] = "true"
+    return subprocess.run([sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", str(ROOT / "tests" / "test_workflows.py")],
+                          cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
+
+
+def test_BE16_sin_pyyaml_en_ci_los_tests_de_workflows_fallan_en_vez_de_saltarse(tmp_path):
+    r = _pytest_sin_yaml(tmp_path, ci=True)
+    assert r.returncode != 0 and "PyYAML no está instalado en CI" in r.stdout + r.stderr
+
+
+def test_BE16_sin_pyyaml_en_local_se_saltan_con_aviso(tmp_path):
+    r = _pytest_sin_yaml(tmp_path, ci=False)
+    assert r.returncode in (0, 5) and "skipped" in r.stdout
