@@ -514,7 +514,8 @@ def test_parse_stock_profile_descarta_basura_sin_rellenar_con_null():
 def test_attach_profiles_usa_anterior_si_yahoo_falla_y_corta_tras_racha(monkeypatch):
     monkeypatch.setattr(fm.time, "sleep", lambda *_: None)
     stocks = [{"symbol": s} for s in ("A", "B", "C", "D", "E", "F", "G")]
-    prev = {"stocks": [{"symbol": "G", "sector": "Energy", "market_cap": 5, "profile_as_of": "2026-10-01", "price": 1}]}
+    reciente = (dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=5)).isoformat()   # relativa a hoy (PROFILE_MAX_REUSE_DAYS, BE-10)
+    prev = {"stocks": [{"symbol": "G", "sector": "Energy", "market_cap": 5, "profile_as_of": reciente, "price": 1}]}
     calls = []
 
     def fetch(sym):
@@ -525,7 +526,7 @@ def test_attach_profiles_usa_anterior_si_yahoo_falla_y_corta_tras_racha(monkeypa
     assert out[0]["sector"] == "Tech" and out[0]["profile_as_of"] == fm.datetime.now(fm.timezone.utc).strftime("%Y-%m-%d")
     assert calls == ["A", "B", "C", "D"]  # A ok, luego 3 fallos seguidos y se deja de llamar a Yahoo
     g = out[6]
-    assert g["sector"] == "Energy" and g["market_cap"] == 5 and g["profile_as_of"] == "2026-10-01" and "price" not in g or g.get("price") is None
+    assert g["sector"] == "Energy" and g["market_cap"] == 5 and g["profile_as_of"] == reciente and "price" not in g or g.get("price") is None
     assert "sector" not in out[1]  # sin dato nuevo ni anterior: queda sin campos
 
 
@@ -670,17 +671,18 @@ def test_fetch_symbol_publica_as_of_y_marca_precio_antiguo(monkeypatch):
 
 def test_build_list_conserva_la_fila_anterior_marcada_antigua(monkeypatch):
     today = dt.datetime.now(dt.timezone.utc).date()
+    ayer = (today - dt.timedelta(days=2)).isoformat()      # relativa a hoy: una fecha fija caduca con STALE_CARRY_MAX_DAYS (BE-10)
     monkeypatch.setattr(fm, "fetch_symbol", lambda s: None if s == "BAD" else {"price": 2.0, "change_pct": 0.1, "as_of": "2026-10-09"})
-    prev_rows = [{"symbol": "BAD", "name": "viejo", "price": 5.0, "as_of": "2026-10-08", "history": [{"date": "2026-10-08", "close": 5.0}],
+    prev_rows = [{"symbol": "BAD", "name": "viejo", "price": 5.0, "as_of": ayer, "history": [{"date": ayer, "close": 5.0}],
                   "intraday": [{"time": "x", "close": 5}], "region": "Europe"}]
     out = fm.build_list([("OK", "Ok"), ("BAD", "Malo", "Asia")], prev_rows)
     assert [r["symbol"] for r in out] == ["OK", "BAD"]
     bad = out[1]
-    assert bad["stale"] is True and bad["stale_since"] == "2026-10-08" and bad["price"] == 5.0
+    assert bad["stale"] is True and bad["stale_since"] == ayer and bad["price"] == 5.0
     assert bad["name"] == "Malo" and bad["region"] == "Asia" and "intraday" not in bad and bad["history"]
     # sucesivas reutilizaciones conservan stale_since
     out2 = fm.build_list([("BAD", "Malo")], out)
-    assert out2[0]["stale_since"] == "2026-10-08"
+    assert out2[0]["stale_since"] == ayer
     # sin fila anterior, o con una de hace más de STALE_CARRY_MAX_DAYS, el símbolo desaparece (lo detecta el sanity-check)
     assert fm.build_list([("BAD", "Malo")], []) == [] and fm.build_list([("BAD", "Malo")]) == []
     ancient = [{"symbol": "BAD", "price": 5.0, "stale_since": (today - dt.timedelta(days=fm.STALE_CARRY_MAX_DAYS + 1)).isoformat()}]
