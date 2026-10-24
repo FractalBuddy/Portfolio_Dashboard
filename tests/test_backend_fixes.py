@@ -96,3 +96,10 @@ def test_BE13_cierre_previo_normal_sigue_igual(monkeypatch):
     monkeypatch.setattr(fm, "yf_history", lambda *a, **k: _ohlc([10, 10, 10, 10, 11]))
     row = fm.fetch_symbol("X")
     assert row["change_pct"] == 10.0
+
+
+# ------------------------------------------------------------------ BE-01 (validador)
+def test_BE01_el_validador_y_el_backend_comparten_la_lista_de_subunidades():
+    import sanity_check as sc                      # solo-stdlib: copia a propósito, este test evita que diverjan
+    assert sc.SUBUNIT_CURRENCIES == frozenset(fm.PRICE_UNIT_DIVISORS)
+    assert all(fm.price_unit_divisor(c) == 100 for c in sc.SUBUNIT_CURRENCIES) and fm.price_unit_divisor("GBP") == 1

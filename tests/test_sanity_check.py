@@ -609,6 +609,17 @@ def test_BE05_nav_normal_o_sin_anterior_no_molesta():
     assert run(d, m, prev)[0] == []
 
 
+# --------------------------- BE-01: currency / price_unit_divisor, si vienen, deben ser coherentes
+def test_BE01_currency_valida_pasa_y_malformada_bloquea():
+    d, m = healthy()
+    d["funds"][0].update({"currency": "GBp", "price_unit_divisor": 100})
+    d["funds"][1].update({"currency": "USD", "price_unit_divisor": 1})
+    assert run(d, m, None)[0] == []
+    for cur, div in (("GBp", 1), ("USD", 100), ("<img>", 1), ("", 1), (5, 1), ("USD", 0), ("USD", "1")):
+        d["funds"][0].update({"currency": cur, "price_unit_divisor": div})
+        assert any("currency" in e for e in run(d, m, None)[0]), (cur, div)
+
+
 # =============================================================== BE-06: feed anterior esperado y no disponible
 def test_BE06_prev_vacio_con_rama_data_existente_bloquea():               # R1b
     d, m = healthy()

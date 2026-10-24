@@ -73,6 +73,8 @@ MAX_UNORDERED_SYMBOLS = 2        # fechas repetidas/desordenadas: hasta 2 símbo
 # movimiento real entre dos runs. Un split legítimo (10:1) también lo dispara: es una regla de REGRESIÓN, se desbloquea a mano
 # con allow_regression.
 MAX_PRICE_JUMP = 5.0
+# Divisas cotizadas en subunidad (copia a propósito de fetch_market_data.PRICE_UNIT_DIVISORS: este script es solo-stdlib; un test las compara).
+SUBUNIT_CURRENCIES = frozenset({"GBp", "GBX", "ZAc", "ILA"})
 
 # Límites de plausibilidad de los campos de perfil de las acciones (más holgados que los del parser: aquí solo se
 # atrapa un fetch roto o manipulado, no un dato raro de Yahoo). El job `publish` no se fía de la salida de `fetch`.
@@ -171,6 +173,17 @@ def _jumped(new, old):
         return False
     r = new / old
     return r > MAX_PRICE_JUMP or r < 1.0 / MAX_PRICE_JUMP
+
+
+def _bad_price_unit(x):
+    """`currency` / `price_unit_divisor` (BE-01): si una fila trae alguno, deben venir los dos y ser coherentes
+    (100 para las divisas en subunidad, 1 para el resto). Su ausencia no se exige (filas arrastradas de feeds anteriores)."""
+    if "currency" not in x and "price_unit_divisor" not in x:
+        return False
+    cur, div = x.get("currency"), x.get("price_unit_divisor")
+    if not (isinstance(cur, str) and re.fullmatch(r"[A-Za-z]{3,4}", cur)):
+        return True
+    return not (type(div) is int and div == (100 if cur in SUBUNIT_CURRENCIES else 1))
 
 
 # Mismos meses y mismas reglas que fetch_market_data._parse_nav_date (copia a propósito: este script es solo-stdlib y no importa el otro;
@@ -356,6 +369,8 @@ def check(d, m, prev=None, *, data_bytes, prev_bytes=0, fred_key_set=False, toda
                 dt.date.fromisoformat(str(x["profile_as_of"])[:10])
             except ValueError:
                 bad_prof.append("%s.profile_as_of" % x.get("symbol"))
+    bad_unit = [x.get("symbol") for k in SYMBOL_LISTS for x in _rows(d, k) if _bad_price_unit(x)]
+    need(not bad_unit, "currency/price_unit_divisor incoherentes o malformados: %s" % bad_unit[:6])
     need(not bad_prof, "perfil de acción con campos inverosímiles o de tipo erróneo: %s" % bad_prof[:6])
     # Tipos de cambio a USD (backend: comparar capitalizaciones y flujos de caja de acciones en distintas divisas).
     fx = d.get("fx_usd")
