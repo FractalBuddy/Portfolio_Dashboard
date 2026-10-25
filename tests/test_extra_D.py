@@ -523,7 +523,7 @@ def test_D44_secretos_usados_solo_los_esperados_y_ninguno_en_run():
     for f in WF.glob("*.yml"):
         txt = f.read_text(encoding="utf-8")
         used |= set(re.findall(r"secrets\.([A-Za-z0-9_]+)", txt))
-    assert used == {"FRED_API_KEY", "HC_UPDATE_URL", "HC_SUPABASE_URL", "HC_UPDATE_V2_URL"}      # + el check propio del feed v2 (opcional)
+    assert used == {"FRED_API_KEY", "HC_UPDATE_URL", "HC_SUPABASE_URL", "HC_UPDATE_V2_URL", "PERSONAL_FEED_TOKEN"}      # + el check propio y el token de los datos propios del feed v2 (opcionales)
 
 
 def test_D45_permisos_y_timeouts_de_todos_los_jobs():

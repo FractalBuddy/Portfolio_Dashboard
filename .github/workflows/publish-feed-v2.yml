@@ -92,6 +92,49 @@ jobs:
           retention-days: 1
           if-no-files-found: error
 
+  # Datos PROPIOS del dueño (opcional): la lista a seguir se lee de Supabase y se publica de vuelta en Supabase; NUNCA en el repo, en un artefacto ni en los
+  # logs (los de un repo público son públicos: solo contadores). Es independiente de `fetch`/`publish`: si falla, el feed público sale igual.
+  # Solo se usa la clave PUBLICABLE (cabecera apikey) y un token aleatorio (secreto PERSONAL_FEED_TOKEN); si la clave parece secreta, aborta sin enviarla.
+  # Los pasos con el token ejecutan SOLO biblioteca estándar (`python3 -S`: sin site-packages); el paso que ejecuta código de terceros no recibe el token.
+  personal:
+    if: ${{ github.event_name != 'schedule' || vars.FEED_V2_ENABLED == 'true' }}
+    continue-on-error: true
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+          cache: pip
+
+      - name: Install dependencies (hash-pinned)
+        run: pip install --require-hashes --no-deps -r requirements.txt
+
+      - name: Read personal watch list (token, stdlib only)
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          PERSONAL_FEED_TOKEN: ${{ secrets.PERSONAL_FEED_TOKEN }}
+        run: python3 -S scripts/personal_v2.py watch --dir "$RUNNER_TEMP/personal"
+
+      - name: Build personal payloads (third-party code, NO token)
+        run: python scripts/personal_v2.py build --dir "$RUNNER_TEMP/personal" --registry registry.json
+
+      - name: Publish personal payloads (token, stdlib only)
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          PERSONAL_FEED_TOKEN: ${{ secrets.PERSONAL_FEED_TOKEN }}
+        run: python3 -S scripts/personal_v2.py publish --dir "$RUNNER_TEMP/personal"
+
   publish:
     needs: fetch
     # Único job con permisos de publicación. NO instala ni ejecuta paquetes de terceros: baja el artefacto, lo VALIDA con scripts/sanity_check_v2.py
