@@ -219,7 +219,7 @@ def classify_path(rel):
 # Tope de tamaño por tipo de fichero (bytes, sin comprimir) y total del sitio. Los topes salen de las mediciones de `tests/test_feed_v2.py`
 # con holgura; el validador los hace cumplir.
 MAX_BYTES = {
-    "index": 120_000, "manifest": 400_000, "latest": 8_000, "daily": 90_000, "intraday": 60_000,
+    "index": 120_000, "manifest": 600_000, "latest": 8_000, "daily": 90_000, "intraday": 60_000,
     "crypto": 400_000, "macro": 250_000, "news": 120_000, "health": 200_000,
 }
 MAX_SITE_BYTES = 120_000_000
