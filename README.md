@@ -81,6 +81,20 @@ repo se queda en ~2 MB para siempre. `main` solo lleva código y, como mucho, un
   `.github/keepalive`) y además reactiva `update-data.yml` por si estuviera desactivado. Con commits normales o merges
   de Dependabot no hace nada. Que cuente como actividad para GitHub no está confirmado por su documentación:
   Healthchecks.io sigue siendo la red de seguridad.
+* `supabase-keepalive.yml` (cada 3 días, `37 3 */3 * *`): evita que el proyecto gratuito de Supabase se pause por
+  inactividad con **una** lectura a la REST API (`GET /rest/v1/profiles?select=user_id&limit=1`, cabecera `apikey`).
+  200, 401 y 403 cuentan como correctos (la tabla está protegida por RLS); red caída, 5xx o cualquier otro código
+  (404, 540... un proyecto pausado) fallan tras 3 intentos. Aborta si la clave configurada empieza por `sb_secret_`,
+  contiene `service_role` o es un JWT con ese rol. Los logs solo muestran códigos HTTP.
+  **Configuración** (Settings -> Secrets and variables -> Actions):
+  * pestaña *Variables*: `SUPABASE_URL` (p. ej. `https://<ref>.supabase.co`) y `SUPABASE_PUBLISHABLE_KEY`
+    (`sb_publishable_...`; es pública por diseño, **nunca** pongas aquí la `sb_secret_` ni la `service_role`);
+  * pestaña *Secrets* (opcional): `HC_SUPABASE_URL`, URL de ping de un check propio de Healthchecks.io (periodo 3 días
+    con gracia de al menos 1 día). Vacío: solo un `::warning::`.
+
+  **Cómo comprobarlo**: Actions -> "Supabase keepalive" -> *Run workflow*; el job debe terminar en verde con
+  «Supabase responde (HTTP 200|401|403)». Prueba negativa: pon una URL inventada en `SUPABASE_URL`, relanza y debe
+  fallar con `HTTP 000`. Localmente: `curl -s -o /dev/null -w '%{http_code}\n' -H "apikey: $KEY" "$URL/rest/v1/profiles?select=user_id&limit=1"`.
 * `ci.yml` (en cada PR): sintaxis de Python, `ruff --select F`, `pytest` (sanity-check, scrape de iShares, FRED,
   noticias y los bloques `run:` de los workflows), `actionlint` si está disponible y comprobación de que no hay ficheros
   versionados que `.gitignore` excluye (HTML, copias, exports, `.env`, claves...).

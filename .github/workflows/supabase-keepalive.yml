@@ -1,0 +1,65 @@
+name: Supabase keepalive
+
+# El plan gratuito de Supabase pausa el proyecto tras una semana sin actividad. Este workflow hace UNA lectura
+# a la REST API cada 3 días con la clave PUBLICABLE (pública por diseño; la protege RLS). URL y clave van en variables
+# de repo (Settings -> Secrets and variables -> Actions -> Variables): SUPABASE_URL y SUPABASE_PUBLISHABLE_KEY.
+# Aborta si la clave parece secreta (sb_secret_..., service_role): una clave así nunca debe estar en una variable.
+# Resultado: 200/401/403 = la API responde (403/401 = RLS protege la tabla); red caída, 5xx u otro código = fallo
+# (un proyecto pausado no devuelve 200/401/403). Aviso opcional a Healthchecks con el secreto HC_SUPABASE_URL.
+# Los logs solo llevan códigos HTTP: nunca la URL, la clave ni el cuerpo de la respuesta.
+on:
+  schedule:
+    - cron: '37 3 */3 * *'   # minuto «feo» a propósito: los cron en :00 son los que más retrasa GitHub
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supabase-keepalive
+  cancel-in-progress: false
+
+jobs:
+  ping:
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Lectura a la REST API de Supabase
+        env:
+          SB_URL: ${{ vars.SUPABASE_URL }}
+          SB_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          HC: ${{ secrets.HC_SUPABASE_URL }}
+        run: |
+          set -u
+          hc_ping() {  # $1 = "" (ok) o "/fail"; $2 = mensaje (sin datos personales)
+            if [ -z "${HC:-}" ]; then
+              echo "::warning::HC_SUPABASE_URL está vacío o no existe: no se avisa a Healthchecks."
+              return 0
+            fi
+            curl -fsS -m 10 --retry 3 --retry-all-errors --data-raw "$2" "${HC%/}$1" >/dev/null 2>&1 || echo "::warning::no se pudo avisar a Healthchecks"
+          }
+          fail() { echo "::error::$1"; hc_ping /fail "supabase-keepalive: $1"; exit 1; }
+
+          [ -n "${SB_URL:-}" ] && [ -n "${SB_KEY:-}" ] || fail "faltan las variables de repo SUPABASE_URL y/o SUPABASE_PUBLISHABLE_KEY"
+          case "$SB_KEY" in
+            sb_secret_*|*service_role*) fail "la clave configurada parece SECRETA (sb_secret_ / service_role): abortado sin enviarla; usa la publicable (sb_publishable_...)" ;;
+          esac
+          # Clave legacy (JWT): su payload dice el rol; una service_role en base64 no contiene el texto "service_role".
+          role=$(printf '%s' "$SB_KEY" | cut -d. -f2 | python3 -c 'import sys,base64,json;s=sys.stdin.read().strip();print(json.loads(base64.urlsafe_b64decode(s+"="*(-len(s)%4))).get("role",""))' 2>/dev/null || true)
+          [ "$role" != "service_role" ] || fail "la clave configurada es un JWT con rol service_role: abortado sin enviarla"
+          case "$SB_URL" in https://*) ;; *) fail "SUPABASE_URL debe empezar por https://" ;; esac
+
+          tries=3
+          code=000
+          for i in $(seq 1 "$tries"); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 -H "apikey: ${SB_KEY}" \
+              "${SB_URL%/}/rest/v1/profiles?select=user_id&limit=1" 2>/dev/null) || true
+            case "$code" in
+              200|401|403) echo "Supabase responde (HTTP $code): API y base de datos activas."; hc_ping "" "supabase-keepalive ok (HTTP $code)"; exit 0 ;;
+            esac
+            echo "intento $i/$tries: HTTP $code"
+            if [ "$i" -lt "$tries" ]; then sleep $((i*15)); fi
+          done
+          fail "Supabase no responde como se espera tras $tries intentos (último HTTP $code; 000 = red; 5xx/404/540... = caído o proyecto pausado)"
