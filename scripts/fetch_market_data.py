@@ -2069,8 +2069,11 @@ def build_staking(prev=None):
     return staking
 
 
-def build_market_mood():
-    """VIX (volatility) + its 50-day moving average via yfinance, the crypto Fear & Greed
+def build_market_mood(prev_feed=None, include_altcoin=True):
+    """`prev_feed`: feed anterior (por defecto el de PREV_FEED_PATH); `include_altcoin=False` omite el índice de altcoins (hasta ~90 peticiones a
+    Yahoo; el feed v2 no lo publica).
+
+    VIX (volatility) + its 50-day moving average via yfinance, the crypto Fear & Greed
     Index via alternative.me (free, public, no key), and CNN's stock-market Fear & Greed
     Index (including its sub-components: momentum, breadth/strength, put/call, junk bond
     and safe-haven demand) via CNN's own public dataviz endpoint that powers their site's
@@ -2138,12 +2141,12 @@ def build_market_mood():
     except Exception as e:
         print(f"  ! CNN fear & greed fetch failed (unofficial endpoint, best-effort): {e}", file=sys.stderr)
 
-    prev = _load_prev_feed()
-    alt = build_altcoin_season(prev)
+    prev_feed = _load_prev_feed() if prev_feed is None else prev_feed       # (`prev` de arriba es el cierre anterior del VIX)
+    alt = build_altcoin_season(prev_feed) if include_altcoin else None
     if alt:
         mood["altcoin_season"] = alt
 
-    return carry_previous_mood(mood, prev)
+    return carry_previous_mood(mood, prev_feed)
 
 
 def build_benchmarks():
