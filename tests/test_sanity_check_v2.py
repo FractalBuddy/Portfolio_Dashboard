@@ -191,6 +191,18 @@ def test_R3_close_no_valido_bloquea(site, col, idx, val, msg):
     assert errs and (msg is None or has(errs, msg))
 
 
+@pytest.mark.parametrize("cambios", [{"c": -37.63}, {"l": -40.32}, {"o": -14.0}, {"c": -37.63, "l": -40.32, "o": 17.65}])
+def test_el_validador_sigue_estricto_un_sitio_con_la_barra_del_wti_negativa_se_rechaza(site, cambios):
+    """El fix del WTI (2020-04-20/21) está en el GENERADOR, que descarta esas barras: el validador NO se relaja y rechaza cualquier precio <= 0."""
+    prev, new = site
+    doc = load(new, "s/AAPL/d/2026.json")
+    for col, val in cambios.items():
+        doc[col][10] = val
+    save(new, "s/AAPL/d/2026.json", doc)
+    errs, _ = run(new, prev)
+    assert has(errs, "s/AAPL/d/2026.json", "precio no finito o no positivo")
+
+
 def test_R3_fechas_duplicadas_o_en_orden_inverso_bloquean(site):
     prev, new = site
     edit(new, "s/AAPL/d/2026.json", lambda d: d.update(d=d["d"][:5] + [d["d"][4]] + d["d"][6:]))

@@ -301,10 +301,12 @@ HEALTH_SPEC = obj({
                 "http_requests": mapping(_HOST_RE, integer(0, 10**6), 30), "yahoo_rate_limited": integer(0, 10**6),
                 "yahoo_abandoned": boolean, "budget_exhausted": boolean}),
     "counts": obj({k: integer(0, 10**6) for k in ("due", "updated", "failed", "carried_stale", "deferred", "backfilled", "unit_mismatch",
-                                                    "crypto", "outage", "registry", "published", "rebased")}),
-    "problems": obj({k: seq(symbol, 40) for k in ("unit_mismatch", "failed", "rebased", "deferred", "frozen")}),
+                                                    "crypto", "outage", "registry", "published", "rebased", "suspect", "dropped_bars")}),
+    "problems": obj({**{k: seq(symbol, 40) for k in ("unit_mismatch", "failed", "rebased", "deferred", "frozen", "suspect")},
+                     "dropped_bars": mapping(c.SYMBOL_RE, obj({"n": integer(1, 10**6), "dates": seq(day(), 10)}), 40)}),
     "symbols": mapping(c.SYMBOL_RE, obj({"status": enum("active", "invalid", "delisted"), "fail_streak": integer(0, 1000), "last_ok": stamp,
-                                          "last_try": stamp, "tier": enum(*c.TIERS)}, required={"status", "fail_streak", "tier"}),
+                                          "last_try": stamp, "tier": enum(*c.TIERS), "dropped": seq(day(), 50)},
+                                         required={"status", "fail_streak", "tier"}),
                        c.MAX_REGISTRY_SYMBOLS)})
 MANIFEST_SPEC = obj({
     "schema": SCHEMA_V, "generated_at": stamp, "total_bytes": integer(0, 10**10),
@@ -682,6 +684,10 @@ def _health_alerts(h, ctx):
         ctx.warn("presupuesto de tiempo del run agotado: se saltó trabajo", alert=True)
     if counts.get("outage"):
         ctx.warn("fallaron la mayoría de los símbolos a la vez (caída de Yahoo): datos anteriores conservados", alert=True)
+    suspect = (h.get("problems") or {}).get("suspect") or []
+    if suspect:
+        ctx.warn("%d símbolos no publicados por tener demasiadas barras con precio <= 0 o no finito (datos sospechosos): %s" % (
+            len(suspect), ", ".join(suspect[:8])), alert=True)
     rebased = (h.get("problems") or {}).get("rebased") or []
     if rebased:
         ctx.warn("series bajadas enteras otra vez por rebase (split/ajuste): %s" % ", ".join(rebased[:8]))
