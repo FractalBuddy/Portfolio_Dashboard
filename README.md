@@ -114,6 +114,11 @@ global de BE-12, FRED, CNN, alternative.me, CoinGecko, RSS) y añade: histórico
 Yahoo ahora se baja la serie entera una vez), y estado por símbolo en `health.json`. Todo símbolo se valida con `^[A-Za-z0-9.^=\-]{1,15}$` (más: sin punto inicial ni `..`) y se
 codifica en URL siempre.
 
+**El feed nunca contiene precios <= 0 ni no finitos.** Algún dato real de Yahoo los tiene (el WTI, `CL=F`, cerró en negativo el 2020-04-20), y `sanity_check_v2.py` seguirá rechazando
+cualquier sitio que los lleve: el arreglo está en el generador, que **descarta** esas barras antes de escribir y las **anota** en `health.json` (`problems.dropped_bars`: símbolo, nº y fechas;
+y una línea `~ SÍMBOLO: n barras descartadas` en el log). Un símbolo que pierde más de 3 barras (o más del 1 %) se considera sospechoso y no se publica (`problems.suspect`, aviso en el
+resumen del run). Detalle en `docs/CONTRATO_FEED_V2.md` y `auditorias/FIXES_FEED_V2_NEG.md`.
+
 **Mediciones** (datos sintéticos del test `tests/test_feed_v2.py::test_medicion_...`, con el `registry.json` real: 224 símbolos de Yahoo, 49 hot / 153 warm / 22 cold;
 `V2_MEASURE=1 pytest -s tests/test_feed_v2.py -k medicion` las imprime):
 

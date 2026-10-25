@@ -36,6 +36,7 @@ class World:
         self.end = END
         self.stop_after = None
         self.decl = {e["symbol"]: e for e in REG}
+        self.mutate = {}                    # símbolo -> función(DataFrame) -> DataFrame (estropear barras: cierres negativos, NaN...)
 
     def price(self, sym, d):
         base = 20 + zlib.crc32(sym.encode()) % 400
@@ -61,6 +62,8 @@ class World:
             p = [self.price(sym, x) for x in days]
             df = pd.DataFrame({"Open": [x * 0.998 for x in p], "High": [x * 1.01 for x in p], "Low": [x * 0.99 for x in p], "Close": p,
                                "Volume": [1_000_000 + x.toordinal() % 1000 for x in days]}, index=pd.DatetimeIndex([pd.Timestamp(x) for x in days]))
+        if sym in self.mutate and kw.get("interval") != "5m":
+            df = self.mutate[sym](df)
         cur = self.currency.get(sym, self.decl[sym]["currency"] if sym in self.decl else "USD")
         if cur:
             df.attrs["currency"] = cur

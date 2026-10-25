@@ -14,6 +14,8 @@ alternative.me, CoinGecko, RSS):
   * SÍMBOLOS MUERTOS NO BLOQUEAN: un símbolo que falla conserva sus últimos datos marcados `stale`; tras FAIL_STREAK_INVALID fallos seguidos pasa a
     `invalid` (se reintenta una vez a la semana); uno congelado desde hace >45 días pasa a `delisted`. Si fallan casi todos a la vez (Yahoo caído)
     no se penaliza a nadie.
+  * NUNCA PRECIOS <= 0: una barra con open/high/low/close no finito o <= 0 (el WTI cerró en negativo el 2020-04-20) se descarta antes de escribir y se
+    anota en `health.json` (problems.dropped_bars). Más de MAX_DROPPED_BARS (3) o más del 1 % de las barras de un símbolo = datos sospechosos: no se publica.
   * DIVISA/UNIDAD EXPLÍCITAS (BE-01): cada serie lleva `currency` y `unit`; si Yahoo informa otra divisa/escala que la declarada en el registro
     (GBp frente a GBP), el símbolo NO se publica en este run.
   * Además: cripto (CoinGecko, hasta 250 por lote), macro (FX, tipos, IPC, VIX, Fear & Greed, calendario), noticias y salud del run.
@@ -47,6 +49,9 @@ STALE_CARRY_MAX_DAYS = fm.STALE_CARRY_MAX_DAYS
 REBASE_TOLERANCE = 0.02            # el pasado guardado difiere >2 % (mediana) del que da Yahoo ahora: split/ajuste => se baja entero otra vez
 MIN_OVERLAP = 3                    # fechas comunes mínimas para juzgar el rebase
 GLOBAL_OUTAGE_RATIO = 0.5          # si falla más de la mitad de lo intentado (con ≥10 intentos) es Yahoo, no los símbolos: nadie se penaliza
+MAX_DROPPED_BARS = 3               # barras descartadas (precio no finito o <= 0) que se toleran por símbolo en todo su histórico...
+MAX_DROPPED_FRACTION = 0.01        # ...y como fracción de sus barras: por encima, los datos del símbolo se consideran sospechosos y NO se publica
+DROPPED_KEEP = 50                  # fechas descartadas que se recuerdan por símbolo en health.json (el tope de arriba ya las corta mucho antes)
 INTRADAY_MAX_BARS = 800
 V2_YAHOO_BUDGET_SECONDS = 13 * 60
 V2_HARD_BUDGET_SECONDS = 17 * 60   # BE-12: tope global del run (el job tiene más margen para descargar el sitio anterior y subir el artefacto)
@@ -122,26 +127,56 @@ def _num(v, default):
         return default
 
 
-def bars_from_df(df, today):
-    """DataFrame de Yahoo -> lista de barras {d,o,h,l,c,v} ordenada, sin fechas repetidas ni futuras. Descarta las barras sin cierre finito > 0
-    y repara las incoherentes (máximo/mínimo que no contienen la apertura o el cierre) para que se cumpla low <= close <= high. Redondeo a 6 decimales."""
+def _field(v):
+    """Valor de una celda de precio -> (estado, número). 'missing' = None/NaN, 'bad' = no numérico o infinito, 'ok' = finito."""
+    if v is None:
+        return "missing", None
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return "bad", None
+    if math.isnan(f):
+        return "missing", None
+    return ("ok", f) if math.isfinite(f) else ("bad", None)
+
+
+def split_bars(df, today):
+    """DataFrame de Yahoo -> (barras, fechas_descartadas). Barras {d,o,h,l,c,v} ordenadas, sin fechas repetidas ni futuras, con low <= close <= high
+    (se reparan máximo/mínimo que no contienen apertura o cierre) y redondeo a 6 decimales.
+
+    El feed NUNCA lleva precios <= 0 ni no finitos (p. ej. el WTI cerró en negativo el 2020-04-20): una barra con open/high/low/close no finito o <= 0
+    se DESCARTA y su fecha se devuelve en `fechas_descartadas` (se anota en health.json). Una fila sin ningún precio (Yahoo a veces devuelve filas
+    vacías) no es una barra ni cuenta como descartada. Si falta la COLUMNA Open/High/Low (no la celda), se rellena con el cierre."""
     limit = today + timedelta(days=1)
 
     def col(name):
-        return df[name].tolist() if name in df.columns else [None] * len(df)
+        return df[name].tolist() if name in df.columns else None
 
+    cols = {k: col(k) for k in ("Open", "High", "Low", "Close", "Volume")}
     days = [i.strftime("%Y-%m-%d") for i in df.index]
-    out = {}
-    for day, op, hi_, lo_, cl_, vol_ in zip(days, col("Open"), col("High"), col("Low"), col("Close"), col("Volume")):
+    out, dropped = {}, set()
+    for i, day in enumerate(days):
         d = parse_day(day)
-        cl = _num(cl_, None)
-        if d is None or d > limit or cl is None or cl <= 0:
+        if d is None or d > limit:
             continue
-        o, h, lo = _num(op, cl), _num(hi_, cl), _num(lo_, cl)
+        cells = {k: _field(v[i]) if v is not None else None for k, v in cols.items() if k != "Volume"}
+        present = [x for x in cells.values() if x is not None]
+        if all(st == "missing" for st, _ in present):
+            continue                                                        # fila vacía: no es una barra
+        if any(st != "ok" or val <= 0 for st, val in present) or cells["Close"] is None:
+            dropped.add(day)
+            continue
+        cl = cells["Close"][1]
+        o, h, lo = (cells[k][1] if cells[k] is not None else cl for k in ("Open", "High", "Low"))
         hi, lo = max(h, o, cl, lo), min(h, o, cl, lo)
-        vol = _num(vol_, 0.0)
+        vol = _num(cols["Volume"][i] if cols["Volume"] is not None else None, 0.0)
         out[day] = {"d": day, "o": round(o, 6), "h": round(hi, 6), "l": round(lo, 6), "c": round(cl, 6), "v": int(vol) if vol > 0 else 0}
-    return [out[k] for k in sorted(out)]
+    return [out[k] for k in sorted(out)], sorted(dropped - set(out))
+
+
+def bars_from_df(df, today):
+    """Solo las barras de `split_bars` (ver allí qué se descarta)."""
+    return split_bars(df, today)[0]
 
 
 def merge_bars(old, new):
@@ -208,7 +243,8 @@ class Run:
         self.force_all = force_all
         self.generated_at = iso_z(now)
         self.stats = Counter()
-        self.problems = {"unit_mismatch": [], "failed": [], "rebased": [], "deferred": [], "frozen": []}
+        self.problems = {"unit_mismatch": [], "failed": [], "rebased": [], "deferred": [], "frozen": [], "suspect": []}
+        self.dropped_now = {}          # símbolo -> fechas descartadas (todo el histórico) calculadas en este run
         self.state = {}                # símbolo -> estado nuevo
         self.latest = {}               # símbolo -> latest.json publicado (para índice y macro)
         self.written = {}              # ruta -> bytes
@@ -325,7 +361,7 @@ class Run:
         why = check_unit(entry, df.attrs.get("currency") if df is not None else None)
         if why:
             return "fail", "unit_mismatch: " + why
-        new = bars_from_df(df, self.today)
+        new, dropped = split_bars(df, self.today)
         if len(new) < 2:
             return "fail", "sin datos suficientes"
         last_day = parse_day(new[-1]["d"])
@@ -347,13 +383,25 @@ class Run:
                     return "fail", "yahoo: %s" % type(e).__name__
                 self.backfills += 1
                 why = check_unit(entry, df2.attrs.get("currency") if df2 is not None else None)
-                new2 = bars_from_df(df2, self.today) if not why else []
+                new2, dropped2 = split_bars(df2, self.today) if not why else ([], [])
                 if why or len(new2) < 2:
                     return "fail", "unit_mismatch: " + why if why else "sin datos suficientes"
-                new, recent, rewrite_all = new2, [], True
+                new, dropped, recent, rewrite_all = new2, dropped2, [], True
                 self.problems["rebased"].append(sym)
         merged = merge_bars(recent, new)
         cutoff_year = self.today.year - c.HISTORY_YEARS + 1
+        # Barras descartadas (precio <= 0 o no finito): el hueco se fusiona por fecha (no cuenta como cambio para el rebase ni para la continuidad)
+        # y se recuerdan las de runs anteriores, que esta descarga incremental ya no vuelve a ver, para aplicar el tope sobre todo el histórico.
+        have = {b["d"] for b in merged}
+        first = merged[0]["d"] if rewrite_all else "%04d-01-01" % cutoff_year
+        before = (self.prev_state.get(sym) or {}).get("dropped")
+        before = [d for d in before if isinstance(d, str) and parse_day(d)] if isinstance(before, list) else []
+        dropped_all = sorted({d for d in set(before) | set(dropped) if d >= first and d not in have})
+        self.dropped_now[sym] = dropped_all
+        if dropped:
+            log("  ~ %s: %d barras descartadas en este run (precio no finito o <= 0), %d en el histórico" % (sym, len(dropped), len(dropped_all)))
+        if len(dropped_all) > MAX_DROPPED_BARS or len(dropped_all) > MAX_DROPPED_FRACTION * (len(merged) + len(dropped_all)):
+            return "fail", "suspect_data: %d barras con precio no finito o <= 0 en %d" % (len(dropped_all), len(merged) + len(dropped_all))
         by_year = {}
         for b in merged:
             y = int(b["d"][:4])
@@ -505,20 +553,28 @@ class Run:
                     self.stats["unit_mismatch"] += 1
                 if reason.startswith("frozen"):
                     self.problems["frozen"].append(sym)
+                if reason.startswith("suspect_data"):
+                    self.problems["suspect"].append(sym)
+                    self.stats["suspect"] += 1
                 st["last_try"] = self.generated_at
-                if not outage or reason.startswith(("unit_mismatch", "frozen")):
+                if not outage or reason.startswith(("unit_mismatch", "frozen", "suspect_data")):
                     st["fail_streak"] = int(st.get("fail_streak", 0)) + 1
                     if reason.startswith("frozen"):
                         st["status"] = "delisted"
                     elif st["fail_streak"] >= c.FAIL_STREAK_INVALID:
                         st["status"] = "invalid"
+            if sym in self.dropped_now and res is not None and (res[0] == "ok" or res[1].startswith("suspect_data")):
+                if self.dropped_now[sym]:
+                    st["dropped"] = self.dropped_now[sym][-DROPPED_KEEP:]
+                else:
+                    st.pop("dropped", None)
             if kept and res is not None and res[0] != "ok":
                 self.stats["carried_stale"] += 1
             if res is None and status == "dormant":
                 self.stats["dormant"] += 1
             st["tier"] = e["tier"]
             st["status"] = st.get("status") if st.get("status") in ("active", "invalid", "delisted") else "active"
-            self.state[sym] = {k: v for k, v in st.items() if k in ("status", "fail_streak", "last_ok", "last_try", "tier") and v is not None}
+            self.state[sym] = {k: v for k, v in st.items() if k in ("status", "fail_streak", "last_ok", "last_try", "tier", "dropped") and v is not None}
         self.stats["backfilled"] = self.backfills
 
     # -- Criptomonedas -------------------------------------------------------------------------------------------------------
@@ -623,15 +679,18 @@ class Run:
         cap = lambda l: sorted(set(l))[:40]                                  # noqa: E731
         published = sum(1 for e in self.registry if e["kind"] == "yahoo" and e["symbol"] in self.latest)
         counts = {k: int(self.stats.get(k, 0)) for k in ("due", "updated", "failed", "carried_stale", "deferred", "backfilled",
-                                                         "unit_mismatch", "crypto", "outage")}
-        counts.update({"registry": len(self.registry), "published": published, "rebased": len(self.problems["rebased"])})
+                                                         "unit_mismatch", "crypto", "outage", "suspect")}
+        dropped = {s: st["dropped"] for s, st in sorted(self.state.items()) if st.get("dropped")}
+        counts.update({"registry": len(self.registry), "published": published, "rebased": len(self.problems["rebased"]),
+                       "dropped_bars": sum(len(v) for v in dropped.values())})
         doc = {
             "schema": c.SCHEMA, "generated_at": self.generated_at,
             "run": {"duration_s": round(duration, 1), "yahoo_calls": self.yahoo_calls, "yahoo_requests": int(fm._YF_REQS),
                     "http_requests": dict(sorted(http.items())), "yahoo_rate_limited": int(fm._YF_429_TOTAL),
                     "yahoo_abandoned": bool(fm._YF_ABANDONED), "budget_exhausted": bool(fm._BUDGET_HIT)},
             "counts": counts,
-            "problems": {k: cap(v) for k, v in self.problems.items()},
+            "problems": {**{k: cap(v) for k, v in self.problems.items()},
+                         "dropped_bars": {s: {"n": len(v), "dates": v[:10]} for s, v in list(dropped.items())[:40]}},
             "symbols": self.state,
         }
         self.emit("health.json", doc)

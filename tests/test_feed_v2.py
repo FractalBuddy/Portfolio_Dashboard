@@ -400,7 +400,7 @@ def test_health_lleva_peticiones_estado_y_problemas(world, tmp_path):
     assert set(h) == {"schema", "generated_at", "run", "counts", "problems", "symbols"}
     assert h["run"]["yahoo_calls"] == len(world.calls) and h["counts"]["registry"] == 9 and h["counts"]["published"] == 7
     assert set(h["symbols"]["AAPL"]) == {"status", "fail_streak", "last_ok", "last_try", "tier"}
-    assert set(h["problems"]) == {"unit_mismatch", "failed", "rebased", "deferred", "frozen"}
+    assert set(h["problems"]) == {"unit_mismatch", "failed", "rebased", "deferred", "frozen", "suspect", "dropped_bars"}
 
 
 def test_simbolo_congelado_se_marca_delisted(world, tmp_path):

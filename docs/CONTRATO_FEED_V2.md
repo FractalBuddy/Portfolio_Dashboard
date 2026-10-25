@@ -44,6 +44,10 @@ desfase de unos minutos como un fallo.
 
   Un símbolo cuya divisa o escala real no coincide con la del registro **no se publica** (se ve en `health.json.problems.unit_mismatch`). Un cliente
   que multiplique cantidad × precio debe usar `price_unit_divisor`; si falta o no entiende la unidad, no debe valorar.
+* **Sin precios <= 0**: ninguna serie diaria lleva `o`, `h`, `l` ni `c` no finitos o <= 0 (el WTI, `CL=F`, cerró en negativo el 2020-04-20 y barras vecinas pueden traer mínimo o apertura negativos con cierre positivo). El generador
+  **descarta** esas barras antes de escribir (la serie tiene un hueco en esa fecha) y las **anota** en `health.json`: `problems.dropped_bars` (`{símbolo: {n, dates}}`, acumulado de todo el
+  histórico) y `symbols.<SYM>.dropped`. Si un símbolo pierde **más de 3 barras o más del 1 %** de las suyas, sus datos se consideran sospechosos y **no se publica** (`problems.suspect`,
+  `counts.suspect`; conserva lo anterior marcado `stale`). Un cliente no debe interpolar el hueco ni esperar una barra en cada día hábil.
 * **Fechas**: `YYYY-MM-DD` (día de la barra, hora local del mercado); marcas de generación `YYYY-MM-DDTHH:MM:SSZ` (UTC). El intradía lleva `YYYY-MM-DD HH:MM`
   en la hora local del mercado y `tz` (IANA) en el fichero.
 * **`stale` / `stale_since`**: el símbolo falló en el último run y se sirve lo anterior (como máximo 30 días), o su última barra tiene más de 7 días. Van juntos.
@@ -374,16 +378,20 @@ Contadores del run (`yahoo_requests` = peticiones reales a Yahoo incluidos reint
     "unit_mismatch": 0,
     "crypto": 30,
     "outage": 0,
+    "suspect": 0,
     "registry": 9,
     "published": 7,
-    "rebased": 0
+    "rebased": 0,
+    "dropped_bars": 0
   },
   "problems": {
     "unit_mismatch": [],
     "failed": [],
     "rebased": [],
     "deferred": [],
-    "frozen": []
+    "frozen": [],
+    "suspect": [],
+    "dropped_bars": {}
   },
   "symbols": {
     "^GSPC": {
@@ -414,7 +422,7 @@ disco. Un cliente que quiera integridad puede verificar lo que descarga.
 {
   "schema": 2,
   "generated_at": "2026-10-26T18:00:00Z",
-  "total_bytes": 1160481,
+  "total_bytes": 1160541,
   "files": {
     "index.json": {
       "bytes": 1288,
