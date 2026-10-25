@@ -100,7 +100,7 @@ class Counting:
         self._orig = requests.get
 
         def counted(url, *a, **k):
-            host = str(url).split("://", 1)[-1].split("/", 1)[0]
+            host = re.sub(r"[^a-z0-9.\-:]", "", str(url).split("://", 1)[-1].split("/", 1)[0].lower())[:60] or "otro"
             self.by[host] += 1
             return self._orig(url, *a, **k)
         requests.get = counted
@@ -466,7 +466,10 @@ class Run:
             if self.yahoo_dead():
                 results[sym] = ("deferred", "Yahoo abandonado o presupuesto de tiempo agotado")
                 continue
-            results[sym] = self.update_symbol(e)
+            try:
+                results[sym] = self.update_symbol(e)
+            except Exception as exc:                                       # noqa: BLE001 - un símbolo con un fallo inesperado no tumba el run
+                results[sym] = ("fail", "interno: %s" % type(exc).__name__)
             kind, why = results[sym]
             if kind != "ok":
                 log("  ! %s: %s (%s)" % (sym, kind, why))
@@ -576,7 +579,7 @@ class Run:
         cpi, cpi_meta = fm.fetch_cpi_history()
         if fm.FRED_API_KEY:
             rates, cpi, cpi_meta = fm.reuse_previous_fred(rates, cpi, cpi_meta, prev)
-        mood = fm.build_market_mood(prev_feed=prev, include_altcoin=False)
+        mood = clean_mood(fm.build_market_mood(prev_feed=prev, include_altcoin=False))
         doc = {"schema": c.SCHEMA, "generated_at": self.generated_at, "fx_usd": self.fx_usd(), "rates": rates, "cpi": cpi,
                "cpi_meta": cpi_meta, "market_mood": mood, "calendar": build_calendar(self.today)}
         self.emit("macro.json", doc)
@@ -602,8 +605,8 @@ class Run:
                 if hit:
                     it["symbol"], it["asset_name"] = hit["symbol"], hit["name"]
                     watch.append(it)
-        self.emit("news.json", {"schema": c.SCHEMA, "generated_at": self.generated_at, "general": dedupe(general)[:20],
-                                "watchlist": dedupe(watch)[:40]})
+        self.emit("news.json", {"schema": c.SCHEMA, "generated_at": self.generated_at, "general": dedupe(clean_items(general))[:20],
+                                "watchlist": dedupe(clean_items(watch))[:40]})
 
     # -- Índice, salud, manifiesto -------------------------------------------------------------------------------------------
     def build_index(self):
@@ -644,6 +647,35 @@ class Run:
             total += len(data)
         self.emit("manifest.json", {"schema": c.SCHEMA, "generated_at": self.generated_at, "total_bytes": total, "files": files})
         return total
+
+
+_LINK_OK_RE = re.compile(r"^https?://[^\s<>\"'\x00-\x1f\x7f]{1,990}$", re.I)
+
+
+def clean_items(items):
+    """Titulares de RSS (no fiables): se descartan los que llevan un enlace con espacios, comillas, '<', '>' o control. Un solo enlace raro NO debe
+    bloquear la publicación entera (el validador exige textos sin marcado)."""
+    out = []
+    for it in items:
+        if isinstance(it, dict) and isinstance(it.get("link"), str) and _LINK_OK_RE.match(it["link"]) and it.get("title"):
+            out.append(it)
+    return out
+
+
+def clean_mood(mood):
+    """Textos de market_mood (CNN, alternative.me: externos) reducidos a texto plano; una cadena que queda vacía se omite."""
+    def walk(v):
+        if isinstance(v, dict):
+            out = {}
+            for k, x in v.items():
+                y = walk(x)
+                if y is not None or not isinstance(x, str):
+                    out[k] = y
+            return out
+        if isinstance(v, str):
+            return fm._plain_text(v, 60) or None
+        return v
+    return walk(mood)
 
 
 def dedupe(items):

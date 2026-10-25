@@ -491,3 +491,47 @@ def test_build_market_mood_acepta_prev_feed_y_omite_altcoin(monkeypatch):
     prev = {"generated_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(), "market_mood": {"stock_fear_greed": {"value": 55.0}}}
     mood = fm.build_market_mood(prev_feed=prev, include_altcoin=False)
     assert mood["vix"]["value"] == 16.0 and mood["stock_fear_greed"]["stale"] is True and "altcoin_season" not in mood
+
+
+# ------------------------------------------------------------------ robustez ante lo externo: un dato raro no debe bloquear la publicación entera
+def test_enlaces_rss_raros_se_descartan_y_el_sitio_sigue_siendo_valido(world, tmp_path, monkeypatch):
+    import sanity_check_v2 as sc
+    bad = ["https://e.com/a b", "https://e.com/<x>", 'https://e.com/"q"', "javascript:alert(1)", "https://e.com/\x07", "ftp://e.com/x", "", None, 5]
+    good = {"title": "Bueno", "link": "https://e.com/ok?a=1&b=2", "source": "S", "published": "p"}
+    monkeypatch.setattr(fm, "parse_feed", lambda url, limit=8: [{"title": "t%d" % i, "link": l, "source": "S", "published": "p"} for i, l in enumerate(bad)] + [dict(good)])
+    out, _ = gen(tmp_path, "s1")
+    n = jl(out, "news.json")
+    assert [x["link"] for x in n["general"]] == [good["link"]] and all(x["link"] == good["link"] for x in n["watchlist"])
+    assert sc.check_site(str(out / "v2"), REG, None, today=date(2026, 10, 27))[0] == []
+
+
+def test_textos_de_market_mood_se_limpian_y_un_rating_nulo_no_bloquea(world, tmp_path, monkeypatch):
+    import sanity_check_v2 as sc
+    monkeypatch.setattr(fm, "build_market_mood", lambda prev_feed=None, include_altcoin=True: {
+        "vix": {"value": 15.0, "change_pct": 1.0, "stale": True, "stale_since": None},
+        "stock_fear_greed": {"value": 61.0, "rating": None, "as_of": "2026-10-26"},
+        "crypto_fear_greed": {"value": 54, "classification": "<b>Neutral</b>", "timestamp": 1792972800},
+        "put_call": {"value": 40.0, "rating": "<<>>", "ratio": 0.8, "as_of": "2026-10-26"}})
+    out, _ = gen(tmp_path, "s1")
+    mood = jl(out, "macro.json")["market_mood"]
+    assert mood["crypto_fear_greed"]["classification"] == "Neutral" and "rating" not in mood["put_call"] and mood["stock_fear_greed"]["rating"] is None
+    assert sc.check_site(str(out / "v2"), REG, None, today=date(2026, 10, 27))[0] == []
+
+
+def test_un_fallo_interno_en_un_simbolo_no_tumba_el_run(world, tmp_path, monkeypatch):
+    real = f2.check_unit
+    monkeypatch.setattr(f2, "check_unit", lambda e, o: (_ for _ in ()).throw(KeyError("bug")) if e["symbol"] == "AAPL" else real(e, o))
+    out, _ = gen(tmp_path, "s1")
+    h = jl(out, "health.json")
+    assert h["problems"]["failed"] == ["AAPL"] and exists(out, "s/^GSPC/latest.json") and not exists(out, "s/AAPL/latest.json")
+
+
+def test_contador_de_peticiones_normaliza_el_host(monkeypatch):
+    seen = []
+    monkeypatch.setattr(f2.requests, "get", lambda url, **k: seen.append(url) or None)
+    with f2.Counting() as cnt:
+        f2.requests.get("https://API.CoinGecko.com:443/x")
+        f2.requests.get("https://usér@exa mple.com/x")
+        f2.requests.get("https://feeds.finance.yahoo.com/rss?s=%5EGSPC")
+    assert set(cnt.by) >= {"api.coingecko.com:443", "feeds.finance.yahoo.com"}
+    assert all(__import__("re").fullmatch(r"[a-z0-9.\-:]{1,60}", k) for k in cnt.by) and len(seen) == 3

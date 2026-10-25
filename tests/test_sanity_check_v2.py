@@ -641,3 +641,23 @@ def test_registry_con_pocos_simbolos_exige_la_mitad(world, tmp_path):
     out, _ = gen(tmp_path, "pocos", registry=reg)
     errs, _ = run(str(out / "v2"), registry=reg, today=date(2026, 10, 26))
     assert has(errs, "símbolos activos con datos publicados (mínimo 5)")
+
+
+def test_alta_inicial_parcial_pasa_si_hay_al_menos_20_simbolos(world, tmp_path, monkeypatch):
+    """Con un registro grande el alta se reparte en varios runs: el primero no necesita publicarlo todo (solo el mínimo absoluto)."""
+    reg = c.load_registry(os.path.join(os.path.dirname(__file__), "..", "registry.json"))
+    world.decl = {e["symbol"]: e for e in reg}
+    monkeypatch.setattr("feed_v2.BACKFILL_MAX_PER_RUN", 25)
+    out, _ = gen(tmp_path, "parcial", registry=reg)
+    errs, _ = run(str(out / "v2"), registry=reg, today=date(2026, 10, 26))
+    assert errs == []
+    monkeypatch.setattr("feed_v2.BACKFILL_MAX_PER_RUN", 10)
+    out, _ = gen(tmp_path, "muy_parcial", registry=reg)
+    assert has(run(str(out / "v2"), registry=reg, today=date(2026, 10, 26))[0], "(mínimo 20)")
+
+
+def test_macro_acepta_rating_nulo_y_stale_since_nulo(site):
+    prev, new = site
+    edit(new, "macro.json", lambda d: d["market_mood"].update(
+        stock_fear_greed={"value": 50.0, "rating": None, "stale": True, "stale_since": None}, vix={"value": 15.0, "stale": True, "stale_since": None}))
+    assert run(new, prev)[0] == []

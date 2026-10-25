@@ -42,8 +42,7 @@ class Alert(str):
     """Aviso que merece que el dueño se entere (el sitio se publica, pero con datos degradados): el workflow lo manda a Healthchecks como /fail."""
 
 
-MIN_PUBLISHED = 20               # símbolos de Yahoo con datos publicados, como mínimo (con registros pequeños, la mitad)
-MIN_PUBLISHED_FRACTION = 0.25    # ...y al menos este % de los activos del registro
+MIN_PUBLISHED = 20               # símbolos de Yahoo con datos publicados, como mínimo (con registros pequeños, la mitad de los activos)
 MIN_FRESH_FRACTION = 0.5         # al menos la mitad de lo publicado con última barra de los últimos MAX_BAR_AGE_DAYS
 MAX_BAR_AGE_DAYS = 6             # cubre fin de semana + festivo
 MAX_FUTURE_DAYS = 1              # una barra con fecha a más de «mañana» (huso horario) es imposible
@@ -108,8 +107,10 @@ class Ctx:
 # ------------------------------------------------------------------------------------------------------------------------------
 # Comprobadores de campo: devuelven None si está bien o el motivo
 # ------------------------------------------------------------------------------------------------------------------------------
-def text(maxlen=200, rx=None):
+def text(maxlen=200, rx=None, nullable=False):
     def chk(v, ctx):
+        if v is None and nullable:
+            return None
         if not isinstance(v, str):
             return "no es texto"
         if len(v) > maxlen:
@@ -251,8 +252,9 @@ def _parse_day(s):
 # ------------------------------------------------------------------------------------------------------------------------------
 SCHEMA_V = lambda v, ctx: None if v == c.SCHEMA else "schema != %d" % c.SCHEMA                          # noqa: E731
 _STALE = {"stale": boolean, "stale_since": day()}
+_STALE_N = {"stale": boolean, "stale_since": day(nullable=True)}      # macro: fetch_market_data puede dejar stale_since a null si el feed anterior no traía fecha
 _ITEM_NEWS = {"title": text(300), "link": link, "source": text(120), "published": text(100)}
-_MOOD_SUB = {"value": number(-1e6, 1e6), "rating": text(60), "as_of": day(), **_STALE}
+_MOOD_SUB = {"value": number(-1e6, 1e6), "rating": text(60, nullable=True), "as_of": day(), **_STALE_N}
 
 INDEX_SPEC = obj({
     "schema": SCHEMA_V, "generated_at": stamp,
@@ -276,15 +278,15 @@ CRYPTO_SPEC = obj({
 MACRO_SPEC = obj({
     "schema": SCHEMA_V, "generated_at": stamp,
     "fx_usd": mapping(_FX_CCY_RE, number(1e-4, 1e4, positive=True), 40),
-    "rates": seq(obj({"series": text(30, _SERIES_RE), "name": text(80), "value": number(-100, 1000), "prev": number(-100, 1000), "date": day(), **_STALE},
+    "rates": seq(obj({"series": text(30, _SERIES_RE), "name": text(80), "value": number(-100, 1000), "prev": number(-100, 1000), "date": day(), **_STALE_N},
                      required={"series", "name", "value", "prev", "date"}), 20),
     "cpi": seq(obj({"date": day(), "value": number(0, 100000)}), 1500),
     "cpi_meta": obj({"source": text(120), "series": text(30, _SERIES_RE), "last_date": day(nullable=True), "stale": boolean,
                      "reused_from_previous": boolean, "stale_since": day(nullable=True)}, required={"source", "series", "last_date", "stale"}),
     "market_mood": obj({
-        "vix": obj({"value": number(0, 1000), "change_pct": number(-1000, 100000), **_STALE}, required={"value"}),
-        "vix_50ma": obj({"value": number(0, 1000), **_STALE}, required={"value"}),
-        "crypto_fear_greed": obj({"value": number(0, 100), "classification": text(40), "timestamp": integer(0, 4_102_444_800), **_STALE},
+        "vix": obj({"value": number(0, 1000), "change_pct": number(-1000, 100000), **_STALE_N}, required={"value"}),
+        "vix_50ma": obj({"value": number(0, 1000), **_STALE_N}, required={"value"}),
+        "crypto_fear_greed": obj({"value": number(0, 100), "classification": text(40, nullable=True), "timestamp": integer(0, 4_102_444_800), **_STALE_N},
                                  required={"value"}),
         "stock_fear_greed": obj(_MOOD_SUB, required={"value"}), "market_momentum": obj(_MOOD_SUB, required={"value"}),
         "junk_bond_demand": obj(_MOOD_SUB, required={"value"}), "safe_haven_demand": obj(_MOOD_SUB, required={"value"}),
@@ -600,7 +602,9 @@ def check_site(site, registry, prev=None, *, today=None, allow_regression=False,
     _check_manifest(docs.get("manifest"), site, files, ctx)
     _check_symbols(files, latest_new, daily_last, ctx)
     yahoo = [e for e in registry if e["kind"] == "yahoo" and e["status"] == "active"]
-    need = max(min(MIN_PUBLISHED, ceil(0.5 * len(yahoo))), ceil(MIN_PUBLISHED_FRACTION * len(yahoo)))
+    # Mínimo absoluto bajo a propósito: el alta de un registro grande se reparte en varios runs (cupo de descargas largas) y Yahoo puede limitar durante
+    # el primero. Con sitio anterior, que no desaparezcan símbolos lo vigilan las reglas de continuidad.
+    need = min(MIN_PUBLISHED, ceil(0.5 * len(yahoo)))
     pub = [e["symbol"] for e in yahoo if e["symbol"] in latest_new]
     if len(pub) < need:
         ctx.err("solo %d de %d símbolos activos con datos publicados (mínimo %d)" % (len(pub), len(yahoo), need))
