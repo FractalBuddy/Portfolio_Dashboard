@@ -22,7 +22,7 @@ Rama: `feat/supabase-keepalive` (desde `main`).
 ## Resultado
 `pytest` completo: 355 passed. `ruff check --select F .`: All checks passed. (`actionlint` no está instalado aquí: sin validar con él.)
 
-## Discrepancia que NO he aplicado
+## Discrepancia (resuelta tras el rebase)
 Pedías corregir en el README el horario de Healthchecks a `17 6,11,15,21 * * *`. Pero `update-data.yml` tiene `17 6,11,15,20 * * *`
 y el README ya decía `…,20`: coinciden. Cambiarlo a 21 los haría discrepar. Lo he dejado en 20 y añadido un test que exige que ambos coincidan.
 Si has cambiado (o quieres cambiar) el cron real a las 21:17, hay que cambiar a la vez `update-data.yml` y el README; el test avisará si solo se toca uno.
@@ -33,3 +33,5 @@ Si has cambiado (o quieres cambiar) el cron real a las 21:17, hay que cambiar a 
 * Un 404 se trata como fallo (puede ser proyecto pausado o que `profiles` no exista): es deliberado, avisa en vez de callar.
 * No he podido comprobar contra un Supabase real (sin acceso ni credenciales, como se pedía). El código HTTP exacto de un proyecto pausado no está verificado: el criterio es «todo lo que no sea 200/401/403 falla».
 * Al correr la suite completa, tests ya existentes de `fetch_market_data` intentan conectar con `eth-api.lido.fi` (el proxy lo rechaza; pasan igualmente). No es de este cambio.
+
+**Actualización tras rebasar sobre `main`:** `update-data.yml` ya trae `17 6,11,15,21 * * *`, así que el README se ha corregido a `…,21` y el test de coincidencia pasa. La nota anterior describe el estado previo al rebase.

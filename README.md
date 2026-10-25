@@ -122,7 +122,7 @@ marcado ni caracteres de control, tope de longitud): si añades un campo al back
    `.github/workflows/*.yml`, `.github/dependabot.yml`, `.gitignore`, este README.
 3. Secretos (Settings -> Secrets and variables -> Actions): `FRED_API_KEY` (opcional, gratis en
    <https://fred.stlouisfed.org/docs/api/api_key.html>; sin ella no hay tipos ni IPC) y `HC_UPDATE_URL`
-   (URL de ping de Healthchecks.io). En Healthchecks usa el horario cron `17 6,11,15,20 * * *` con una gracia de al
+   (URL de ping de Healthchecks.io). En Healthchecks usa el horario cron `17 6,11,15,21 * * *` con una gracia de al
    menos 1 hora (los huecos entre runs llegan a 10 h, un periodo fijo de 6 h daría falsas alarmas).
 4. Actions -> "Update market data" -> **Run workflow**. La primera ejecución crea la rama `data`.
 5. Settings -> Code security: Secret scanning + Push protection + Dependabot alerts.
