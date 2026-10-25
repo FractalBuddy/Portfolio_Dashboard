@@ -520,9 +520,9 @@ def test_readme_documenta_supabase_keepalive_y_horario_de_healthchecks():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     for needle in ("SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "HC_SUPABASE_URL", "supabase-keepalive.yml"):
         assert needle in readme
-    # el horario de Healthchecks del README debe coincidir con el cron real de update-data.yml
-    cron = load("update-data.yml")[True]["schedule"][0]["cron"]
-    assert "horario cron `%s`" % cron in readme
+    # configuración de Healthchecks del README: modo Simple, Period de 1 día y gracia de 12 h (sin acoplarse al cron)
+    assert "Period = 1 día" in readme
+    assert "Grace Time = 12 horas" in readme
 
 
 def _fake_curl_sb(sb, codes):
