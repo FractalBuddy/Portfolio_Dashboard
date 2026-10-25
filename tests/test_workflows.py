@@ -877,3 +877,15 @@ def test_v2_el_token_se_referencia_en_exactamente_dos_pasos_y_no_hay_claves_de_s
     text = (WF / V2).read_text(encoding="utf-8")
     assert text.count("secrets.PERSONAL_FEED_TOKEN") == 2 and text.count("vars.SUPABASE_PUBLISHABLE_KEY") == 2
     assert "service_role" not in text and "sb_secret" not in text
+
+
+def test_v2_el_readme_documenta_la_activacion_los_secretos_y_los_riesgos():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    wf = (WF / V2).read_text(encoding="utf-8")
+    # cada secreto/variable que usa el workflow v2 está en el README
+    for name in set(re.findall(r"(?:secrets|vars)\.([A-Z][A-Z0-9_]+)", wf)):
+        assert name in readme, name
+    for frag in ("Settings → Pages → Source: GitHub Actions", "FEED_V2_ENABLED", "allow_regression", "docs/CONTRATO_FEED_V2.md", "BE-09", "recrear el repositorio",
+                 "Términos de uso", "no escala a un servicio abierto", "sb_secret_", "service_role", "ningún commit a ninguna rama"):
+        assert frag in readme, frag
+    assert (ROOT / "docs" / "CONTRATO_FEED_V2.md").is_file() and "registry.json" in readme

@@ -10,6 +10,10 @@ https://cdn.jsdelivr.net/gh/<usuario>/<repo>@data/meta.json   (unos bytes, se co
 https://cdn.jsdelivr.net/gh/<usuario>/<repo>@data/data.json   (~10 MB, ~2 MB comprimido)
 ```
 
+> **Feed v2 (nuevo, en paralelo).** Además del feed de arriba, el repo publica un feed **genérico** v2 en GitHub Pages: un fichero por símbolo, sin datos del
+> dueño, con divisa y unidad explícitas. Ver [Feed v2](#feed-v2-genérico-en-github-pages) y [`docs/CONTRATO_FEED_V2.md`](docs/CONTRATO_FEED_V2.md).
+> El feed actual sigue funcionando sin cambios hasta el corte que decida el dueño.
+
 ## Qué es público (y qué no)
 
 El repo y la rama `data` son **públicos**: cualquiera puede leer lo que contienen. Hay que ser honestos con lo que eso
@@ -74,6 +78,117 @@ tiene por qué mostrar el campo `stale`: revisa los avisos del run si FRED lleva
 cuyo historial no le importa a nadie. La rama `data` se reemplaza con un commit nuevo en cada ejecución, así que el
 repo se queda en ~2 MB para siempre. `main` solo lleva código y, como mucho, un commit mínimo cada ~30 días (keepalive).
 
+## Feed v2 (genérico, en GitHub Pages)
+
+Qué cambia respecto al feed actual (auditoría 08, BE-01..BE-09):
+
+| | Feed actual (`update-data.yml`) | Feed v2 (`publish-feed-v2.yml`) |
+|---|---|---|
+| Publicación | rama `data` (force-push) + jsDelivr | GitHub Pages con `actions/deploy-pages` (artefacto; **ningún commit a ninguna rama**) |
+| Forma | un `data.json` de ~10 MB | un fichero por símbolo: `index.json`, `s/<SYM>/latest.json`, `s/<SYM>/d/<AAAA>.json`, `s/<SYM>/i.json`, `crypto/latest.json`, `macro.json`, `news.json`, `health.json`, `manifest.json` |
+| Contenido | incluye `your_funds` y listas del dueño | **genérico**: `registry.json` (242 símbolos públicos y neutros). Lo del dueño va a Supabase |
+| Divisa | `price` sin divisa | `currency` + `unit` (+ `price_unit_divisor`) explícitos; `GBp` ≠ `GBP`; sin divisa/unidad verificada no se publica |
+| Histórico | `max` entero en cada run | **incremental**: ~1 mes por símbolo y run, fusionado por fecha; los años cerrados no se reescriben |
+| Símbolo muerto | 2 desaparecidos paran el run | no bloquea: `stale` hasta 30 días, `invalid`/`delisted`, reintento semanal |
+| Validación | `sanity_check.py` | `sanity_check_v2.py`: esquema estricto, series, continuidad con el sitio anterior (mediana de cierres ≈ 1: detecta el ×100) |
+| Sitio anterior | `curl` a `raw.githubusercontent.com` | descarga propia con `scripts/site_download.py`, verificada contra el manifiesto; **404 = primer run, cualquier otro fallo = no se publica** (BE-06) |
+
+Contrato para el cliente (campos, ejemplos JSON reales, algoritmo de lectura, equivalencias con v1): **[`docs/CONTRATO_FEED_V2.md`](docs/CONTRATO_FEED_V2.md)**.
+
+### Cómo funciona `publish-feed-v2.yml` (4 jobs + `personal`)
+
+| Job | Permisos | Qué hace |
+|---|---|---|
+| `fetch` | `contents: read` | instala con `--require-hashes`, baja el sitio publicado **completo** (hay que volver a incluir los años cerrados en el artefacto de Pages), ejecuta `scripts/feed_v2.py` y sube el sitio como artefacto. Ejecuta código de terceros: su salida se trata como no fiable |
+| `publish` | solo `pages: write` + `id-token: write` | **no ejecuta código de terceros**. Hace su propia descarga del sitio anterior (modo `validate`), valida con `scripts/sanity_check_v2.py` (solo stdlib, sacado del repo) y solo entonces sube el artefacto de Pages y despliega |
+| `verify` | ninguno | informativo (`continue-on-error`): comprueba que Pages ya sirve el `manifest.json` nuevo |
+| `heartbeat` | ninguno | Healthchecks.io: ping normal, `/fail` si algo falló, y `/fail` con el motivo (`degraded: ...`) si se publicó con datos degradados |
+| `personal` | `contents: read` | **opcional**, independiente: datos propios en Supabase (ver abajo). Nunca bloquea el feed público |
+
+`concurrency` serializa los runs, todos los jobs tienen `timeout-minutes`, las acciones van fijadas por SHA y el cron es `47 6,11,15,21 * * *` (media hora después del
+del feed actual para no coincidir en la IP del runner). **El cron del workflow viejo no se ha tocado.**
+
+`scripts/feed_v2.py` reutiliza la lógica probada de `fetch_market_data.py` (ritmo y 429 de Yahoo con pausa y jitter, interruptor de racha de fallos, presupuesto de tiempo
+global de BE-12, FRED, CNN, alternative.me, CoinGecko, RSS) y añade: histórico incremental, niveles `hot` (en cada run, con intradía de 5 min) / `warm` (~1 vez al día) /
+`cold` (~1 vez por semana), cupo de 80 descargas largas por run para repartir el alta de símbolos nuevos, detección de splits (si el pasado guardado difiere >2 % del que da
+Yahoo ahora se baja la serie entera una vez), y estado por símbolo en `health.json`. Todo símbolo se valida con `^[A-Za-z0-9.^=\-]{1,15}$` (más: sin punto inicial ni `..`) y se
+codifica en URL siempre.
+
+**Mediciones** (datos sintéticos del test `tests/test_feed_v2.py::test_medicion_...`, con el `registry.json` real: 224 símbolos de Yahoo, 49 hot / 153 warm / 22 cold;
+`V2_MEASURE=1 pytest -s tests/test_feed_v2.py -k medicion` las imprime):
+
+| Run | Llamadas a Yahoo | Tamaño total |
+|---|---|---|
+| Alta (3 runs seguidos por el cupo de 80 descargas largas) | 129 + 80 + 64 | 13 → 26 → 37 MB |
+| Run normal solo hot (3 de los 4 del día) | 98 (49 diarias de 1 mes + 49 intradía) | sin cambios (+~30 KB) |
+| Run con warm (1 de los 4; normalmente el de las 21:47, el primero tras ≥20 h) | 251 (202 diarias + 49 intradía) | sin cambios |
+| **Por día** (3 × 98 + 251) | **~545** (el feed actual: ~277 × 4 ≈ 1100 para 58 símbolos) | |
+| Sitio completo en estado estable | | 37 MB sin comprimir en 2518 ficheros (~14,5 MB con zlib -6; la serie sintética lleva 6 decimales en todos los precios, así que los reales pesarán menos); `manifest.json` 285 KB |
+
+Además, en cada run: 1 llamada a CoinGecko (250 monedas), ~5 a FRED (con clave), 3 a CNN/alternative.me, ~30 RSS. El run de `fetch` baja del sitio anterior ~2500 ficheros
+(~37 MB sin comprimir, ~14,5 MB por la red con gzip; unos 3 minutos con 16 hilos, **estimación sin medir contra Pages real**) y el de `publish` solo ~670 (manifest + `latest.json` + los dos últimos años de cada símbolo).
+
+### Activarlo (lo hace el dueño, a mano)
+
+1. **Settings → Pages → Source: GitHub Actions.** (Sin esto el despliegue falla.)
+2. **Settings → Environments → github-pages**: ese entorno suele restringir el despliegue a la rama por defecto (`main`); si lanzas el workflow desde otra rama, hay que permitirla ahí.
+3. *(Opcional)* **Secrets** (Settings → Secrets and variables → Actions): `HC_UPDATE_V2_URL` (check propio de Healthchecks; recomendado, para que el feed viejo y el nuevo
+   no se tapen entre sí; si no existe se usa `HC_UPDATE_URL`) y `PERSONAL_FEED_TOKEN` (ver «Datos propios»). `FRED_API_KEY` ya existe y se reutiliza.
+4. **Variables**: `SUPABASE_URL` y `SUPABASE_PUBLISHABLE_KEY` (ya existen para el keepalive). Opcional: `FEED_V2_BASE_URL` (dominio propio, URL de la carpeta `/v2`, https).
+5. **Antes del primer run**, contrasta los SHA de las dos acciones nuevas (no se pudieron comprobar al escribir el workflow, BE-19):
+   `gh api repos/actions/upload-pages-artifact/git/ref/tags/v3.0.1 --jq .object.sha` (debe ser `56afc609…`) y `gh api repos/actions/deploy-pages/git/ref/tags/v4.0.5 --jq .object.sha`
+   (`d6db9016…`). Si Dependabot propone versiones nuevas, mejor.
+6. **Actions → «Publish feed v2» → Run workflow.** El primer run es «primer run» (404 en `manifest.json`) y solo publica ~80 símbolos (cupo de altas); lánzalo 2-3 veces seguidas
+   (o espera al cron) hasta que `health.json.counts.published` iguale a los símbolos de Yahoo del registro (224). Revisa `health.json.problems.unit_mismatch`: las divisas/unidades del `registry.json` se
+   escribieron sin acceso a Yahoo; un símbolo cuya divisa real no coincide **no se publica** hasta que se corrige su entrada (`currency`/`unit`).
+7. Cuando esté a tu gusto: **variable de repo `FEED_V2_ENABLED = true`** para que el cron programado empiece a funcionar (hasta entonces el cron no hace nada; el lanzamiento manual sí).
+
+Un split legítimo (o retirar símbolos a propósito) hace saltar las reglas de continuidad del validador (es justo lo que protege del ×100): lanza el workflow una vez con **allow_regression**.
+
+### Datos propios del dueño (Supabase, fuera del repo)
+
+El backend **no** lleva en el repo ISIN, fondos clase S ni listas del dueño (el feed v2 es genérico). Lo suyo vive en Supabase:
+
+* lee la lista con la RPC `personal_watch_for_backend(p_token)` y publica con `publish_personal_feed(p_token, p_user, p_payload)` (contrato y ejemplos en el
+  [documento del contrato](docs/CONTRATO_FEED_V2.md#5-datos-propios-supabase-fuera-del-repo));
+* **solo** la clave publicable en la cabecera `apikey` + un token aleatorio (secreto `PERSONAL_FEED_TOKEN`) en el cuerpo. **Nunca** `service_role` ni `sb_secret_`: si la clave lo
+  parece, `scripts/personal_v2.py` aborta sin enviar nada (igual que `supabase-keepalive.yml`);
+* el payload (≤ 1 MB) lleva el NAV por ISIN (scraping de iShares), los *facts* y las series (≤ 2 años) solo de lo que **no** está en el universo público; un NAV con un salto fuera de 0,5–2×
+  respecto al anterior no se publica;
+* es **opcional**: sin Supabase o sin token, o si algo falla, solo hay un `::warning::` y el feed público sale igual;
+* privacidad: los logs de un repo público son públicos, así que `personal_v2.py` solo escribe contadores (nunca ISIN, símbolos, URL, clave ni token); el payload nunca va en un artefacto;
+  el token solo está en los pasos de biblioteca estándar (`python3 -S`), no en el paso que ejecuta código de terceros.
+
+### Riesgos que conviene tener presentes
+
+* **Términos de uso de Yahoo Finance e iShares.** `yfinance` se documenta como herramienta de uso personal, y leer automáticamente ishares.com puede chocar con sus términos. Redistribuir sus
+  datos por Pages **a un círculo reducido** (el dueño y amigos) es un riesgo asumible y acotado; **no escala a un servicio abierto**: para eso haría falta una fuente con licencia de redistribución
+  (Stooq, Twelve Data, Alpha Vantage, EOD...). Revisarlo es una decisión del dueño; aquí no se ha podido contrastar con los términos vigentes.
+* **Cuota de Yahoo**: sin SLA ni límite publicado, se limita por IP. El diseño incremental baja las peticiones a ~545 al día; aun así un 429 sostenido abandona Yahoo en ese run (los símbolos
+  pendientes conservan sus datos anteriores) y no penaliza a nadie.
+* **Pages**: límite blando de ancho de banda (orden de 100 GB/mes, a contrastar con la documentación vigente) y de tamaño del sitio (1 GB; aquí ~37 MB). Cada run de `fetch` descarga el sitio anterior completo: ~60 MB al día por la red (comprimido), unos 2 GB al mes.
+* **Rutas con `^` y `=`** (`s/^GSPC/...`, `s/EURUSD=X/...`): son válidas y los clientes las codifican, pero no se han comprobado contra Pages real; si alguna fallara, es un cambio de nombre de ruta.
+* **Años cerrados inmutables**: un split o un ajuste los cambia (se detecta y se baja la serie entera), pero el validador lo trata como regresión y hay que desbloquearlo con `allow_regression`.
+* Python 3.14 solo en CI; los tests locales corren en la versión que haya.
+
+### Purga del historial (BE-09)
+
+La rama `data` del feed actual se sobrescribe con `force-push`, pero los commits anteriores **siguen accesibles por su SHA** y el historial de `main` contiene los ISIN. El feed v2 ya no publica nada del
+dueño, pero eso no borra lo ya publicado. La única purga real es **recrear el repositorio** (los SHA antiguos mueren con él). Lo hace el dueño, tras el corte, y arrastra: crear el repo nuevo con el código actual
+(sin historial), volver a poner secretos y variables, activar Pages y Dependabot/ruleset, y actualizar la URL base del dashboard. Hasta entonces, trata como públicos los ISIN y la lista cripto del código v1.
+
+### Corte (retirar el feed viejo)
+
+1. El dashboard lee de v2 (equivalencias en el contrato) y los datos propios de Supabase.
+2. Se borran `update-data.yml`, la rama `data`, `sanity_check.py` y sus tests, y de `fetch_market_data.py` las listas del dueño (`YOUR_FUNDS`, `CRYPTO_WATCHLIST`, `STOCKS` de nicho) y las funciones de v1 que v2 no usa. **El módulo se queda**: `feed_v2.py` reutiliza su lógica de Yahoo, FRED, CoinGecko, RSS e iShares. Algunos tests de v2 leen `YOUR_FUNDS` de ese módulo para comprobar que el registro público no contiene nada del dueño; al borrarlo hay que darles otra fuente (p. ej. un hash).
+3. Se recrea el repo (BE-09) si se quiere borrar el pasado.
+
+### Cambiar lo que se sigue en v2
+
+Edita `registry.json` (símbolo, `kind` `yahoo|crypto`, nombre, `currency`, `unit`, `tier` `hot|warm|cold`, `status`). `currency` es la divisa **tal cual la cotiza Yahoo** (`GBp` para las líneas de Londres
+en peniques) y `unit` debe ser coherente (`subunit` solo con `GBp`/`GBX`/`ZAc`/`ILA`/`USd`/`USX`); un test valida el fichero y un símbolo con otra divisa real no se publica. El registro es público: no pongas nada tuyo.
+Quitar símbolos hace saltar las reglas de regresión: lanza el workflow una vez con `allow_regression`.
+
 ## Otros workflows
 
 * `keepalive.yml` (semanal): GitHub desactiva los workflows programados de un repo público tras 60 días sin actividad.
@@ -118,7 +233,7 @@ marcado ni caracteres de control, tope de longitud): si añades un campo al back
 ## Configuración inicial
 
 1. Repo **público** (necesario para jsDelivr; minutos de Actions ilimitados).
-2. Archivos en `main`: `scripts/fetch_market_data.py`, `scripts/sanity_check.py`, `tests/`, `requirements.txt`,
+2. Archivos en `main`: `scripts/` (v1: `fetch_market_data.py`, `sanity_check.py`; v2: `feed_v2*.py`, `sanity_check_v2.py`, `site_download.py`, `personal_v2.py`), `registry.json`, `docs/`, `tests/`, `requirements.txt`,
    `.github/workflows/*.yml`, `.github/dependabot.yml`, `.gitignore`, este README.
 3. Secretos (Settings -> Secrets and variables -> Actions): `FRED_API_KEY` (opcional, gratis en
    <https://fred.stlouisfed.org/docs/api/api_key.html>; sin ella no hay tipos ni IPC) y `HC_UPDATE_URL`
@@ -138,6 +253,10 @@ pip install -r requirements.txt
 export FRED_API_KEY=tu_clave   # opcional
 python scripts/fetch_market_data.py   # escribe data.json + meta.json
 python3 scripts/sanity_check.py --data data.json --meta meta.json   # añade --prev prev.json para las reglas de regresión
+
+# feed v2 (genera el sitio en site/v2; usa --prev con una descarga del sitio anterior para el histórico incremental)
+python scripts/feed_v2.py --registry registry.json --out site/v2
+python3 scripts/sanity_check_v2.py --site site/v2 --registry registry.json   # añade --prev prev_site/v2 para la continuidad
 
 pip install -r requirements-dev.txt   # pytest, ruff y PyYAML con la versión exacta de la CI
 ruff check --select F scripts tests
