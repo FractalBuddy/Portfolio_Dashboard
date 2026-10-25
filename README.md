@@ -81,6 +81,20 @@ repo se queda en ~2 MB para siempre. `main` solo lleva código y, como mucho, un
   `.github/keepalive`) y además reactiva `update-data.yml` por si estuviera desactivado. Con commits normales o merges
   de Dependabot no hace nada. Que cuente como actividad para GitHub no está confirmado por su documentación:
   Healthchecks.io sigue siendo la red de seguridad.
+* `supabase-keepalive.yml` (cada 3 días, `37 3 */3 * *`): evita que el proyecto gratuito de Supabase se pause por
+  inactividad con **una** lectura a la REST API (`GET /rest/v1/profiles?select=user_id&limit=1`, cabecera `apikey`).
+  200, 401 y 403 cuentan como correctos (la tabla está protegida por RLS); red caída, 5xx o cualquier otro código
+  (404, 540... un proyecto pausado) fallan tras 3 intentos. Aborta si la clave configurada empieza por `sb_secret_`,
+  contiene `service_role` o es un JWT con ese rol. Los logs solo muestran códigos HTTP.
+  **Configuración** (Settings -> Secrets and variables -> Actions):
+  * pestaña *Variables*: `SUPABASE_URL` (p. ej. `https://<ref>.supabase.co`) y `SUPABASE_PUBLISHABLE_KEY`
+    (`sb_publishable_...`; es pública por diseño, **nunca** pongas aquí la `sb_secret_` ni la `service_role`);
+  * pestaña *Secrets* (opcional): `HC_SUPABASE_URL`, URL de ping de un check propio de Healthchecks.io (periodo 3 días
+    con gracia de al menos 1 día). Vacío: solo un `::warning::`.
+
+  **Cómo comprobarlo**: Actions -> "Supabase keepalive" -> *Run workflow*; el job debe terminar en verde con
+  «Supabase responde (HTTP 200|401|403)». Prueba negativa: pon una URL inventada en `SUPABASE_URL`, relanza y debe
+  fallar con `HTTP 000`. Localmente: `curl -s -o /dev/null -w '%{http_code}\n' -H "apikey: $KEY" "$URL/rest/v1/profiles?select=user_id&limit=1"`.
 * `ci.yml` (en cada PR): sintaxis de Python, `ruff --select F`, `pytest` (sanity-check, scrape de iShares, FRED,
   noticias y los bloques `run:` de los workflows), `actionlint` si está disponible y comprobación de que no hay ficheros
   versionados que `.gitignore` excluye (HTML, copias, exports, `.env`, claves...).
@@ -108,7 +122,7 @@ marcado ni caracteres de control, tope de longitud): si añades un campo al back
    `.github/workflows/*.yml`, `.github/dependabot.yml`, `.gitignore`, este README.
 3. Secretos (Settings -> Secrets and variables -> Actions): `FRED_API_KEY` (opcional, gratis en
    <https://fred.stlouisfed.org/docs/api/api_key.html>; sin ella no hay tipos ni IPC) y `HC_UPDATE_URL`
-   (URL de ping de Healthchecks.io). En Healthchecks usa el horario cron `17 6,11,15,20 * * *` con una gracia de al
+   (URL de ping de Healthchecks.io). En Healthchecks usa el horario cron `17 6,11,15,21 * * *` con una gracia de al
    menos 1 hora (los huecos entre runs llegan a 10 h, un periodo fijo de 6 h daría falsas alarmas).
 4. Actions -> "Update market data" -> **Run workflow**. La primera ejecución crea la rama `data`.
 5. Settings -> Code security: Secret scanning + Push protection + Dependabot alerts.

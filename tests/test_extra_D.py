@@ -518,12 +518,12 @@ def test_D43_heartbeat_alerta_hostil_viaja_como_dato_no_como_codigo(tmp_path):
     assert r.returncode == 0 and not list(tmp_path.glob("PWNED*"))
 
 
-def test_D44_secretos_usados_solo_los_dos_esperados_y_ninguno_en_run():
+def test_D44_secretos_usados_solo_los_esperados_y_ninguno_en_run():
     used = set()
     for f in WF.glob("*.yml"):
         txt = f.read_text(encoding="utf-8")
         used |= set(re.findall(r"secrets\.([A-Za-z0-9_]+)", txt))
-    assert used == {"FRED_API_KEY", "HC_UPDATE_URL"}
+    assert used == {"FRED_API_KEY", "HC_UPDATE_URL", "HC_SUPABASE_URL"}
 
 
 def test_D45_permisos_y_timeouts_de_todos_los_jobs():

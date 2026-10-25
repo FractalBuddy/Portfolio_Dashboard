@@ -493,3 +493,140 @@ def test_BE16_sin_pyyaml_en_ci_los_tests_de_workflows_fallan_en_vez_de_saltarse(
 def test_BE16_sin_pyyaml_en_local_se_saltan_con_aviso(tmp_path):
     r = _pytest_sin_yaml(tmp_path, ci=False)
     assert r.returncode in (0, 5) and "skipped" in r.stdout
+
+# ---- supabase-keepalive
+SB_STEP = "Lectura a la REST API de Supabase"
+SB_ENV = {"SB_URL": "https://abc.supabase.co/", "SB_KEY": "sb_publishable_xyz", "HC": ""}
+
+
+def _sb_script():
+    return step(load("supabase-keepalive.yml"), "ping", SB_STEP)["run"]
+
+
+def test_supabase_keepalive_estructura():
+    wf = load("supabase-keepalive.yml")
+    cron = wf[True]["schedule"][0]["cron"].split()   # PyYAML lee la clave `on` como True
+    assert cron[0] not in ("0", "00") and cron[2] == "*/3"
+    assert wf["permissions"] == {"contents": "read"}
+    assert wf["jobs"]["ping"]["permissions"] == {"contents": "read"}
+    assert wf["concurrency"]["cancel-in-progress"] is False
+    assert wf["jobs"]["ping"]["timeout-minutes"] <= 5
+    env = step(wf, "ping", SB_STEP)["env"]
+    assert env == {"SB_URL": "${{ vars.SUPABASE_URL }}", "SB_KEY": "${{ vars.SUPABASE_PUBLISHABLE_KEY }}",
+                   "HC": "${{ secrets.HC_SUPABASE_URL }}"}
+
+
+def test_readme_documenta_supabase_keepalive_y_horario_de_healthchecks():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    for needle in ("SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "HC_SUPABASE_URL", "supabase-keepalive.yml"):
+        assert needle in readme
+    # el horario de Healthchecks del README debe coincidir con el cron real de update-data.yml
+    cron = load("update-data.yml")[True]["schedule"][0]["cron"]
+    assert "horario cron `%s`" % cron in readme
+
+
+def _fake_curl_sb(sb, codes):
+    """Cada petición a /rest/v1 devuelve el siguiente código de `codes` (el último se repite)."""
+    (sb.tmp / "codes").write_text("\n".join(codes))
+    _exe(sb.bin / "curl", '''echo "curl $*" >> "$CALLS_LOG"
+case "$*" in
+  *rest/v1*)
+    n=$(grep -c '^curl .*rest/v1' "$CALLS_LOG")
+    c=$(sed -n "${n}p" "%(f)s"); [ -n "$c" ] || c=$(tail -n1 "%(f)s")
+    printf '%%s' "$c"; [ "$c" != 000 ] || exit 6; exit 0;;
+  *) exit ${HC_RC:-0};;
+esac
+''' % {"f": sb.tmp / "codes"})
+
+
+def _rest_calls(sb):
+    return [c for c in calls(sb) if "rest/v1" in c]
+
+
+@pytest.mark.parametrize("code", ["200", "401", "403"])
+def test_supabase_keepalive_codigos_correctos(sandbox, code):
+    _fake_curl_sb(sandbox, [code])
+    r = bash(sandbox, _sb_script(), env=SB_ENV)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert len(_rest_calls(sandbox)) == 1 and not any(c.startswith("sleep") for c in calls(sandbox))
+    call = _rest_calls(sandbox)[0]
+    assert "https://abc.supabase.co/rest/v1/profiles?select=user_id&limit=1" in call
+    assert "apikey: sb_publishable_xyz" in call
+
+
+@pytest.mark.parametrize("code", ["000", "404", "500", "503", "521", "540", "429"])
+def test_supabase_keepalive_codigos_de_fallo_reintentan_y_fallan(sandbox, code):
+    _fake_curl_sb(sandbox, [code])
+    r = bash(sandbox, _sb_script(), env=SB_ENV)
+    assert r.returncode == 1
+    assert len(_rest_calls(sandbox)) == 3
+    assert [c for c in calls(sandbox) if c.startswith("sleep")] == ["sleep 15", "sleep 30"]   # sin dormir tras el último
+    assert "::error::" in r.stdout
+
+
+def test_supabase_keepalive_se_recupera_en_un_reintento(sandbox):
+    _fake_curl_sb(sandbox, ["503", "200"])
+    r = bash(sandbox, _sb_script(), env=SB_ENV)
+    assert r.returncode == 0 and len(_rest_calls(sandbox)) == 2
+
+
+@pytest.mark.parametrize("key", [
+    "sb_secret_abc", "eyJ.service_role.x",
+    "eyJhbGciOiJIUzI1NiJ9." + "eyJyb2xlIjoic2VydmljZV9yb2xlIn0" + ".firma",   # JWT {"role":"service_role"}
+])
+def test_supabase_keepalive_aborta_con_clave_secreta_sin_enviarla(sandbox, key):
+    _fake_curl_sb(sandbox, ["200"])
+    r = bash(sandbox, _sb_script(), env=dict(SB_ENV, SB_KEY=key))
+    assert r.returncode == 1 and "SECRETA" in r.stdout + "SECRETA" * ("service_role" in r.stdout)
+    assert _rest_calls(sandbox) == []
+    assert key not in r.stdout + r.stderr
+
+
+def test_supabase_keepalive_acepta_jwt_anon(sandbox):
+    _fake_curl_sb(sandbox, ["200"])
+    anon = "eyJhbGciOiJIUzI1NiJ9.eyJyb2xlIjoiYW5vbiJ9.firma"   # {"role":"anon"}
+    assert bash(sandbox, _sb_script(), env=dict(SB_ENV, SB_KEY=anon)).returncode == 0
+
+
+@pytest.mark.parametrize("var", ["SB_URL", "SB_KEY"])
+def test_supabase_keepalive_falla_si_faltan_variables(sandbox, var):
+    _fake_curl_sb(sandbox, ["200"])
+    r = bash(sandbox, _sb_script(), env=dict(SB_ENV, **{var: ""}))
+    assert r.returncode == 1 and "SUPABASE_URL" in r.stdout and _rest_calls(sandbox) == []
+
+
+def test_supabase_keepalive_url_sin_https_aborta(sandbox):
+    _fake_curl_sb(sandbox, ["200"])
+    r = bash(sandbox, _sb_script(), env=dict(SB_ENV, SB_URL="http://abc.supabase.co"))
+    assert r.returncode == 1 and _rest_calls(sandbox) == []
+
+
+def test_supabase_keepalive_healthchecks_ok_fail_y_vacio(sandbox):
+    hc = {"HC": "https://hc.test/ping/abc/"}
+    _fake_curl_sb(sandbox, ["200"])
+    assert bash(sandbox, _sb_script(), env=dict(SB_ENV, **hc)).returncode == 0
+    pings = [c for c in calls(sandbox) if "hc.test" in c]
+    assert len(pings) == 1 and pings[0].endswith("https://hc.test/ping/abc")
+    sandbox.log.write_text("")
+    _fake_curl_sb(sandbox, ["500"])
+    assert bash(sandbox, _sb_script(), env=dict(SB_ENV, **hc)).returncode == 1
+    pings = [c for c in calls(sandbox) if "hc.test" in c]
+    assert len(pings) == 1 and pings[0].endswith("https://hc.test/ping/abc/fail")
+    sandbox.log.write_text("")
+    r = bash(sandbox, _sb_script(), env=SB_ENV)   # HC vacío
+    assert r.returncode == 1 and "::warning::HC_SUPABASE_URL" in r.stdout
+    assert not any("hc.test" in c for c in calls(sandbox))
+
+
+def test_supabase_keepalive_fallo_del_ping_ok_no_hace_fallar(sandbox):
+    _fake_curl_sb(sandbox, ["200"])
+    r = bash(sandbox, _sb_script(), env=dict(SB_ENV, HC="https://hc.test/x", HC_RC="22"))
+    assert r.returncode == 0 and "no se pudo avisar" in r.stdout
+
+
+def test_supabase_keepalive_no_filtra_datos_en_los_logs(sandbox):
+    _fake_curl_sb(sandbox, ["500"])
+    r = bash(sandbox, _sb_script(), env=dict(SB_ENV, HC="https://hc.test/secreto"))
+    out = r.stdout + r.stderr
+    for s in ("abc.supabase.co", "sb_publishable_xyz", "hc.test/secreto"):
+        assert s not in out
