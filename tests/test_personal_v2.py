@@ -438,7 +438,7 @@ def _payload(**over):
 @pytest.mark.parametrize("mutate", [
     lambda p: p.update(extra="x"), lambda p: p["funds"][0].update(extra=1), lambda p: p["funds"][0].update(name="<b>x</b>"),
     lambda p: p["funds"][0].update(currency="USD"), lambda p: p["funds"][0].update(facts={"evil": "x"}),
-    lambda p: p["funds"][0].update(facts={"domicile": "<x>"}), lambda p: p["funds"][0].update(isin="IE000"),
+    lambda p: p["funds"][0].update(facts={"domicile": "<x>"}), lambda p: p["funds"][0].update(isin="IE0FAKE"),
     lambda p: p.update(public=["../x"]), lambda p: p.update(schema=3),
     lambda p: p.update(series=[{"symbol": "X", "currency": "USD", "unit": "currency", "price_unit_divisor": 1, "price": 1.0, "change_pct": 0, "as_of": "2026-10-23",
                                 "d": ["2026-10-23", "2026-10-22"], "c": [1.0, 1.0]}]),

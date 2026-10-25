@@ -385,7 +385,7 @@ def test_noticias_cripto_filtradas_por_el_registro_publico(world, tmp_path, monk
     def feed(url, limit=8):
         if "coindesk" in url or "cointelegraph" in url:
             return [{"title": "Bitcoin sube", "link": "https://e.com/a", "source": "S", "published": "p"},
-                    {"title": "Tezos y Mina suben", "link": "https://e.com/b", "source": "S", "published": "p"}]
+                    {"title": "Una moneda fuera del registro sube", "link": "https://e.com/b", "source": "S", "published": "p"}]
         return []
     monkeypatch.setattr(fm, "parse_feed", feed)
     out, _ = gen(tmp_path, "s1")

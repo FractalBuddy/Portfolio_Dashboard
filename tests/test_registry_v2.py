@@ -62,15 +62,15 @@ def test_el_registro_publico_no_lleva_nada_del_dueno(reg):
     for f in fm.YOUR_FUNDS:
         assert f["isin"] not in text and f["proxy_symbol"] not in text
         assert f["name"] not in text
-    names = " ".join(r["name"].lower() for r in reg)
-    for kw in ("unibright", "rocket pool", "tezos", "mina"):
-        assert kw not in names
-    # símbolos del universo v1 que no son de mercado general (small caps de nicho): fuera del registro público
-    general = {s for s, _ in fm.STOCKS[:10]}                      # las 10 primeras de v1 son grandes caps generales
-    niche = {s for s, _ in fm.STOCKS} - general
+    # la lista cripto idiosincrática (de la posición 8 en adelante; las primeras son bitcoin/ethereum/chainlink/polkadot, grandes y genéricas)
+    words = " ".join(r["name"].lower() + " " + r["symbol"].lower() for r in reg)
+    for kw in fm.CRYPTO_WATCHLIST[8:]:
+        assert not re.search(r"\b" + re.escape(kw) + r"\b", words), "cripto idiosincrática en el registro público"
+    # acciones de nicho del universo v1 (la tanda «Explore» fotónica y las dos últimas, small caps): fuera del registro público
+    niche = {s for s, _ in fm.STOCKS[10:15] + fm.STOCKS[-2:]}
     in_reg = {r["symbol"] for r in reg}
-    assert {"IPGP", "NOVT", "AMS.SW", "AMP.MC", "NXT.MC"} & in_reg == set()
-    assert len(in_reg & niche) < len(niche)                       # el registro no es el universo v1 copiado
+    assert niche and not (niche & in_reg)
+    assert len(in_reg & {s for s, _ in fm.STOCKS}) < len(fm.STOCKS)      # el registro no es el universo v1 copiado
 
 
 # ------------------------------------------------------------------ símbolo
