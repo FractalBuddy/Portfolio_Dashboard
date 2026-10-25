@@ -20,8 +20,9 @@ def mk(sym, unit="currency", cur="USD", tier="hot", kind="yahoo", name=None, sta
     return {"symbol": sym, "kind": kind, "name": name or sym, "currency": cur, "unit": unit, "tier": tier, "status": status, "fail_streak": 0}
 
 
-REG = [mk("^GSPC", "points", "USD"), mk("AAPL"), mk("SWDA.L", "subunit", "GBp"), mk("EIMI.L", "currency", "USD", "warm"),
-       mk("EURUSD=X", "rate", "USD"), mk("USDJPY=X", "rate", "JPY", "warm"), mk("GC=F", "currency", "USD"),
+REG = [mk("^GSPC", "points", "USD", name="S&P 500"), mk("AAPL", name="Apple"),
+       mk("SWDA.L", "subunit", "GBp", name="iShares Core MSCI World UCITS ETF"), mk("EIMI.L", "currency", "USD", "warm", name="iShares Core MSCI EM IMI UCITS ETF"),
+       mk("EURUSD=X", "rate", "USD", name="EUR/USD"), mk("USDJPY=X", "rate", "JPY", "warm", name="USD/JPY"), mk("GC=F", "currency", "USD", name="Gold"),
        mk("BTC", "currency", "USD", "hot", "crypto", "Bitcoin"), mk("ETH", "currency", "USD", "warm", "crypto", "Ethereum")]
 
 

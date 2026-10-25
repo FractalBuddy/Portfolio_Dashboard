@@ -2,6 +2,7 @@
 Todo con datos sintéticos y Yahoo/CoinGecko/FRED simulados: ningún test sale a Internet."""
 import json
 import os
+import zlib
 from datetime import date, datetime, timedelta, timezone
 
 import pandas as pd
@@ -460,17 +461,18 @@ def test_medicion_de_peticiones_y_tamano_con_el_registro_real(world, tmp_path, c
         rows.append((label, len(world.calls), daily, intra, long_, run.total_bytes, len(run.written)))
         prev = out
     mf = jl(prev, "manifest.json")
-    by_kind = {}
+    by_kind, gz = {}, 0
     for rel, v in mf["files"].items():
         by_kind.setdefault(c.classify_path(rel)[0], []).append(v["bytes"])
+        gz += len(zlib.compress(open(os.path.join(prev, "v2", *rel.split("/")), "rb").read(), 6))
     if os.environ.get("V2_MEASURE"):                                            # V2_MEASURE=1 pytest -s tests/test_feed_v2.py -k medicion
         with capsys.disabled():
             print("\n  run                      llamadas  diarias  intradía  largas   bytes totales   ficheros")
             for r in rows:
                 print("  %-24s %8d %8d %9d %7d %15d %10d" % r)
             print("  tamaño por tipo (máx / medio): " + ", ".join("%s %d/%d" % (k, max(v), sum(v) // len(v)) for k, v in sorted(by_kind.items())))
-            print("  total del sitio: %d bytes en %d ficheros (+ manifest.json de %d bytes); símbolos hot %d, warm %d, cold %d" % (
-                mf["total_bytes"], len(mf["files"]), os.path.getsize(os.path.join(prev, "v2", "manifest.json")), len(hot),
+            print("  total del sitio: %d bytes (%d comprimido con zlib -6, fichero a fichero) en %d ficheros (+ manifest.json de %d bytes); símbolos hot %d, warm %d, cold %d" % (
+                mf["total_bytes"], gz, len(mf["files"]), os.path.getsize(os.path.join(prev, "v2", "manifest.json")), len(hot),
                 sum(e["tier"] == "warm" for e in yahoo), sum(e["tier"] == "cold" for e in yahoo)))
     assert rows[0][4] == f2.BACKFILL_MAX_PER_RUN and rows[1][4] == f2.BACKFILL_MAX_PER_RUN         # el cupo reparte el alta
     assert rows[3][1] <= 2 * len(hot) and rows[3][4] == 0                                          # run de solo hot: ≤ 2 peticiones por símbolo, ninguna larga
