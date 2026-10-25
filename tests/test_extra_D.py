@@ -523,7 +523,7 @@ def test_D44_secretos_usados_solo_los_esperados_y_ninguno_en_run():
     for f in WF.glob("*.yml"):
         txt = f.read_text(encoding="utf-8")
         used |= set(re.findall(r"secrets\.([A-Za-z0-9_]+)", txt))
-    assert used == {"FRED_API_KEY", "HC_UPDATE_URL", "HC_SUPABASE_URL"}
+    assert used == {"FRED_API_KEY", "HC_UPDATE_URL", "HC_SUPABASE_URL", "HC_UPDATE_V2_URL"}      # + el check propio del feed v2 (opcional)
 
 
 def test_D45_permisos_y_timeouts_de_todos_los_jobs():
@@ -531,7 +531,9 @@ def test_D45_permisos_y_timeouts_de_todos_los_jobs():
         wf = yaml.safe_load(f.read_text(encoding="utf-8"))
         assert "permissions" in wf, f.name
         for jn, job in wf["jobs"].items():
-            assert isinstance(job.get("timeout-minutes"), int) and job["timeout-minutes"] <= 20, (f.name, jn)
+            # 20 min en general; el `fetch` del feed v2 baja primero el sitio anterior (~3 min) y tiene un presupuesto propio de 17 min (BE-12)
+            limit = 25 if (f.name, jn) == ("publish-feed-v2.yml", "fetch") else 20
+            assert isinstance(job.get("timeout-minutes"), int) and job["timeout-minutes"] <= limit, (f.name, jn)
             assert re.fullmatch(r"ubuntu-24\.04", job["runs-on"]), (f.name, jn)
             perms = job.get("permissions", wf["permissions"])
             if perms.get("contents") == "write":

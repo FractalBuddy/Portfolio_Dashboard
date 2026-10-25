@@ -630,3 +630,206 @@ def test_supabase_keepalive_no_filtra_datos_en_los_logs(sandbox):
     out = r.stdout + r.stderr
     for s in ("abc.supabase.co", "sb_publishable_xyz", "hc.test/secreto"):
         assert s not in out
+
+
+# ====================================================================================================================================
+# Feed v2: publish-feed-v2.yml (GitHub Pages con deploy-pages, sin commits a ninguna rama)
+# ====================================================================================================================================
+V2 = "publish-feed-v2.yml"
+
+
+def _v2_triggers():
+    wf = load(V2)
+    return wf.get("on", wf.get(True))
+
+
+def test_v2_estructura_permisos_minimos_y_dependencias():
+    wf = load(V2)
+    jobs = wf["jobs"]
+    assert set(jobs) == {"fetch", "publish", "verify", "heartbeat"}
+    assert wf["permissions"] == {}                                                       # nada por defecto
+    assert jobs["fetch"]["permissions"] == {"contents": "read"}
+    assert jobs["publish"]["permissions"] == {"pages": "write", "id-token": "write"}      # los dos y solo esos
+    assert jobs["verify"]["permissions"] == {} and jobs["heartbeat"]["permissions"] == {}
+    assert jobs["publish"]["needs"] == "fetch" and jobs["verify"]["needs"] == "publish"
+    assert set(jobs["heartbeat"]["needs"]) == {"fetch", "publish"} and jobs["verify"]["continue-on-error"] is True
+    assert all("verify" not in (j.get("needs") if isinstance(j.get("needs"), list) else [j.get("needs")]) for n, j in jobs.items() if n != "verify")
+    assert jobs["publish"]["environment"]["name"] == "github-pages"
+    assert wf["concurrency"] == {"group": "publish-feed-v2", "cancel-in-progress": False}
+    assert all(isinstance(j.get("timeout-minutes"), int) and j["timeout-minutes"] <= 25 for j in jobs.values())
+
+
+def test_v2_no_hace_commits_ni_pushes_a_ninguna_rama():
+    text = (WF / V2).read_text(encoding="utf-8")
+    assert "git push" not in text and "contents: write" not in text and "git commit" not in text
+    uses = [s["uses"].split("@")[0] for j in load(V2)["jobs"].values() for s in j["steps"] if "uses" in s]
+    assert "actions/deploy-pages" in uses and "actions/upload-pages-artifact" in uses
+
+
+def test_v2_fetch_instala_con_hashes_y_publish_no_instala_nada_de_terceros():
+    jobs = load(V2)["jobs"]
+    fetch_runs = " ".join(s.get("run", "") for s in jobs["fetch"]["steps"])
+    assert "pip install --require-hashes --no-deps -r requirements.txt" in fetch_runs
+    for s in jobs["publish"]["steps"]:
+        assert "pip " not in s.get("run", "") and "actions/setup-python" not in s.get("uses", "")
+    assert "sanity_check_v2" not in json.dumps(jobs["fetch"])                             # el validador solo vive en publish
+    assert "id-token" not in json.dumps(jobs["fetch"]) and "pages" not in jobs["fetch"]["permissions"]
+
+
+def test_v2_el_secreto_de_fred_solo_esta_en_el_paso_que_construye_el_feed():
+    jobs = load(V2)["jobs"]
+    for jn, job in jobs.items():
+        for s in job["steps"]:
+            has = "FRED_API_KEY" in json.dumps(s.get("env", {}))
+            assert has == (jn == "fetch" and s.get("name") == "Build feed v2"), (jn, s.get("name"))
+
+
+def test_v2_publish_valida_antes_de_subir_y_desplegar_y_con_descarga_propia():
+    jobs = load(V2)["jobs"]
+    names = [s.get("name") for s in jobs["publish"]["steps"]]
+    assert names.index("Download previous site (validation subset)") < names.index("Sanity-check feed v2") < names.index("Upload Pages artifact") \
+        < names.index("Deploy to GitHub Pages")
+    co = step(load(V2), "publish", "Check out scripts and registry only")
+    assert co["with"]["persist-credentials"] is False and "scripts" in co["with"]["sparse-checkout"] and "registry.json" in co["with"]["sparse-checkout"]
+    dl = step(load(V2), "publish", "Download previous site (validation subset)")["run"]
+    assert "site_download.py" in dl and "--mode validate" in dl and "--github-env" in dl
+    fetch_dl = step(load(V2), "fetch", "Download previous site (full)")["run"]
+    assert "--mode full" in fetch_dl and "--github-env" not in fetch_dl
+    san = step(load(V2), "publish", "Sanity-check feed v2")
+    assert san["env"]["EXPECT_PREV"] == "${{ env.EXPECT_PREV }}" and san["env"]["SANITY_ALLOW_REGRESSION"] == "${{ inputs.allow_regression }}"
+    assert "sanity_check_v2.py" in san["run"] and "--prev prev_site/v2" in san["run"] and "--registry registry.json" in san["run"]
+    assert step(load(V2), "publish", "Deploy to GitHub Pages")["id"] == "deployment"
+
+
+def test_v2_el_cron_esta_gobernado_por_la_variable_y_el_workflow_viejo_no_cambia():
+    wf = load(V2)
+    for jn in ("fetch", "heartbeat"):
+        cond = wf["jobs"][jn]["if"]
+        assert "FEED_V2_ENABLED" in cond and "schedule" in cond
+    assert "always()" in wf["jobs"]["heartbeat"]["if"]
+    t = _v2_triggers()
+    assert t["schedule"] == [{"cron": "47 6,11,15,21 * * *"}] and set(t["workflow_dispatch"]["inputs"]) == {"allow_regression", "force_all"}
+    old = load("update-data.yml")
+    old_t = old.get("on", old.get(True))
+    assert old_t["schedule"] == [{"cron": "17 6,11,15,21 * * *"}]                           # el cron viejo, intacto
+    assert set(old["jobs"]) == {"fetch", "publish", "verify-cdn", "heartbeat"}
+
+
+def test_v2_sale_por_https_y_no_pisa_la_rama_data():
+    text = (WF / V2).read_text(encoding="utf-8")
+    assert "refs/heads/data" not in text and "@data" not in text
+
+
+def _url_script():
+    return step(load(V2), "fetch", "Resolve published feed URL")["run"]
+
+
+@pytest.mark.parametrize("override,repo,want", [
+    ("", "FractalBuddy/Portfolio_Dashboard", "https://fractalbuddy.github.io/Portfolio_Dashboard/v2"),
+    ("", "usuario/repo", "https://usuario.github.io/repo/v2"),
+    ("https://feed.example.com/v2/", "usuario/repo", "https://feed.example.com/v2"),
+])
+def test_v2_url_del_sitio_publicado(sandbox, override, repo, want):
+    env = sandbox.tmp / "env"
+    for script in (_url_script(), step(load(V2), "publish", "Resolve published feed URL")["run"]):
+        env.write_text("")
+        r = bash(sandbox, script, env={"OVERRIDE": override, "GITHUB_REPOSITORY": repo, "GITHUB_ENV": str(env)})
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert env.read_text() == "FEED_BASE=%s\n" % want
+
+
+@pytest.mark.parametrize("override", ["http://feed.example.com/v2", "ftp://x/v2", "feed.example.com", "file:///etc/passwd"])
+def test_v2_url_no_https_aborta(sandbox, override):
+    env = sandbox.tmp / "env"
+    env.write_text("")
+    r = bash(sandbox, _url_script(), env={"OVERRIDE": override, "GITHUB_REPOSITORY": "u/r", "GITHUB_ENV": str(env)})
+    assert r.returncode != 0 and "https://" in r.stdout and env.read_text() == ""
+
+
+def test_v2_recoger_alertas(sandbox):
+    script = step(load(V2), "publish", "Collect alerts")["run"]
+    out, summ, tmp = sandbox.tmp / "out", sandbox.tmp / "summary", sandbox.tmp / "rt"
+    tmp.mkdir()
+    env = {"GITHUB_OUTPUT": str(out), "GITHUB_STEP_SUMMARY": str(summ), "RUNNER_TEMP": str(tmp)}
+    out.write_text("")
+    assert bash(sandbox, script, env=env).returncode == 0 and out.read_text() == "alerts=\n"
+    (tmp / "alerts.txt").write_text("429 de Yahoo | 2 simbolos con otra unidad\n::error::x")
+    r = bash(sandbox, script, env=env)
+    assert r.returncode == 0 and out.read_text().count("\n") == 2 and "DATOS DEGRADADOS" in r.stdout
+    assert "\r" not in out.read_text()
+    assert "- 429 de Yahoo" in summ.read_text()
+
+
+def test_v2_leer_generated_at_valida_el_formato(sandbox):
+    script = step(load(V2), "publish", "Read generated_at")["run"]
+    (sandbox.work / "site" / "v2").mkdir(parents=True)
+    mf = sandbox.work / "site" / "v2" / "manifest.json"
+    out = sandbox.tmp / "gh_output"
+    mf.write_text(json.dumps({"generated_at": "2026-10-26T12:00:00Z"}))
+    assert bash(sandbox, script, env={"GITHUB_OUTPUT": str(out)}).returncode == 0 and out.read_text() == "generated_at=2026-10-26T12:00:00Z\n"
+    mf.write_text(json.dumps({"generated_at": "x\nevil=1"}))
+    out.write_text("")
+    assert bash(sandbox, script, env={"GITHUB_OUTPUT": str(out)}).returncode != 0 and out.read_text() == ""
+
+
+def _hb2(sb, hc, fetch, publish, alerts=""):
+    _exe(sb.bin / "curl", 'echo "curl $*" >> "$CALLS_LOG"\n')
+    script = step(load(V2), "heartbeat", "Ping Healthchecks.io")["run"]
+    return bash(sb, script, env={"HC": hc, "FETCH": fetch, "PUBLISH": publish, "ALERTS": alerts})
+
+
+def test_v2_heartbeat_ok_fail_y_degradado(sandbox):
+    assert _hb2(sandbox, "https://hc.test/ping/abc/", "success", "success").returncode == 0
+    assert calls(sandbox)[-1].endswith("https://hc.test/ping/abc") and "/fail" not in calls(sandbox)[-1]
+    for f, p in (("success", "failure"), ("failure", "skipped"), ("cancelled", "skipped"), ("success", "skipped")):
+        sandbox.log.write_text("")
+        _hb2(sandbox, "https://hc.test/ping/abc", f, p)
+        assert calls(sandbox)[-1].endswith("https://hc.test/ping/abc/fail"), (f, p)
+    sandbox.log.write_text("")
+    _hb2(sandbox, "https://hc.test/ping/abc", "success", "success", alerts="Yahoo limitó (429)")
+    assert "degraded: Yahoo limitó (429)" in calls(sandbox)[-1] and calls(sandbox)[-1].endswith("/fail")
+
+
+def test_v2_heartbeat_sin_url_avisa(sandbox):
+    r = _hb2(sandbox, "", "success", "success")
+    assert r.returncode == 0 and "::warning::" in r.stdout and calls(sandbox) == []
+
+
+def test_v2_el_heartbeat_usa_el_check_propio_si_existe_y_si_no_el_de_siempre():
+    jobs = load(V2)["jobs"]
+    assert jobs["heartbeat"]["steps"][0]["env"]["HC"] == "${{ secrets.HC_UPDATE_V2_URL || secrets.HC_UPDATE_URL }}"
+    assert jobs["verify"]["steps"][0]["env"]["HC"] == "${{ secrets.HC_UPDATE_V2_URL || secrets.HC_UPDATE_URL }}"
+
+
+def _verify2():
+    return step(load(V2), "verify", "Check Pages serves the new manifest")["run"]
+
+
+def _fake_curl_pages(sb, served):
+    _exe(sb.bin / "curl", '''echo "curl $*" >> "$CALLS_LOG"
+case "$*" in
+  */log*) exit 0;;
+  *manifest.json*) echo '{"generated_at":"%s"}'; exit 0;;
+esac
+''' % served)
+
+
+def test_v2_verify_pages_fresco_sale_sin_dormir(sandbox):
+    want = "2026-10-26T12:00:00Z"
+    _fake_curl_pages(sandbox, want)
+    r = bash(sandbox, _verify2(), env={"WANT": want, "PAGE": "https://u.github.io/r/", "HC": "https://hc.test/x"})
+    assert r.returncode == 0 and "Pages sirve el sitio nuevo" in r.stdout and not any(c_.startswith("sleep") for c_ in calls(sandbox))
+    assert "https://u.github.io/r/v2/manifest.json?cb=" in " ".join(calls(sandbox))
+
+
+def test_v2_verify_pages_desfasado_avisa_pero_no_falla_ni_duerme_tras_el_ultimo(sandbox):
+    _fake_curl_pages(sandbox, "2000-01-01T00:00:00Z")
+    r = bash(sandbox, _verify2(), env={"WANT": "2026-10-26T12:00:00Z", "PAGE": "https://u.github.io/r/", "HC": "https://hc.test/x"})
+    assert r.returncode == 0 and "::warning::Pages sigue sirviendo" in r.stdout
+    assert calls(sandbox).count("sleep 20") == 1 and sum(1 for c_ in calls(sandbox) if c_.startswith("sleep")) == 5
+    assert any("/log" in c_ and "pages-stale" in c_ for c_ in calls(sandbox))
+
+
+def test_v2_verify_sin_datos_no_hace_nada(sandbox):
+    r = bash(sandbox, _verify2(), env={"WANT": "", "PAGE": "", "HC": ""})
+    assert r.returncode == 0 and calls(sandbox) == []

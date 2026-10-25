@@ -1,0 +1,253 @@
+name: Publish feed v2
+
+# Feed genérico v2 (schema 2): un fichero por símbolo, publicado en GitHub Pages bajo /v2/ con actions/deploy-pages (artefacto; NO hay commits a
+# ninguna rama). Convive con `update-data.yml` (rama `data` + jsDelivr), que NO se toca hasta el corte que hace el dueño.
+#
+# Activación (a mano, una vez): Settings -> Pages -> Source: GitHub Actions. Mientras no esté activada y la variable de repo FEED_V2_ENABLED no
+# valga `true`, el cron NO hace nada (los jobs se omiten); el lanzamiento manual (Run workflow) funciona siempre.
+on:
+  schedule:
+    # 4 veces al día (UTC), media hora después que update-data.yml (:17) para no coincidir en la misma IP de runner con Yahoo:
+    # 06:47, 11:47, 15:47, 21:47. Minuto «feo» a propósito (los cron en :00 son los que más retrasa GitHub).
+    - cron: '47 6,11,15,21 * * *'
+  workflow_dispatch:
+    inputs:
+      allow_regression:
+        description: 'Publicar aunque falle la CONTINUIDAD con el sitio anterior (un split, un símbolo retirado a propósito, el sitio anterior inalcanzable...). Las reglas absolutas siguen bloqueando.'
+        type: boolean
+        default: false
+      force_all:
+        description: 'Refrescar TODOS los símbolos (ignora los niveles hot/warm/cold). Cuesta ~una vez y media las peticiones a Yahoo de un run normal.'
+        type: boolean
+        default: false
+
+# Por defecto NADA. Cada job pide solo lo que usa: `fetch` (código de terceros) lee el repo; `publish` (sin código de terceros) escribe en Pages.
+permissions: {}
+
+# Nunca dos runs a la vez (compiten por el histórico incremental y por el despliegue). `cancel-in-progress: false`: un run a medias nunca se mata
+# a mitad de despliegue. No es una cola: GitHub guarda UN run pendiente por grupo; es inocuo (cada run baja el estado más reciente).
+concurrency:
+  group: publish-feed-v2
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    if: ${{ github.event_name != 'schedule' || vars.FEED_V2_ENABLED == 'true' }}
+    # Instala dependencias de terceros (yfinance...) y ejecuta su código: solo lectura y sin acceso a Pages. Su salida (el sitio) se trata como NO
+    # fiable: la valida el job `publish`, que no ejecuta nada de terceros.
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25   # ~3 min de descarga del sitio anterior + hasta 17 min de run (V2_HARD_BUDGET_SECONDS) + subida del artefacto
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+          cache: pip
+
+      # Solo lo fijado en requirements.txt (versiones exactas + hashes): pip rechaza cualquier archivo cuyo hash no coincida (BE-07).
+      - name: Install dependencies (hash-pinned)
+        run: pip install --require-hashes --no-deps -r requirements.txt
+
+      # URL de la carpeta v2 publicada: la de Pages del propio repo, o la variable FEED_V2_BASE_URL (dominio propio). Debe ser https.
+      - name: Resolve published feed URL
+        env:
+          OVERRIDE: ${{ vars.FEED_V2_BASE_URL }}
+        run: |
+          if [ -n "$OVERRIDE" ]; then
+            base="$OVERRIDE"
+          else
+            owner=$(printf '%s' "${GITHUB_REPOSITORY%%/*}" | tr 'A-Z' 'a-z')
+            base="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}/v2"
+          fi
+          case "$base" in
+            https://*) ;;
+            *) echo "::error::FEED_V2_BASE_URL debe empezar por https://"; exit 1 ;;
+          esac
+          echo "FEED_BASE=${base%/}" >> "$GITHUB_ENV"
+
+      # Sitio publicado anteriormente COMPLETO (hay que volver a incluir los años cerrados en el artefacto de Pages) para el histórico incremental.
+      # Solo un 404 en manifest.json es «primer run»; cualquier otro fallo (red, 5xx, sha256 distinto del manifiesto...) falla el job: no se publica a
+      # ciegas (BE-06).
+      - name: Download previous site (full)
+        run: python3 scripts/site_download.py --base-url "$FEED_BASE" --dest prev_site/v2 --mode full
+
+      - name: Build feed v2
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          FEED_V2_FORCE_ALL: ${{ inputs.force_all }}
+        run: python scripts/feed_v2.py --registry registry.json --out site/v2 --prev prev_site/v2
+
+      - name: Upload site artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: site-v2
+          path: site
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    needs: fetch
+    # Único job con permisos de publicación. NO instala ni ejecuta paquetes de terceros: baja el artefacto, lo VALIDA con scripts/sanity_check_v2.py
+    # (sacado del repo, no del artefacto) contra una descarga PROPIA del sitio publicado, y solo entonces lo despliega.
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    outputs:
+      generated_at: ${{ steps.meta.outputs.generated_at }}
+      alerts: ${{ steps.alerts.outputs.alerts }}
+      page_url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      # Solo scripts/ y el registro, sin credenciales persistentes (el repo es público: no hace falta permiso de contents).
+      - name: Check out scripts and registry only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            scripts
+            registry.json
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Download site artifact
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: site-v2
+          path: site
+
+      - name: Resolve published feed URL
+        env:
+          OVERRIDE: ${{ vars.FEED_V2_BASE_URL }}
+        run: |
+          if [ -n "$OVERRIDE" ]; then
+            base="$OVERRIDE"
+          else
+            owner=$(printf '%s' "${GITHUB_REPOSITORY%%/*}" | tr 'A-Z' 'a-z')
+            base="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}/v2"
+          fi
+          case "$base" in
+            https://*) ;;
+            *) echo "::error::FEED_V2_BASE_URL debe empezar por https://"; exit 1 ;;
+          esac
+          echo "FEED_BASE=${base%/}" >> "$GITHUB_ENV"
+
+      # Descarga PROPIA del sitio publicado (no se fía de la que hizo `fetch`): manifest + latest.json + diario de los dos últimos años, verificados
+      # contra el manifiesto. 404 en manifest.json (primer run) => EXPECT_PREV=false; cualquier otro fallo => el job falla (BE-06). Si la descarga
+      # termina bien, EXPECT_PREV=true y el validador exige que la comparación sea posible.
+      - name: Download previous site (validation subset)
+        run: python3 scripts/site_download.py --base-url "$FEED_BASE" --dest prev_site/v2 --mode validate --github-env
+
+      - name: Sanity-check feed v2
+        env:
+          SANITY_ALLOW_REGRESSION: ${{ inputs.allow_regression }}
+          EXPECT_PREV: ${{ env.EXPECT_PREV }}
+        run: python3 scripts/sanity_check_v2.py --site site/v2 --registry registry.json --prev prev_site/v2 --alerts-out "$RUNNER_TEMP/alerts.txt"
+
+      # Datos degradados que merecen que el dueño se entere (Yahoo limitando, símbolos con otra unidad, presupuesto agotado...). El sitio SÍ se publica
+      # (lo bueno sigue siendo lo mejor disponible); el heartbeat lo convierte en un /fail de Healthchecks con el texto.
+      - name: Collect alerts
+        id: alerts
+        run: |
+          a=""
+          if [ -f "$RUNNER_TEMP/alerts.txt" ]; then a=$(tr -d '\r\n' < "$RUNNER_TEMP/alerts.txt" | cut -c1-900); fi
+          echo "alerts=$a" >> "$GITHUB_OUTPUT"
+          if [ -n "$a" ]; then
+            echo "::warning::DATOS DEGRADADOS (se publica igualmente): $a"
+            { echo "### ⚠️ Datos degradados"; echo; echo "$a" | sed 's/ | /\n- /g; s/^/- /'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Read generated_at
+        id: meta
+        run: |
+          ga=$(python3 -c 'import json;print(json.load(open("site/v2/manifest.json"))["generated_at"])')
+          case "$ga" in ""|*[!0-9A-Za-z:.+-]*) echo "::error::generated_at con formato inesperado"; exit 1;; esac
+          echo "generated_at=$ga" >> "$GITHUB_OUTPUT"
+
+      # Sin Jekyll: no queremos que Pages ignore carpetas o ficheros por su nombre (los símbolos pueden empezar por «^»).
+      - name: Add .nojekyll
+        run: touch site/.nojekyll
+
+      # NOTA (BE-19): estos dos SHA corresponden a los tags indicados, pero NO se han contrastado con upstream desde la sesión que escribió este
+      # workflow (sin acceso a GitHub). Antes del primer run, comprobar cada uno:  gh api repos/actions/<repo>/git/ref/tags/<tag> --jq .object.sha
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3.0.1
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4.0.5
+
+  # Comprobación informativa FUERA del camino crítico: Pages ya sirve el sitio nuevo. Pages cachea unos minutos; un desfase no es un fallo.
+  verify:
+    needs: publish
+    continue-on-error: true
+    permissions: {}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Check Pages serves the new manifest
+        env:
+          WANT: ${{ needs.publish.outputs.generated_at }}
+          PAGE: ${{ needs.publish.outputs.page_url }}
+          HC: ${{ secrets.HC_UPDATE_V2_URL || secrets.HC_UPDATE_URL }}
+        run: |
+          set -u
+          if [ -z "$WANT" ] || [ -z "$PAGE" ]; then echo "::warning::sin generated_at o page_url: no se verifica Pages"; exit 0; fi
+          tries=6
+          got=""
+          for i in $(seq 1 "$tries"); do
+            got=$(curl -fsS --max-time 30 "${PAGE%/}/v2/manifest.json?cb=$RANDOM" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("generated_at",""))' 2>/dev/null | tr -d '\r\n' | cut -c1-64 || true)
+            if [ "$got" = "$WANT" ]; then echo "Pages sirve el sitio nuevo ($WANT)"; exit 0; fi
+            echo "intento $i/$tries: Pages sirve '$got' (esperado '$WANT')"
+            if [ "$i" -lt "$tries" ]; then sleep $((i*20)); fi
+          done
+          msg="Pages sigue sirviendo un manifest.json antiguo (sirve '${got:-vacío}', esperado '$WANT') tras $tries intentos"
+          echo "::warning::${msg}; la caché de Pages dura unos minutos y se pondrá al día sola."
+          if [ -n "${HC:-}" ]; then
+            curl -fsS -m 10 --retry 3 --retry-all-errors --data-raw "pages-stale: ${msg}" "${HC%/}/log" >/dev/null || echo "::warning::no se pudo enviar el aviso informativo a Healthchecks (/log)"
+          fi
+          exit 0
+
+  # Latido para Healthchecks.io: avisa si el workflow FALLA, se CANCELA, agota el timeout o deja de ejecutarse. La URL va en un secreto (el repo es
+  # público): HC_UPDATE_V2_URL si existe (check propio, recomendado) y, si no, HC_UPDATE_URL. Solo depende de fetch y publish.
+  heartbeat:
+    needs: [fetch, publish]
+    if: ${{ always() && (github.event_name != 'schedule' || vars.FEED_V2_ENABLED == 'true') }}
+    permissions: {}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Ping Healthchecks.io
+        env:
+          HC: ${{ secrets.HC_UPDATE_V2_URL || secrets.HC_UPDATE_URL }}
+          FETCH: ${{ needs.fetch.result }}
+          PUBLISH: ${{ needs.publish.result }}
+          ALERTS: ${{ needs.publish.outputs.alerts }}
+        run: |
+          if [ -z "$HC" ]; then
+            echo "::warning::HC_UPDATE_V2_URL / HC_UPDATE_URL vacíos o inexistentes: no se avisa a Healthchecks y nadie se enterará si el workflow falla."
+            exit 0
+          fi
+          HC="${HC%/}"
+          if [ "$FETCH" = "success" ] && [ "$PUBLISH" = "success" ]; then
+            if [ -n "${ALERTS:-}" ]; then
+              # Publicado, pero con datos degradados: Healthchecks lo marca como caído con el motivo (el siguiente run limpio lo recupera).
+              curl -fsS -m 10 --retry 5 --retry-all-errors --data-raw "degraded: ${ALERTS}" "$HC/fail" >/dev/null
+              exit 0
+            fi
+            url="$HC"
+          else
+            url="$HC/fail"
+          fi
+          curl -fsS -m 10 --retry 5 --retry-all-errors "$url" >/dev/null
