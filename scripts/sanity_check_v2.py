@@ -59,7 +59,9 @@ MIN_LOST_SYMBOLS_TOLERATED = 2
 MAX_ERRORS_SHOWN = 40
 MAX_BARS_PER_YEAR_FILE = 400
 MAX_INTRADAY_BARS = 800
-STALE_ALERT_FRACTION = 0.2
+UNPUBLISHED_ALERT_FRACTION = 0.10  # más de este % de los símbolos activos del registro sin publicar = aviso a Healthchecks (menos: solo ::warning::)
+FAIL_CLASSES = ("empty", "http_error", "timeout", "parse", "unit", "suspect")      # = feed_v2.FAIL_CLASSES (el validador no importa el generador)
+DROP_REASONS = ("close_missing", "close_not_finite", "close_le_0", "unknown")      # = feed_v2.DROP_REASONS
 
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f]")
 _TS_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
@@ -302,10 +304,15 @@ HEALTH_SPEC = obj({
                 "yahoo_abandoned": boolean, "budget_exhausted": boolean}),
     "counts": obj({k: integer(0, 10**6) for k in ("due", "updated", "failed", "carried_stale", "deferred", "backfilled", "unit_mismatch",
                                                     "crypto", "outage", "registry", "published", "rebased", "suspect", "dropped_bars")}),
-    "problems": obj({**{k: seq(symbol, 40) for k in ("unit_mismatch", "failed", "rebased", "deferred", "frozen", "suspect")},
-                     "dropped_bars": mapping(c.SYMBOL_RE, obj({"n": integer(1, 10**6), "dates": seq(day(), 10)}), 40)}),
-    "symbols": mapping(c.SYMBOL_RE, obj({"status": enum("active", "invalid", "delisted"), "fail_streak": integer(0, 1000), "last_ok": stamp,
-                                          "last_try": stamp, "tier": enum(*c.TIERS), "dropped": seq(day(), 50)},
+    "problems": obj({**{k: seq(symbol, 40) for k in ("rebased", "deferred", "frozen", "suspect")},
+                     "unit_mismatch": mapping(c.SYMBOL_RE, obj({"registro": text(20, re.compile(r"^[A-Za-z]{3,4}/[a-z]{4,8}$")),
+                                                                "yahoo": text(4, re.compile(r"^[A-Za-z]{3,4}$"), nullable=True)}), 40),
+                     "failed": mapping(c.SYMBOL_RE, enum(*FAIL_CLASSES), 40),
+                     "dropped_bars": mapping(c.SYMBOL_RE, obj({"n": integer(1, 10**6), "dates": seq(day(), 10),
+                                                               "reasons": mapping(_DATE_RE, enum(*DROP_REASONS), 10)}), 40)}),
+    "symbols": mapping(c.SYMBOL_RE, obj({"status": enum("active", "dormant", "invalid", "delisted"), "reason": enum("not_listed"), "fail_streak": integer(0, 1000),
+                                          "last_ok": stamp, "last_try": stamp, "tier": enum(*c.TIERS), "dropped": seq(day(), 50),
+                                          "dropped_why": mapping(_DATE_RE, enum(*DROP_REASONS), 50)},
                                          required={"status", "fail_streak", "tier"}),
                        c.MAX_REGISTRY_SYMBOLS)})
 MANIFEST_SPEC = obj({
@@ -617,15 +624,13 @@ def check_site(site, registry, prev=None, *, today=None, allow_regression=False,
     if len(extreme) > MAX_EXTREME_CHANGE_SYMBOLS:
         ctx.err("variación diaria > %d %% en %d símbolos: %s" % (MAX_ABS_CHANGE_PCT, len(extreme), ", ".join(extreme[:6])))
     stale = [s for s in pub if latest_new[s].get("stale")]
-    if pub and len(stale) >= max(3, STALE_ALERT_FRACTION * len(pub)):
-        ctx.warn("%d de %d símbolos con precio antiguo (stale): %s" % (len(stale), len(pub), ", ".join(sorted(stale)[:8])), alert=True)
-    elif stale:
-        ctx.warn("símbolos con precio antiguo: %s" % ", ".join(sorted(stale)[:8]))
-    _health_alerts(docs.get("health"), ctx)
+    if stale:
+        ctx.warn("%d de %d símbolos con precio antiguo (stale): %s" % (len(stale), len(pub), ", ".join(sorted(stale)[:8])))
+    _health_alerts(docs.get("health"), ctx, latest_new)
     if any(e["kind"] == "crypto" for e in registry) and "crypto/latest.json" not in files:
-        ctx.warn("sin crypto/latest.json en este run", alert=True)
+        ctx.warn("sin crypto/latest.json en este run")
     elif docs.get("crypto") and docs["crypto"].get("stale"):
-        ctx.warn("crypto/latest.json reutilizado del run anterior (CoinGecko no respondió)", alert=True)
+        ctx.warn("crypto/latest.json reutilizado del run anterior (CoinGecko no respondió)")
 
     prev_ok = bool(prev) and os.path.isfile(os.path.join(prev, "manifest.json"))
     if prev_ok:
@@ -671,26 +676,55 @@ def _check_health(h, ctx):
         ctx.err("health.json: símbolos fuera del registro %s" % extra[:4])
 
 
-def _health_alerts(h, ctx):
+def _health_alerts(h, ctx, latest_new=None):
+    """Avisos del run. Solo son `alert` (Healthchecks /fail) los que merecen que el dueño se entere YA:
+      (ii) quedan sin publicar más del UNPUBLISHED_ALERT_FRACTION de los símbolos activos del registro, o
+      (iii) caída global de Yahoo (fallan la mayoría a la vez, o Yahoo limita con 429 y se abandona el run).
+    (i) —fallo de fetch, de publish o del propio validador— ya hace fallar el job. Un símbolo suelto sin publicar (unit_mismatch, failed, suspect, un solo
+    cold que falla...), el presupuesto de tiempo agotado o una cripto no listada son un ::warning:: en el log; el detalle está en health.json."""
     if not isinstance(h, dict):
         return
     run, counts = h.get("run") or {}, h.get("counts") or {}
-    if counts.get("unit_mismatch"):
-        ctx.warn("%d símbolos no publicados por divisa/unidad distinta de la del registro: %s" % (
-            counts["unit_mismatch"], ", ".join((h.get("problems") or {}).get("unit_mismatch", [])[:8])), alert=True)
+    problems = h.get("problems") if isinstance(h.get("problems"), dict) else {}
+    failed = problems.get("failed") if isinstance(problems.get("failed"), dict) else {}
+    unit = problems.get("unit_mismatch") if isinstance(problems.get("unit_mismatch"), dict) else {}
+    syms = h.get("symbols") if isinstance(h.get("symbols"), dict) else {}
+    not_listed = sorted(s for s, v in syms.items() if isinstance(v, dict) and v.get("reason") == "not_listed")
+
+    # (iii) caída global de Yahoo
     if run.get("yahoo_abandoned"):
         ctx.warn("Yahoo limitó (429) y se abandonó en este run; los símbolos pendientes siguen con sus datos anteriores", alert=True)
-    if run.get("budget_exhausted"):
-        ctx.warn("presupuesto de tiempo del run agotado: se saltó trabajo", alert=True)
     if counts.get("outage"):
         ctx.warn("fallaron la mayoría de los símbolos a la vez (caída de Yahoo): datos anteriores conservados", alert=True)
-    suspect = (h.get("problems") or {}).get("suspect") or []
+
+    # (ii) demasiados símbolos activos sin publicar
+    active = [s for s, e in ctx.reg.items() if e["status"] == "active"]
+    latest_new = latest_new if latest_new is not None else {}
+    unpub = sorted(s for s in active if s in failed or s in not_listed or (ctx.reg[s]["kind"] == "yahoo" and s not in latest_new))
+    n_unpub = max(len(unpub), min(int(counts.get("failed") or 0), len(active)) if isinstance(counts.get("failed"), int) else 0)
+    if active and n_unpub > UNPUBLISHED_ALERT_FRACTION * len(active):
+        ctx.warn("%d de %d símbolos activos del registro sin publicar (más del %d %%): %s" % (
+            n_unpub, len(active), round(UNPUBLISHED_ALERT_FRACTION * 100), ", ".join(unpub[:8])), alert=True)
+    elif unpub:
+        why = lambda s: failed.get(s) or ("not_listed" if s in not_listed else "sin datos")      # noqa: E731
+        ctx.warn("%d símbolos sin publicar en este run (detalle en health.json): %s" % (len(unpub), ", ".join("%s (%s)" % (s, why(s)) for s in unpub[:8])))
+
+    # el resto: solo ::warning::
+    if unit:
+        ctx.warn("%d símbolos no publicados por divisa/unidad distinta de la del registro: %s" % (
+            len(unit), ", ".join("%s (registro %s, Yahoo %s)" % (s, v.get("registro"), v.get("yahoo") or "sin divisa") for s, v in sorted(unit.items())[:8]
+                                 if isinstance(v, dict))))
+    if run.get("budget_exhausted"):
+        ctx.warn("presupuesto de tiempo del run agotado: se saltó trabajo")
+    suspect = problems.get("suspect") or []
     if suspect:
-        ctx.warn("%d símbolos no publicados por tener demasiadas barras con precio <= 0 o no finito (datos sospechosos): %s" % (
-            len(suspect), ", ".join(suspect[:8])), alert=True)
-    rebased = (h.get("problems") or {}).get("rebased") or []
+        ctx.warn("%d símbolos no publicados por tener demasiadas barras con cierre <= 0 o no finito (datos sospechosos): %s" % (
+            len(suspect), ", ".join(str(s) for s in suspect[:8])))
+    if not_listed:
+        ctx.warn("criptos del registro que no aparecen en el lote de CoinGecko (dormant, not_listed): %s" % ", ".join(not_listed[:8]))
+    rebased = problems.get("rebased") or []
     if rebased:
-        ctx.warn("series bajadas enteras otra vez por rebase (split/ajuste): %s" % ", ".join(rebased[:8]))
+        ctx.warn("series bajadas enteras otra vez por rebase (split/ajuste): %s" % ", ".join(str(s) for s in rebased[:8]))
 
 
 def _check_manifest(mf, site, files, ctx):

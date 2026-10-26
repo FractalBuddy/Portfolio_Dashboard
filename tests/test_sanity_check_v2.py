@@ -555,10 +555,11 @@ def test_crypto_esquema_y_cuenta(site):
 
 # ------------------------------------------------------------------ avisos que llegan a Healthchecks (Alert)
 def test_alertas_por_datos_degradados(site):
+    """Solo la caída global de Yahoo (429 sostenido o caída de la mayoría) es alerta de Healthchecks; el resto es ::warning:: en el log."""
     prev, new = site
     def health(d):
         d["counts"]["unit_mismatch"] = 2
-        d["problems"]["unit_mismatch"] = ["SWDA.L", "EIMI.L"]
+        d["problems"]["unit_mismatch"] = {"SWDA.L": {"registro": "GBp/subunit", "yahoo": "GBP"}, "EIMI.L": {"registro": "USD/currency", "yahoo": None}}
         d["run"]["yahoo_abandoned"] = True
         d["run"]["budget_exhausted"] = True
         d["counts"]["outage"] = 1
@@ -566,21 +567,20 @@ def test_alertas_por_datos_degradados(site):
     edit(new, "health.json", health)
     _, warns = run(new, prev)
     alerts = " | ".join(str(w) for w in warns if isinstance(w, sc.Alert))
-    for frag in ("divisa/unidad distinta", "429", "presupuesto de tiempo", "caída de Yahoo"):
+    for frag in ("429", "caída de Yahoo"):
         assert frag in alerts
-    assert any("rebase" in str(w) and not isinstance(w, sc.Alert) for w in warns)
+    for frag in ("divisa/unidad distinta", "presupuesto de tiempo", "rebase"):
+        assert not any(frag in str(w) and isinstance(w, sc.Alert) for w in warns), frag
+        assert any(frag in str(w) for w in warns), frag
+    assert any("SWDA.L (registro GBp/subunit, Yahoo GBP)" in str(w) and "EIMI.L (registro USD/currency, Yahoo sin divisa)" in str(w) for w in warns)
 
 
-def test_muchos_stale_es_alerta_y_pocos_solo_aviso(site):
+def test_muchos_stale_ya_no_es_alerta_solo_aviso(site):
     prev, new = site
     for s in ("AAPL", "EIMI.L", "GC=F", "^GSPC"):
         edit(new, "s/%s/latest.json" % s, lambda d: d.update(stale=True, stale_since="2026-10-20"))
     _, warns = run(new, prev)
-    assert any(isinstance(w, sc.Alert) and "stale" in w for w in warns)
-    for s in ("EIMI.L", "GC=F", "^GSPC"):
-        edit(new, "s/%s/latest.json" % s, lambda d: [d.pop("stale"), d.pop("stale_since")])
-    _, warns = run(new, prev)
-    assert not any(isinstance(w, sc.Alert) for w in warns) and has([str(w) for w in warns], "precio antiguo")
+    assert not any(isinstance(w, sc.Alert) for w in warns) and has([str(w) for w in warns], "stale")
 
 
 def test_stale_sin_stale_since_es_error(site):
@@ -589,13 +589,146 @@ def test_stale_sin_stale_since_es_error(site):
     assert has(run(new, prev)[0], "stale y stale_since")
 
 
-def test_sin_crypto_es_alerta_y_crypto_stale_tambien(site):
+def test_sin_crypto_y_crypto_stale_son_aviso_no_alerta(site):
     prev, new = site
     edit(new, "crypto/latest.json", lambda d: d.update(stale=True, stale_since="2026-10-25"))
-    assert any(isinstance(w, sc.Alert) and "reutilizado" in w for w in run(new, prev)[1])
+    warns = run(new, prev)[1]
+    assert has([str(w) for w in warns], "reutilizado") and not any(isinstance(w, sc.Alert) for w in warns)
     os.remove(path(new, "crypto/latest.json"))
     pack(new)
-    assert any(isinstance(w, sc.Alert) and "sin crypto/latest.json" in w for w in run(new, prev)[1])
+    warns = run(new, prev)[1]
+    assert has([str(w) for w in warns], "sin crypto/latest.json") and not any(isinstance(w, sc.Alert) for w in warns)
+
+
+# ------------------------------------------------------------------ qué avisa a Healthchecks (alertas): solo >10 % sin publicar o caída global de Yahoo
+def _reg(n_yahoo, n_crypto=0):
+    return [mk("S%d" % i) for i in range(n_yahoo)] + [mk("C%d" % i, kind="crypto") for i in range(n_crypto)]
+
+
+def _health(failed=None, unit=None, not_listed=(), **flags):
+    d = {"run": {"yahoo_abandoned": False, "budget_exhausted": False}, "counts": {"failed": len(failed or {}), "outage": 0},
+         "problems": {"failed": failed or {}, "unit_mismatch": unit or {}, "suspect": [], "rebased": []},
+         "symbols": {s: {"status": "dormant", "reason": "not_listed", "fail_streak": 0, "tier": "warm"} for s in not_listed}}
+    for k, v in flags.items():
+        d["run"][k] = v
+    return d
+
+
+def _alerts(registry, health, published=None):
+    ctx = sc.Ctx(registry, date(2026, 10, 27))
+    latest = {e["symbol"]: {} for e in registry if e["kind"] == "yahoo"} if published is None else {s: {} for s in published}
+    sc._health_alerts(health, ctx, latest)
+    return [str(w) for w in ctx.warnings if isinstance(w, sc.Alert)], [str(w) for w in ctx.warnings if not isinstance(w, sc.Alert)]
+
+
+@pytest.mark.parametrize("failed", [
+    {"S3": "unit"}, {"S3": "suspect"}, {"S3": "http_error"}, {"S3": "empty"}, {"S3": "timeout"}, {"S3": "parse"},      # un símbolo suelto, sea cual sea el motivo
+    {"S1": "unit", "S2": "suspect", "S3": "empty"},                                                                      # varios, pero <= 10 % de 40
+    {"S%d" % i: "http_error" for i in range(4)},                                                                         # justo el 10 %: no es «más del 10 %»
+])
+def test_un_simbolo_suelto_sin_publicar_no_es_alerta_pero_si_aviso(failed):
+    reg = _reg(40)
+    unit = {s: {"registro": "GBp/subunit", "yahoo": "GBP"} for s, r in failed.items() if r == "unit"}
+    alerts, warns = _alerts(reg, _health(failed, unit), published=[e["symbol"] for e in reg if e["symbol"] not in failed])
+    assert alerts == []
+    assert has(warns, "sin publicar") and any(s in " ".join(warns) for s in failed)
+
+
+def test_un_cold_que_falla_y_no_tiene_datos_previos_tampoco_es_alerta():
+    reg = [mk("S%d" % i) for i in range(39)] + [mk("COLD", tier="cold")]
+    alerts, warns = _alerts(reg, _health({"COLD": "http_error"}), published=[e["symbol"] for e in reg if e["symbol"] != "COLD"])
+    assert alerts == [] and has(warns, "COLD (http_error)")
+
+
+def test_mas_del_10_por_ciento_sin_publicar_es_alerta():
+    reg = _reg(40)
+    failed = {"S%d" % i: "http_error" for i in range(5)}                                   # 5 de 40 = 12,5 %
+    alerts, _ = _alerts(reg, _health(failed), published=[e["symbol"] for e in reg if e["symbol"] not in failed])
+    assert len(alerts) == 1 and "5 de 40" in alerts[0] and "10 %" in alerts[0]
+
+
+def test_sin_publicar_cuenta_tambien_los_que_ni_siquiera_tienen_latest():
+    reg = _reg(40)
+    alerts, _ = _alerts(reg, _health(), published=["S%d" % i for i in range(35)])        # 5 sin latest.json, aunque health no los nombre
+    assert len(alerts) == 1 and "5 de 40" in alerts[0]
+    alerts, _ = _alerts(reg, _health(), published=["S%d" % i for i in range(36)])        # 4 de 40: no
+    assert alerts == []
+
+
+def test_los_simbolos_pausados_en_el_registro_no_cuentan_como_activos():
+    reg = _reg(40) + [mk("D%d" % i, status="dormant") for i in range(20)]
+    alerts, _ = _alerts(reg, _health(), published=["S%d" % i for i in range(40)])
+    assert alerts == []                                                                    # 20 dormant no publicados: el dueño los pausó
+
+
+def test_cripto_no_listada_es_aviso_y_solo_alerta_si_pasa_del_10_por_ciento():
+    reg = _reg(30, 10)
+    alerts, warns = _alerts(reg, _health(not_listed=["C1"]))
+    assert alerts == [] and has(warns, "not_listed", "C1")
+    alerts, _ = _alerts(reg, _health(not_listed=["C1", "C2", "C3", "C4", "C5"]))        # 5 de 40
+    assert len(alerts) == 1
+
+
+def test_caida_global_de_yahoo_es_alerta_aunque_cada_simbolo_se_trate_aparte():
+    reg = _reg(40)
+    h = _health()
+    h["counts"]["outage"] = 1
+    alerts, _ = _alerts(reg, h)
+    assert has(alerts, "caída de Yahoo")
+    alerts, _ = _alerts(reg, _health(yahoo_abandoned=True))
+    assert has(alerts, "429")
+
+
+def test_presupuesto_agotado_unit_mismatch_y_suspect_son_solo_aviso():
+    reg = _reg(40)
+    h = _health({"S1": "unit", "S2": "suspect"}, {"S1": {"registro": "GBp/subunit", "yahoo": "GBP"}}, budget_exhausted=True)
+    h["problems"]["suspect"] = ["S2"]
+    alerts, warns = _alerts(reg, h, published=[e["symbol"] for e in reg if e["symbol"] not in ("S1", "S2")])
+    assert alerts == [] and has(warns, "presupuesto") and has(warns, "divisa/unidad", "S1") and has(warns, "cierre <= 0", "S2")
+
+
+def test_el_conteo_de_fallos_cubre_el_tope_de_40_de_la_lista():
+    reg = _reg(300)
+    h = _health({"S%d" % i: "http_error" for i in range(40)})                              # health recorta a 40 nombres...
+    h["counts"]["failed"] = 45                                                             # ...pero el contador real es 45 (> 10 % de 300 = 30)
+    alerts, _ = _alerts(reg, h, published=["S%d" % i for i in range(40, 300)])
+    assert len(alerts) == 1 and "45 de 300" in alerts[0]
+
+
+def test_health_con_tipos_inesperados_no_rompe_las_alertas():
+    reg = _reg(10)
+    for bad in ({"problems": []}, {"problems": {"failed": ["S1"], "unit_mismatch": ["S1"]}}, {"symbols": []}, {"counts": {"failed": "x"}}):
+        sc._health_alerts(bad, sc.Ctx(reg, date(2026, 10, 27)), {})
+
+
+def test_e2e_un_simbolo_que_falla_no_avisa_y_seis_de_cuarenta_si(world, tmp_path):
+    reg = [mk("S%d" % i) for i in range(40)]
+    world.decl.update({e["symbol"]: e for e in reg})
+    out, _ = gen(tmp_path, "ok", registry=reg)
+    for s in ("S0",):
+        world.fail.add(s)
+    out2, _ = gen(tmp_path, "uno", prev=out, now=NOW + timedelta(hours=6), registry=reg)
+    errs, warns = sc.check_site(str(out2 / "v2"), reg, str(out / "v2"), today=date(2026, 10, 27))
+    assert errs == [] and not [w for w in warns if isinstance(w, sc.Alert)] and has([str(w) for w in warns], "S0 (http_error)")
+    for s in ("S1", "S2", "S3", "S4", "S5"):
+        world.fail.add(s)
+    out3, _ = gen(tmp_path, "seis", prev=out, now=NOW + timedelta(hours=7), registry=reg)
+    errs, warns = sc.check_site(str(out3 / "v2"), reg, str(out / "v2"), today=date(2026, 10, 27))
+    assert errs == [] and has([str(w) for w in warns if isinstance(w, sc.Alert)], "6 de 40")
+
+
+def test_e2e_la_cli_escribe_en_alerts_out_solo_las_alertas(world, tmp_path, capsys):
+    reg = [mk("S%d" % i) for i in range(40)]
+    world.decl.update({e["symbol"]: e for e in reg})
+    out, _ = gen(tmp_path, "ok", registry=reg)
+    world.fail.add("S0")
+    out2, _ = gen(tmp_path, "uno", prev=out, now=NOW + timedelta(hours=6), registry=reg)
+    regfile = tmp_path / "registry.json"
+    regfile.write_text(json.dumps({"schema": 1, "symbols": reg}))
+    alerts_file = tmp_path / "alerts.txt"
+    rc = sc.main(["--site", str(out2 / "v2"), "--registry", str(regfile), "--prev", str(out / "v2"), "--alerts-out", str(alerts_file), "--today", "2026-10-27"])
+    assert rc == 0 and alerts_file.read_text() == ""
+    assert "::warning::1 símbolos sin publicar" in capsys.readouterr().out
 
 
 # ------------------------------------------------------------------ CLI

@@ -128,7 +128,7 @@ def test_un_simbolo_que_falla_conserva_lo_anterior_marcado_stale_y_no_bloquea(wo
     assert not exists(out2, "s/AAPL/i.json")                                   # el intradía de ayer no se arrastra
     assert sha(out1, "s/AAPL/d/2024.json") == sha(out2, "s/AAPL/d/2024.json")
     h = jl(out2, "health.json")
-    assert h["symbols"]["AAPL"]["fail_streak"] == 1 and h["symbols"]["AAPL"]["status"] == "active" and h["problems"]["failed"] == ["AAPL"]
+    assert h["symbols"]["AAPL"]["fail_streak"] == 1 and h["symbols"]["AAPL"]["status"] == "active" and h["problems"]["failed"] == {"AAPL": "http_error"}
     assert exists(out2, "s/^GSPC/latest.json") and not jl(out2, "s/^GSPC/latest.json").get("stale")      # el resto sigue
 
 
@@ -198,13 +198,16 @@ def test_el_presupuesto_de_tiempo_corta_el_run(world, tmp_path, monkeypatch):
 
 
 # ------------------------------------------------------------------ divisa y unidad (BE-01)
-@pytest.mark.parametrize("sym,observed", [("SWDA.L", "GBP"), ("AAPL", "EUR"), ("SWDA.L", None), ("EIMI.L", "GBp")])
-def test_divisa_o_unidad_distinta_a_la_declarada_no_se_publica(world, tmp_path, sym, observed):
+@pytest.mark.parametrize("sym,observed,registro", [("SWDA.L", "GBP", "GBp/subunit"), ("AAPL", "EUR", "USD/currency"), ("SWDA.L", None, "GBp/subunit"),
+                                                   ("EIMI.L", "GBp", "USD/currency")])
+def test_divisa_o_unidad_distinta_a_la_declarada_no_se_publica(world, tmp_path, sym, observed, registro):
     world.currency[sym] = observed
     out, run = gen(tmp_path, "s1")
     assert not exists(out, "s/%s/latest.json" % sym) and not exists(out, "s/%s/d/2026.json" % sym)
     h = jl(out, "health.json")
-    assert h["problems"]["unit_mismatch"] == [sym] and h["symbols"][sym]["fail_streak"] == 1
+    # lo que Yahoo informó (divisa de 3-4 letras o null), sin texto libre; el motivo del fallo es la clase cerrada `unit`
+    assert h["problems"]["unit_mismatch"] == {sym: {"registro": registro, "yahoo": observed}} and h["problems"]["failed"] == {sym: "unit"}
+    assert h["symbols"][sym]["fail_streak"] == 1
     assert exists(out, "s/^GSPC/latest.json")
 
 
@@ -312,6 +315,44 @@ def test_cripto_caida_reutiliza_el_anterior_marcado_stale_hasta_7_dias(world, tm
     assert jl(out2, "crypto/latest.json")["stale"] is True and jl(out2, "crypto/latest.json")["count"] == 30
     out3, _ = gen(tmp_path, "s3", prev=out1, now=NOW + timedelta(days=9))
     assert not exists(out3, "crypto/latest.json")
+
+
+def test_cripto_del_registro_que_no_esta_en_el_lote_queda_dormant_not_listed_sin_bloquear(world, tmp_path, monkeypatch, capsys):
+    import sanity_check_v2 as sc
+    reg = REG + [mk("TON", kind="crypto", name="Toncoin", tier="warm")]                  # BTC y ETH sí están en el lote simulado; TON no
+    out, _ = gen(tmp_path, "s1", registry=reg)
+    h = jl(out, "health.json")
+    assert h["symbols"]["TON"] == {"status": "dormant", "reason": "not_listed", "fail_streak": 0, "tier": "warm"}
+    assert "BTC" not in h["symbols"] and "ETH" not in h["symbols"]
+    assert {r["s"]: r["status"] for r in jl(out, "index.json")["symbols"]}["TON"] == "dormant"
+    assert {r["s"]: r["status"] for r in jl(out, "index.json")["symbols"]}["BTC"] == "active"
+    assert "(dormant, not_listed): ['TON']" in capsys.readouterr().err
+    errs, warns = sc.check_site(str(out / "v2"), reg, None, today=date(2026, 10, 27))
+    assert errs == [] and any("not_listed" in str(w) and "TON" in str(w) and not isinstance(w, sc.Alert) for w in warns)      # aviso, nunca alerta ni error
+    assert exists(out, "crypto/latest.json") and exists(out, "s/AAPL/latest.json")                                              # no bloquea nada
+
+
+def test_cripto_no_listada_se_recupera_sola_cuando_vuelve_al_lote(world, tmp_path, monkeypatch):
+    reg = REG + [mk("TON", kind="crypto", name="Toncoin", tier="warm")]
+    out1, _ = gen(tmp_path, "s1", registry=reg)
+    assert jl(out1, "health.json")["symbols"]["TON"]["status"] == "dormant"
+    monkeypatch.setattr(fm, "_cg_markets", lambda params, tries=3: [coin(i) for i in range(30)] + [coin(40, id="the-open-network", symbol="ton", name="Toncoin")]
+                        + [coin(41, id="bitcoin", symbol="btc", name="Bitcoin"), coin(42, id="ethereum", symbol="eth", name="Ethereum")])
+    out2, _ = gen(tmp_path, "s2", prev=out1, now=NOW + timedelta(hours=6), registry=reg)
+    assert "TON" not in jl(out2, "health.json")["symbols"] and {r["s"]: r["status"] for r in jl(out2, "index.json")["symbols"]}["TON"] == "active"
+
+
+def test_si_coingecko_falla_no_se_marca_ninguna_cripto_como_no_listada(world, tmp_path, monkeypatch):
+    monkeypatch.setattr(fm, "_cg_markets", lambda params, tries=3: (_ for _ in ()).throw(TimeoutError("x")))
+    out, _ = gen(tmp_path, "s1")
+    h = jl(out, "health.json")
+    assert not any(v.get("reason") for v in h["symbols"].values()) and {r["status"] for r in jl(out, "index.json")["symbols"]} == {"active"}
+
+
+def test_cripto_pausada_en_el_registro_no_se_marca_not_listed(world, tmp_path):
+    reg = REG + [mk("TON", kind="crypto", name="Toncoin", status="dormant")]
+    out, _ = gen(tmp_path, "s1", registry=reg)
+    assert "TON" not in jl(out, "health.json")["symbols"]                               # ya la pausó el dueño: no hay nada que anotar
 
 
 def test_cripto_con_pocas_monedas_no_se_publica(world, tmp_path, monkeypatch):
@@ -523,7 +564,7 @@ def test_un_fallo_interno_en_un_simbolo_no_tumba_el_run(world, tmp_path, monkeyp
     monkeypatch.setattr(f2, "check_unit", lambda e, o: (_ for _ in ()).throw(KeyError("bug")) if e["symbol"] == "AAPL" else real(e, o))
     out, _ = gen(tmp_path, "s1")
     h = jl(out, "health.json")
-    assert h["problems"]["failed"] == ["AAPL"] and exists(out, "s/^GSPC/latest.json") and not exists(out, "s/AAPL/latest.json")
+    assert h["problems"]["failed"] == {"AAPL": "parse"} and exists(out, "s/^GSPC/latest.json") and not exists(out, "s/AAPL/latest.json")
 
 
 def test_contador_de_peticiones_normaliza_el_host(monkeypatch):

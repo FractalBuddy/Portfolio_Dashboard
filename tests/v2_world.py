@@ -70,8 +70,11 @@ class World:
         return df
 
 
+LISTED = {0: ("bitcoin", "btc", "Bitcoin"), 1: ("ethereum", "eth", "Ethereum")}      # las criptos del registro de pruebas (REG) están en el lote de CoinGecko
+
+
 def default_coins(n=30):
-    return [{"id": "coin-%d" % i, "symbol": "c%d" % i, "name": "Coin %d" % i, "current_price": 1.5 + i, "market_cap": 1e9 - i,
+    return [{"id": LISTED.get(i, ("coin-%d" % i,))[0], "symbol": LISTED.get(i, (0, "c%d" % i))[1], "name": LISTED.get(i, (0, 0, "Coin %d" % i))[2], "current_price": 1.5 + i, "market_cap": 1e9 - i,
              "market_cap_rank": i + 1, "total_volume": 5e6, "price_change_percentage_24h_in_currency": 1.234,
              "price_change_percentage_7d_in_currency": -2.5, "last_updated": "2026-10-26T11:58:00.000Z"} for i in range(n)]
 

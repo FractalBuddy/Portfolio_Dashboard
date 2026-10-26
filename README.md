@@ -102,7 +102,7 @@ Contrato para el cliente (campos, ejemplos JSON reales, algoritmo de lectura, eq
 | `fetch` | `contents: read` | instala con `--require-hashes`, baja el sitio publicado **completo** (hay que volver a incluir los años cerrados en el artefacto de Pages), ejecuta `scripts/feed_v2.py` y sube el sitio como artefacto. Ejecuta código de terceros: su salida se trata como no fiable |
 | `publish` | solo `pages: write` + `id-token: write` | **no ejecuta código de terceros**. Hace su propia descarga del sitio anterior (modo `validate`), valida con `scripts/sanity_check_v2.py` (solo stdlib, sacado del repo) y solo entonces sube el artefacto de Pages y despliega |
 | `verify` | ninguno | informativo (`continue-on-error`): comprueba que Pages ya sirve el `manifest.json` nuevo |
-| `heartbeat` | ninguno | Healthchecks.io: ping normal, `/fail` si algo falló, y `/fail` con el motivo (`degraded: ...`) si se publicó con datos degradados |
+| `heartbeat` | ninguno | Healthchecks.io: ping normal, `/fail` si falla `fetch`, `publish` o el validador, y `/fail` con el motivo (`degraded: ...`) solo si se publicó con **más del 10 % de los símbolos activos sin publicar** o con **caída global de Yahoo** (429 sostenido o fallo de la mayoría a la vez). Un símbolo suelto sin publicar (`unit_mismatch`, `failed`, `suspect`...) es solo un `::warning::` en el log y el detalle queda en `health.json`. El secreto se limpia (espacios, tabuladores, `\r`, `\n`, comillas o acentos graves envolventes) y debe ser `https://hc-ping.com/...`; si no, `::warning::` sin el valor y no se llama a `curl` |
 | `personal` | `contents: read` | **opcional**, independiente: datos propios en Supabase (ver abajo). Nunca bloquea el feed público |
 
 `concurrency` serializa los runs, todos los jobs tienen `timeout-minutes`, las acciones van fijadas por SHA y el cron es `47 6,11,15,21 * * *` (media hora después del
@@ -144,7 +144,7 @@ Además, en cada run: 1 llamada a CoinGecko (250 monedas), ~5 a FRED (con clave)
    `gh api repos/actions/upload-pages-artifact/git/ref/tags/v3.0.1 --jq .object.sha` (debe ser `56afc609…`) y `gh api repos/actions/deploy-pages/git/ref/tags/v4.0.5 --jq .object.sha`
    (`d6db9016…`). Si Dependabot propone versiones nuevas, mejor.
 6. **Actions → «Publish feed v2» → Run workflow.** El primer run es «primer run» (404 en `manifest.json`) y solo publica ~80 símbolos (cupo de altas); lánzalo 2-3 veces seguidas
-   (o espera al cron) hasta que `health.json.counts.published` iguale a los símbolos de Yahoo del registro (224). Revisa `health.json.problems.unit_mismatch`: las divisas/unidades del `registry.json` se
+   (o espera al cron) hasta que `health.json.counts.published` iguale a los símbolos de Yahoo del registro (224). Revisa `health.json.problems.unit_mismatch` (`{símbolo: {registro, yahoo}}`) y `problems.failed` (`{símbolo: motivo}`): las divisas/unidades del `registry.json` se
    escribieron sin acceso a Yahoo; un símbolo cuya divisa real no coincide **no se publica** hasta que se corrige su entrada (`currency`/`unit`).
 7. Cuando esté a tu gusto: **variable de repo `FEED_V2_ENABLED = true`** para que el cron programado empiece a funcionar (hasta entonces el cron no hace nada; el lanzamiento manual sí).
 
@@ -210,7 +210,7 @@ Quitar símbolos hace saltar las reglas de regresión: lanza el workflow una vez
   * pestaña *Variables*: `SUPABASE_URL` (p. ej. `https://<ref>.supabase.co`) y `SUPABASE_PUBLISHABLE_KEY`
     (`sb_publishable_...`; es pública por diseño, **nunca** pongas aquí la `sb_secret_` ni la `service_role`);
   * pestaña *Secrets* (opcional): `HC_SUPABASE_URL`, URL de ping de un check propio de Healthchecks.io (periodo 3 días
-    con gracia de al menos 1 día). Si falta o está vacío, el workflow solo emite un `::warning::` y sigue sin avisar.
+    con gracia de al menos 1 día). Si falta, está vacío o no tiene la forma `https://hc-ping.com/...` (se limpian antes espacios, saltos de línea y comillas envolventes), el workflow solo emite un `::warning::` (sin el valor) y sigue sin avisar.
 
   **Cómo comprobarlo**: Actions -> "Supabase keepalive" -> *Run workflow*; el job debe terminar en verde con
   «Supabase responde (HTTP 200|401|403)». Prueba negativa: pon una URL inventada en `SUPABASE_URL`, relanza y debe

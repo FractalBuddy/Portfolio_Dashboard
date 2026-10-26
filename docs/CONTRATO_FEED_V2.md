@@ -42,16 +42,20 @@ desfase de unos minutos como un fallo.
   | `points` | nivel de un índice (no es un importe) | `^GSPC` |
   | `rate` | tipo de cambio: unidades de `currency` por unidad de la divisa base del par | `USDJPY=X` en `JPY` |
 
-  Un símbolo cuya divisa o escala real no coincide con la del registro **no se publica** (se ve en `health.json.problems.unit_mismatch`). Un cliente
+  Un símbolo cuya divisa o escala real no coincide con la del registro **no se publica** (se ve en `health.json.problems.unit_mismatch`: `{símbolo: {registro, yahoo}}`, ver abajo). Un cliente
   que multiplique cantidad × precio debe usar `price_unit_divisor`; si falta o no entiende la unidad, no debe valorar.
-* **Sin precios <= 0**: ninguna serie diaria lleva `o`, `h`, `l` ni `c` no finitos o <= 0 (el WTI, `CL=F`, cerró en negativo el 2020-04-20 y barras vecinas pueden traer mínimo o apertura negativos con cierre positivo). El generador
-  **descarta** esas barras antes de escribir (la serie tiene un hueco en esa fecha) y las **anota** en `health.json`: `problems.dropped_bars` (`{símbolo: {n, dates}}`, acumulado de todo el
-  histórico) y `symbols.<SYM>.dropped`. Si un símbolo pierde **más de 3 barras o más del 1 %** de las suyas, sus datos se consideran sospechosos y **no se publica** (`problems.suspect`,
+* **Sin precios <= 0**: ninguna serie diaria lleva `o`, `h`, `l` ni `c` no finitos o <= 0 (el WTI, `CL=F`, cerró en negativo el 2020-04-20). El generador
+  **descarta la barra solo si su cierre** es no finito o <= 0 (la serie tiene un hueco en esa fecha) y la **anota** en `health.json` con su motivo:
+  `problems.dropped_bars` (`{símbolo: {n, dates, reasons}}`, acumulado de todo el histórico; `reasons` = `{fecha: motivo}` de las `dates` listadas) y
+  `symbols.<SYM>.dropped` / `symbols.<SYM>.dropped_why`. Motivos (clase cerrada): `close_missing` (cierre vacío o ausente), `close_not_finite` (infinito o no numérico),
+  `close_le_0` (cero o negativo) y `unknown` (anotada por una versión anterior que no guardaba el motivo). Una barra con `open`/`high`/`low` no finito o <= 0 **pero cierre
+  válido** (el 2020-04-21 el WTI cerró en +10,01 $ con mínimo de -40,32) **no se descarta**: ese campo se sustituye por el cierre y el rango `l..h` se recalcula con los
+  valores válidos. Si un símbolo pierde **más de 3 barras o más del 1 %** de las suyas, sus datos se consideran sospechosos y **no se publica** (`problems.suspect`,
   `counts.suspect`; conserva lo anterior marcado `stale`). Un cliente no debe interpolar el hueco ni esperar una barra en cada día hábil.
 * **Fechas**: `YYYY-MM-DD` (día de la barra, hora local del mercado); marcas de generación `YYYY-MM-DDTHH:MM:SSZ` (UTC). El intradía lleva `YYYY-MM-DD HH:MM`
   en la hora local del mercado y `tz` (IANA) en el fichero.
 * **`stale` / `stale_since`**: el símbolo falló en el último run y se sirve lo anterior (como máximo 30 días), o su última barra tiene más de 7 días. Van juntos.
-* **Estado** (`status` en `index.json`): `active`, `dormant` (el dueño del registro lo pausó), `invalid` (5 fallos seguidos; se reintenta una vez por semana) y
+* **Estado** (`status` en `index.json`): `active`, `dormant` (el dueño del registro lo pausó, **o** una cripto del registro que no aparece en el lote de CoinGecko de este run: `health.json.symbols.<SYM>.reason` = `not_listed`; vuelve a `active` sola cuando reaparece), `invalid` (5 fallos seguidos; se reintenta una vez por semana) y
   `delisted` (congelado >45 días). **Un símbolo muerto no bloquea la publicación**: si no hay `latest.json`, `as_of` es `null` y el cliente lo muestra sin precio.
 * **Textos**: sin `<` ni `>` ni caracteres de control (los garantiza el validador); aun así, pinta con `textContent`, nunca con `innerHTML`.
 * **Números**: finitos; `null` donde el esquema lo permite. Los cierres son `> 0`.
@@ -218,9 +222,9 @@ Top 250 de CoinGecko por capitalización, en USD, en **una** llamada (lotes de �
   "count": 30,
   "coins": [
     {
-      "id": "coin-0",
-      "symbol": "C0",
-      "name": "Coin 0",
+      "id": "bitcoin",
+      "symbol": "BTC",
+      "name": "Bitcoin",
       "rank": 1,
       "price": 1.5,
       "change_24h_pct": 1.23,
@@ -230,9 +234,9 @@ Top 250 de CoinGecko por capitalización, en USD, en **una** llamada (lotes de �
       "as_of": "2026-10-26"
     },
     {
-      "id": "coin-1",
-      "symbol": "C1",
-      "name": "Coin 1",
+      "id": "ethereum",
+      "symbol": "ETH",
+      "name": "Ethereum",
       "rank": 2,
       "price": 2.5,
       "change_24h_pct": 1.23,
@@ -354,6 +358,19 @@ No incluye el índice de altcoins ni el staking de v1.
 Contadores del run (`yahoo_requests` = peticiones reales a Yahoo incluidos reintentos; `yahoo_calls` = llamadas de la aplicación), problemas y el **estado de cada símbolo**
 (`symbols`), que el run siguiente lee para decidir qué toca refrescar. Un cliente puede mirar `counts.published` y `problems` para avisar de datos degradados.
 
+`problems` solo lleva datos estructurados, **nunca texto libre ni mensajes de excepciones**:
+
+| Campo | Forma | Contenido |
+|---|---|---|
+| `unit_mismatch` | `{símbolo: {registro, yahoo}}` | `registro` = `"<divisa>/<unidad>"` declarado (`"GBp/subunit"`); `yahoo` = la divisa que informó Yahoo (3-4 letras, `"GBP"`) o `null` si no la informó o no tiene ese formato |
+| `failed` | `{símbolo: motivo}` | motivo de la clase cerrada `empty` (sin datos suficientes o congelado), `http_error` (Yahoo falló), `timeout`, `parse` (datos o error interno al procesarlos), `unit` (ver `unit_mismatch`) o `suspect` (demasiadas barras descartadas) |
+| `dropped_bars` | `{símbolo: {n, dates, reasons}}` | ver «Sin precios <= 0» |
+| `rebased`, `deferred`, `frozen`, `suspect` | `[símbolo]` | listas (máx. 40) |
+
+Una cripto del registro que no aparece en el lote de CoinGecko figura en `symbols` como `{"status": "dormant", "reason": "not_listed", ...}`; no bloquea nada.
+Qué se avisa a Healthchecks lo decide el validador, no este fichero: un símbolo suelto sin publicar es solo un aviso en el log; se avisa si quedan sin publicar más del 10 % de los
+símbolos activos del registro o si Yahoo cae a nivel global.
+
 <!-- ejemplo:health -->
 ```json
 {
@@ -385,8 +402,8 @@ Contadores del run (`yahoo_requests` = peticiones reales a Yahoo incluidos reint
     "dropped_bars": 0
   },
   "problems": {
-    "unit_mismatch": [],
-    "failed": [],
+    "unit_mismatch": {},
+    "failed": {},
     "rebased": [],
     "deferred": [],
     "frozen": [],
@@ -422,11 +439,11 @@ disco. Un cliente que quiera integridad puede verificar lo que descarga.
 {
   "schema": 2,
   "generated_at": "2026-10-26T18:00:00Z",
-  "total_bytes": 1160541,
+  "total_bytes": 1160565,
   "files": {
     "index.json": {
-      "bytes": 1288,
-      "sha256": "5160c8b8ea112a5ab190b17bd47466eb94e65a069eeb8a6c8f5f956b6a07c397"
+      "bytes": 1304,
+      "sha256": "9f84091ab01c4b47cb881e81a7973d58588c880fe916f693b4b82b9fdf2ea37f"
     },
     "s/SWDA.L/latest.json": {
       "bytes": 621,
