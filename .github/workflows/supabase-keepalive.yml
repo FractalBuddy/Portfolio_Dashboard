@@ -33,9 +33,25 @@ jobs:
           HC: ${{ secrets.HC_SUPABASE_URL }}
         run: |
           set -u
+          HC=${HC:-}
+          # Secreto de Healthchecks: se limpia (espacios, tabuladores, \r, \n, comillas o acentos graves envolventes: sobras típicas de copiar y pegar) y debe ser una
+          # URL https://hc-ping.com/...; si no lo es, aviso SIN el valor y se sigue sin llamar a curl (un secreto raro nunca se pasa a curl).
+          while :; do
+            case "$HC" in
+              [[:space:]]*|\"*|\'*|\`*) HC=${HC:1} ;;
+              *[[:space:]]|*\"|*\'|*\`) HC=${HC%?} ;;
+              *) break ;;
+            esac
+          done
+          hc_re='^https://hc-ping\.com/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*/?$'
+          hc_note="HC_SUPABASE_URL está vacío o no existe"
+          if [ -n "$HC" ] && ! [[ $HC =~ $hc_re ]]; then
+            hc_note="HC_SUPABASE_URL no tiene el formato https://hc-ping.com/<clave> (el valor no se muestra)"
+            HC=""
+          fi
           hc_ping() {  # $1 = "" (ok) o "/fail"; $2 = mensaje (sin datos personales)
-            if [ -z "${HC:-}" ]; then
-              echo "::warning::HC_SUPABASE_URL está vacío o no existe: no se avisa a Healthchecks."
+            if [ -z "$HC" ]; then
+              echo "::warning::${hc_note}: no se avisa a Healthchecks."
               return 0
             fi
             curl -fsS -m 10 --retry 3 --retry-all-errors --data-raw "$2" "${HC%/}$1" >/dev/null 2>&1 || echo "::warning::no se pudo avisar a Healthchecks"

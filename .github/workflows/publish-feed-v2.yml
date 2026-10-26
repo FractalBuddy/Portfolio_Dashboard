@@ -246,6 +246,21 @@ jobs:
           HC: ${{ secrets.HC_UPDATE_V2_URL || secrets.HC_UPDATE_URL }}
         run: |
           set -u
+          HC=${HC:-}
+          # Secreto de Healthchecks: se limpia (espacios, tabuladores, \r, \n, comillas o acentos graves envolventes: sobras típicas de copiar y pegar) y debe ser una
+          # URL https://hc-ping.com/...; si no lo es, aviso SIN el valor y se sigue sin llamar a curl (un secreto raro nunca se pasa a curl).
+          while :; do
+            case "$HC" in
+              [[:space:]]*|\"*|\'*|\`*) HC=${HC:1} ;;
+              *[[:space:]]|*\"|*\'|*\`) HC=${HC%?} ;;
+              *) break ;;
+            esac
+          done
+          hc_re='^https://hc-ping\.com/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*/?$'
+          if [ -n "$HC" ] && ! [[ $HC =~ $hc_re ]]; then
+            echo "::warning::HC_UPDATE_V2_URL / HC_UPDATE_URL no tienen el formato https://hc-ping.com/<clave> (el valor no se muestra): no se envían avisos informativos a Healthchecks."
+            HC=""
+          fi
           if [ -z "$WANT" ] || [ -z "$PAGE" ]; then echo "::warning::sin generated_at o page_url: no se verifica Pages"; exit 0; fi
           tries=6
           got=""
@@ -278,8 +293,22 @@ jobs:
           PUBLISH: ${{ needs.publish.result }}
           ALERTS: ${{ needs.publish.outputs.alerts }}
         run: |
+          # Secreto de Healthchecks: se limpia (espacios, tabuladores, \r, \n, comillas o acentos graves envolventes: sobras típicas de copiar y pegar) y debe ser una
+          # URL https://hc-ping.com/...; si no lo es, aviso SIN el valor y se sigue sin llamar a curl (un secreto raro nunca se pasa a curl).
+          while :; do
+            case "$HC" in
+              [[:space:]]*|\"*|\'*|\`*) HC=${HC:1} ;;
+              *[[:space:]]|*\"|*\'|*\`) HC=${HC%?} ;;
+              *) break ;;
+            esac
+          done
+          hc_re='^https://hc-ping\.com/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*/?$'
           if [ -z "$HC" ]; then
             echo "::warning::HC_UPDATE_V2_URL / HC_UPDATE_URL vacíos o inexistentes: no se avisa a Healthchecks y nadie se enterará si el workflow falla."
+            exit 0
+          fi
+          if ! [[ $HC =~ $hc_re ]]; then
+            echo "::warning::HC_UPDATE_V2_URL / HC_UPDATE_URL no tienen el formato https://hc-ping.com/<clave> (el valor no se muestra): no se avisa a Healthchecks y nadie se enterará si el workflow falla."
             exit 0
           fi
           HC="${HC%/}"
