@@ -493,16 +493,16 @@ def _fake_curl(tmp_path):
 
 
 @pytest.mark.parametrize("fetch,publish,alerts,want", [
-    ("success", "success", "", "https://hc.test/p"),
-    ("success", "success", "perfiles: solo 3", "https://hc.test/p/fail"),
-    ("failure", "skipped", "", "https://hc.test/p/fail"),
-    ("cancelled", "skipped", "x", "https://hc.test/p/fail"),
-    ("success", "failure", "", "https://hc.test/p/fail"),
+    ("success", "success", "", "https://hc-ping.com/p"),
+    ("success", "success", "perfiles: solo 3", "https://hc-ping.com/p/fail"),
+    ("failure", "skipped", "", "https://hc-ping.com/p/fail"),
+    ("cancelled", "skipped", "x", "https://hc-ping.com/p/fail"),
+    ("success", "failure", "", "https://hc-ping.com/p/fail"),
 ])
 def test_D42_heartbeat_con_alertas(tmp_path, fetch, publish, alerts, want):
     script = _step(_wf("update-data.yml"), "heartbeat", "Ping Healthchecks.io")["run"]
     calls = tmp_path / "calls.log"; calls.write_text("")
-    r = _sh(tmp_path, script, {"HC": "https://hc.test/p/", "FETCH": fetch, "PUBLISH": publish, "ALERTS": alerts, "CALLS": str(calls)}, _fake_curl(tmp_path))
+    r = _sh(tmp_path, script, {"HC": "https://hc-ping.com/p/", "FETCH": fetch, "PUBLISH": publish, "ALERTS": alerts, "CALLS": str(calls)}, _fake_curl(tmp_path))
     assert r.returncode == 0
     last = calls.read_text().splitlines()[-1]
     assert last.endswith(want)
@@ -514,7 +514,7 @@ def test_D43_heartbeat_alerta_hostil_viaja_como_dato_no_como_codigo(tmp_path):
     script = _step(_wf("update-data.yml"), "heartbeat", "Ping Healthchecks.io")["run"]
     calls = tmp_path / "calls.log"; calls.write_text("")
     payload = "$(touch PWNED) `touch PWNED2` ; touch PWNED3"
-    r = _sh(tmp_path, script, {"HC": "https://hc.test/p", "FETCH": "success", "PUBLISH": "success", "ALERTS": payload, "CALLS": str(calls)}, _fake_curl(tmp_path))
+    r = _sh(tmp_path, script, {"HC": "https://hc-ping.com/p", "FETCH": "success", "PUBLISH": "success", "ALERTS": payload, "CALLS": str(calls)}, _fake_curl(tmp_path))
     assert r.returncode == 0 and not list(tmp_path.glob("PWNED*"))
 
 

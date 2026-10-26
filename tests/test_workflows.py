@@ -218,7 +218,7 @@ WANT = "2026-10-06T06:30:00+00:00"
 
 def test_verify_cdn_fresco_sale_sin_dormir(sandbox):
     _fake_curl_cdn(sandbox, "fresh")
-    r = bash(sandbox, _verify_script(), env={"WANT": WANT, "HC": "https://hc.test/ping/abc"})
+    r = bash(sandbox, _verify_script(), env={"WANT": WANT, "HC": "https://hc-ping.com/ping/abc"})
     assert r.returncode == 0 and "CDN sirve la versión nueva" in r.stdout
     assert not any(c.startswith("sleep") for c in calls(sandbox))
     assert not any("/log" in c for c in calls(sandbox))
@@ -235,7 +235,7 @@ def test_verify_cdn_comprueba_tambien_data_json(sandbox):
 
 def test_verify_cdn_meta_nuevo_con_data_viejo_no_da_el_cdn_por_bueno(sandbox):   # BE-11
     _fake_curl_cdn(sandbox, "meta_nuevo_data_viejo")
-    r = bash(sandbox, _verify_script(), env={"WANT": WANT, "HC": "https://hc.test/ping/abc/"})
+    r = bash(sandbox, _verify_script(), env={"WANT": WANT, "HC": "https://hc-ping.com/ping/abc/"})
     assert r.returncode == 0, r.stdout + r.stderr                          # informativo: nunca falla el run
     assert "CDN sirve la versión nueva" not in r.stdout
     assert "::warning::" in r.stdout and "data.json" in r.stdout
@@ -247,13 +247,13 @@ def test_verify_cdn_meta_nuevo_con_data_viejo_no_da_el_cdn_por_bueno(sandbox):  
 @pytest.mark.parametrize("mode", ["stale", "down"])
 def test_verify_cdn_desfasado_avisa_pero_no_falla_y_no_duerme_tras_el_ultimo_intento(sandbox, mode):
     _fake_curl_cdn(sandbox, mode)
-    r = bash(sandbox, _verify_script(), env={"WANT": WANT, "HC": "https://hc.test/ping/abc/"})
+    r = bash(sandbox, _verify_script(), env={"WANT": WANT, "HC": "https://hc-ping.com/ping/abc/"})
     assert r.returncode == 0, r.stdout + r.stderr
     assert "::warning::jsDelivr sigue sirviendo" in r.stdout
     sleeps = [c for c in calls(sandbox) if c.startswith("sleep")]
     assert sleeps == ["sleep 20", "sleep 40", "sleep 60", "sleep 80", "sleep 100"]  # 6 intentos, 5 esperas (300 s)
     logs = [c for c in calls(sandbox) if "/log" in c]
-    assert len(logs) == 1 and "https://hc.test/ping/abc/log" in logs[0] and "cdn-stale" in logs[0]
+    assert len(logs) == 1 and "https://hc-ping.com/ping/abc/log" in logs[0] and "cdn-stale" in logs[0]
     assert "/fail" not in "".join(calls(sandbox))   # informativo: nunca marca fallo
 
 
@@ -266,7 +266,7 @@ def test_verify_cdn_sin_hc_url_solo_warning(sandbox):
 
 def test_verify_cdn_fallo_del_ping_log_no_hace_fallar(sandbox):
     _fake_curl_cdn(sandbox, "stale")
-    r = bash(sandbox, _verify_script(), env={"WANT": WANT, "HC": "https://hc.test/x", "HC_LOG_RC": "22"})
+    r = bash(sandbox, _verify_script(), env={"WANT": WANT, "HC": "https://hc-ping.com/x", "HC_LOG_RC": "22"})
     assert r.returncode == 0 and "no se pudo enviar el aviso" in r.stdout
 
 
@@ -293,12 +293,12 @@ def _hb(sb, hc, fetch, publish):
 
 
 def test_heartbeat_ok_y_fail(sandbox):
-    r = _hb(sandbox, "https://hc.test/ping/abc/", "success", "success")
-    assert r.returncode == 0 and calls(sandbox)[-1].endswith("https://hc.test/ping/abc")
+    r = _hb(sandbox, "https://hc-ping.com/ping/abc/", "success", "success")
+    assert r.returncode == 0 and calls(sandbox)[-1].endswith("https://hc-ping.com/ping/abc")
     for f, p in (("success", "failure"), ("failure", "skipped"), ("cancelled", "skipped"), ("success", "skipped")):
         sandbox.log.write_text("")
-        _hb(sandbox, "https://hc.test/ping/abc", f, p)
-        assert calls(sandbox)[-1].endswith("https://hc.test/ping/abc/fail"), (f, p)
+        _hb(sandbox, "https://hc-ping.com/ping/abc", f, p)
+        assert calls(sandbox)[-1].endswith("https://hc-ping.com/ping/abc/fail"), (f, p)
 
 
 def test_heartbeat_sin_url_avisa(sandbox):
@@ -602,33 +602,33 @@ def test_supabase_keepalive_url_sin_https_aborta(sandbox):
 
 
 def test_supabase_keepalive_healthchecks_ok_fail_y_vacio(sandbox):
-    hc = {"HC": "https://hc.test/ping/abc/"}
+    hc = {"HC": "https://hc-ping.com/ping/abc/"}
     _fake_curl_sb(sandbox, ["200"])
     assert bash(sandbox, _sb_script(), env=dict(SB_ENV, **hc)).returncode == 0
-    pings = [c for c in calls(sandbox) if "hc.test" in c]
-    assert len(pings) == 1 and pings[0].endswith("https://hc.test/ping/abc")
+    pings = [c for c in calls(sandbox) if "hc-ping.com" in c]
+    assert len(pings) == 1 and pings[0].endswith("https://hc-ping.com/ping/abc")
     sandbox.log.write_text("")
     _fake_curl_sb(sandbox, ["500"])
     assert bash(sandbox, _sb_script(), env=dict(SB_ENV, **hc)).returncode == 1
-    pings = [c for c in calls(sandbox) if "hc.test" in c]
-    assert len(pings) == 1 and pings[0].endswith("https://hc.test/ping/abc/fail")
+    pings = [c for c in calls(sandbox) if "hc-ping.com" in c]
+    assert len(pings) == 1 and pings[0].endswith("https://hc-ping.com/ping/abc/fail")
     sandbox.log.write_text("")
     r = bash(sandbox, _sb_script(), env=SB_ENV)   # HC vacío
     assert r.returncode == 1 and "::warning::HC_SUPABASE_URL" in r.stdout
-    assert not any("hc.test" in c for c in calls(sandbox))
+    assert not any("hc-ping.com" in c for c in calls(sandbox))
 
 
 def test_supabase_keepalive_fallo_del_ping_ok_no_hace_fallar(sandbox):
     _fake_curl_sb(sandbox, ["200"])
-    r = bash(sandbox, _sb_script(), env=dict(SB_ENV, HC="https://hc.test/x", HC_RC="22"))
+    r = bash(sandbox, _sb_script(), env=dict(SB_ENV, HC="https://hc-ping.com/x", HC_RC="22"))
     assert r.returncode == 0 and "no se pudo avisar" in r.stdout
 
 
 def test_supabase_keepalive_no_filtra_datos_en_los_logs(sandbox):
     _fake_curl_sb(sandbox, ["500"])
-    r = bash(sandbox, _sb_script(), env=dict(SB_ENV, HC="https://hc.test/secreto"))
+    r = bash(sandbox, _sb_script(), env=dict(SB_ENV, HC="https://hc-ping.com/secreto"))
     out = r.stdout + r.stderr
-    for s in ("abc.supabase.co", "sb_publishable_xyz", "hc.test/secreto"):
+    for s in ("abc.supabase.co", "sb_publishable_xyz", "hc-ping.com/secreto"):
         assert s not in out
 
 
@@ -779,14 +779,14 @@ def _hb2(sb, hc, fetch, publish, alerts=""):
 
 
 def test_v2_heartbeat_ok_fail_y_degradado(sandbox):
-    assert _hb2(sandbox, "https://hc.test/ping/abc/", "success", "success").returncode == 0
-    assert calls(sandbox)[-1].endswith("https://hc.test/ping/abc") and "/fail" not in calls(sandbox)[-1]
+    assert _hb2(sandbox, "https://hc-ping.com/ping/abc/", "success", "success").returncode == 0
+    assert calls(sandbox)[-1].endswith("https://hc-ping.com/ping/abc") and "/fail" not in calls(sandbox)[-1]
     for f, p in (("success", "failure"), ("failure", "skipped"), ("cancelled", "skipped"), ("success", "skipped")):
         sandbox.log.write_text("")
-        _hb2(sandbox, "https://hc.test/ping/abc", f, p)
-        assert calls(sandbox)[-1].endswith("https://hc.test/ping/abc/fail"), (f, p)
+        _hb2(sandbox, "https://hc-ping.com/ping/abc", f, p)
+        assert calls(sandbox)[-1].endswith("https://hc-ping.com/ping/abc/fail"), (f, p)
     sandbox.log.write_text("")
-    _hb2(sandbox, "https://hc.test/ping/abc", "success", "success", alerts="Yahoo limitó (429)")
+    _hb2(sandbox, "https://hc-ping.com/ping/abc", "success", "success", alerts="Yahoo limitó (429)")
     assert "degraded: Yahoo limitó (429)" in calls(sandbox)[-1] and calls(sandbox)[-1].endswith("/fail")
 
 
@@ -817,14 +817,14 @@ esac
 def test_v2_verify_pages_fresco_sale_sin_dormir(sandbox):
     want = "2026-10-26T12:00:00Z"
     _fake_curl_pages(sandbox, want)
-    r = bash(sandbox, _verify2(), env={"WANT": want, "PAGE": "https://u.github.io/r/", "HC": "https://hc.test/x"})
+    r = bash(sandbox, _verify2(), env={"WANT": want, "PAGE": "https://u.github.io/r/", "HC": "https://hc-ping.com/x"})
     assert r.returncode == 0 and "Pages sirve el sitio nuevo" in r.stdout and not any(c_.startswith("sleep") for c_ in calls(sandbox))
     assert "https://u.github.io/r/v2/manifest.json?cb=" in " ".join(calls(sandbox))
 
 
 def test_v2_verify_pages_desfasado_avisa_pero_no_falla_ni_duerme_tras_el_ultimo(sandbox):
     _fake_curl_pages(sandbox, "2000-01-01T00:00:00Z")
-    r = bash(sandbox, _verify2(), env={"WANT": "2026-10-26T12:00:00Z", "PAGE": "https://u.github.io/r/", "HC": "https://hc.test/x"})
+    r = bash(sandbox, _verify2(), env={"WANT": "2026-10-26T12:00:00Z", "PAGE": "https://u.github.io/r/", "HC": "https://hc-ping.com/x"})
     assert r.returncode == 0 and "::warning::Pages sigue sirviendo" in r.stdout
     assert calls(sandbox).count("sleep 20") == 1 and sum(1 for c_ in calls(sandbox) if c_.startswith("sleep")) == 5
     assert any("/log" in c_ and "pages-stale" in c_ for c_ in calls(sandbox))
@@ -889,3 +889,101 @@ def test_v2_el_readme_documenta_la_activacion_los_secretos_y_los_riesgos():
                  "Términos de uso", "no escala a un servicio abierto", "sb_secret_", "service_role", "ningún commit a ninguna rama"):
         assert frag in readme, frag
     assert (ROOT / "docs" / "CONTRATO_FEED_V2.md").is_file() and "registry.json" in readme
+
+
+# ---- secreto de Healthchecks: limpieza y formato estricto (heartbeat v1/v2, verify-cdn, verify de Pages y keepalive de Supabase)
+HC_OK = "https://hc-ping.com/0123abcd-45ef-6789-abcd-0123456789ab"
+HC_MARK = "TOPSECRET9f3a"
+# (secreto tal como llega, URL que debe quedar): espacios, tabuladores, \r, \n, comillas o acentos graves envolventes
+HC_LIMPIOS = [
+    (HC_OK, HC_OK), (HC_OK + "/", HC_OK), ("  " + HC_OK + "  ", HC_OK), ("\t" + HC_OK + "\t", HC_OK), (HC_OK + "\r\n", HC_OK),
+    ("\r\n" + HC_OK + "\n", HC_OK), ('"' + HC_OK + '"', HC_OK), ("'" + HC_OK + "'", HC_OK), ("`" + HC_OK + "`", HC_OK),
+    (' \t"' + HC_OK + '"\r\n', HC_OK), ("`'" + HC_OK + "'`\n", HC_OK), ('"' + HC_OK, HC_OK), (HC_OK + "'", HC_OK),
+    ("https://hc-ping.com/ping-key/mi_check", "https://hc-ping.com/ping-key/mi_check"),
+]
+HC_HOSTILES = [
+    "http://hc-ping.com/" + HC_MARK, "https://hc-ping.com.evil.com/" + HC_MARK, "https://evil.com/hc-ping.com/" + HC_MARK,
+    "https://hc-ping.com/", "https://hc-ping.com", "hc-ping.com/" + HC_MARK, "https://hc-ping.com/" + HC_MARK + " --output /tmp/x",
+    "https://hc-ping.com/" + HC_MARK + "\nhttps://evil.example/x", "https://hc-ping.com/" + HC_MARK + "\r\nX-Evil: 1",
+    "https://hc-ping.com/" + HC_MARK + ";touch pwned", "https://hc-ping.com/" + HC_MARK + "$(touch pwned)", "https://hc-ping.com/`touch pwned`" + HC_MARK,
+    "https://hc-ping.com/" + HC_MARK + "?x=1", "https://hc-ping.com/" + HC_MARK + "#f", "https://user@hc-ping.com/" + HC_MARK,
+    "https://hc-ping.com/a@evil.com/" + HC_MARK, "-o /tmp/x " + HC_MARK, "--config " + HC_MARK, HC_MARK, "https://hc-ping.com/á" + HC_MARK,
+    '"https://hc-ping.com/' + HC_MARK + ' "x"', "'" + "https://hc-ping.com/a b" + HC_MARK + "'", "https://hc-ping.com//" + HC_MARK,
+    "ftp://hc-ping.com/" + HC_MARK, "https://HC-PING.COM/" + HC_MARK, "https://hc-ping.com/" + HC_MARK + "/../..",
+]
+
+
+def _hc_calls(sb):
+    return [c_ for c_ in calls(sb) if "hc-ping.com" in c_ or HC_MARK in c_ or "evil" in c_]
+
+
+def _hc_scripts():
+    """(nombre, script, entorno base, ¿es el heartbeat?, función que prepara el curl falso). Los verify no tocan Healthchecks si todo va bien: su curl
+    falso sirve un sitio desfasado para que intenten el ping informativo."""
+    return [
+        ("v1-heartbeat", step(load("update-data.yml"), "heartbeat", "Ping Healthchecks.io")["run"], {"FETCH": "success", "PUBLISH": "failure"}, "hb"),
+        ("v2-heartbeat", step(load(V2), "heartbeat", "Ping Healthchecks.io")["run"], {"FETCH": "success", "PUBLISH": "failure", "ALERTS": ""}, "hb"),
+        ("v1-verify-cdn", _verify_script(), {"WANT": WANT}, "cdn"),
+        ("v2-verify", _verify2(), {"WANT": "2026-10-26T12:00:00Z", "PAGE": "https://u.github.io/r/"}, "pages"),
+        ("supabase", _sb_script(), dict(SB_ENV), "sb"),
+    ]
+
+
+def _arm(sb, kind):
+    if kind == "hb":
+        _exe(sb.bin / "curl", 'echo "curl $*" >> "$CALLS_LOG"\n')
+    elif kind == "cdn":
+        _fake_curl_cdn(sb, "stale")
+    elif kind == "pages":
+        _fake_curl_pages(sb, "2000-01-01T00:00:00Z")
+    else:
+        _fake_curl_sb(sb, ["503"])
+
+
+@pytest.mark.parametrize("raw,clean", HC_LIMPIOS)
+@pytest.mark.parametrize("which", range(5))
+def test_hc_el_secreto_se_limpia_y_se_usa_la_url_limpia(sandbox, which, raw, clean):
+    name, script, env, kind = _hc_scripts()[which]
+    _arm(sandbox, kind)
+    r = bash(sandbox, script, env=dict(env, HC=raw))
+    hc = _hc_calls(sandbox)
+    assert hc, (name, r.stdout, r.stderr)
+    base = clean.rstrip("/")
+    for c_ in hc:
+        assert c_.split()[-1] in (base, base + "/fail", base + "/log"), (name, c_)
+    assert "no tiene el formato" not in r.stdout
+
+
+@pytest.mark.parametrize("raw", HC_HOSTILES)
+@pytest.mark.parametrize("which", range(5))
+def test_hc_un_secreto_hostil_avisa_sin_el_valor_sale_con_0_y_no_llama_a_curl_con_el(sandbox, which, raw):
+    name, script, env, kind = _hc_scripts()[which]
+    _arm(sandbox, kind)
+    r = bash(sandbox, script, env=dict(env, HC=raw))
+    assert "::warning::" in r.stdout and "hc-ping.com" in r.stdout, (name, r.stdout)
+    assert HC_MARK not in r.stdout + r.stderr and "evil" not in r.stdout + r.stderr, name     # el valor nunca se escribe en el log
+    assert _hc_calls(sandbox) == [], (name, calls(sandbox))                                    # ni una llamada a curl con él
+    assert not (sandbox.work / "pwned").exists()
+    if kind in ("hb", "cdn", "pages"):
+        assert r.returncode == 0, (name, r.stdout, r.stderr)
+    # el keepalive de Supabase termina con 1 si Supabase no responde (aquí a propósito): lo que cuenta es que HC no se use
+    assert not any(c_.endswith("/fail") for c_ in calls(sandbox))
+
+
+@pytest.mark.parametrize("which", range(2))
+def test_hc_secreto_hostil_en_el_heartbeat_no_cambia_el_resultado_del_run(sandbox, which):
+    """Sale con 0 también cuando el run falló (FETCH/PUBLISH en fallo): un secreto roto no convierte el heartbeat en otro fallo."""
+    name, script, env, kind = _hc_scripts()[which]
+    _arm(sandbox, kind)
+    r = bash(sandbox, script, env=dict(env, HC="https://hc-ping.com.evil.com/x"))
+    assert r.returncode == 0 and calls(sandbox) == [] and "::warning::" in r.stdout
+
+
+def test_hc_solo_espacios_cuenta_como_vacio(sandbox):
+    for name, script, env, kind in _hc_scripts():
+        _arm(sandbox, kind)
+        sandbox.log.write_text("")
+        r = bash(sandbox, script, env=dict(env, HC=" \t\r\n "))
+        assert _hc_calls(sandbox) == [], name
+        if kind == "hb":
+            assert r.returncode == 0 and "::warning::" in r.stdout

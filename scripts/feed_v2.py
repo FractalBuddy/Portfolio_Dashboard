@@ -14,8 +14,10 @@ alternative.me, CoinGecko, RSS):
   * SÍMBOLOS MUERTOS NO BLOQUEAN: un símbolo que falla conserva sus últimos datos marcados `stale`; tras FAIL_STREAK_INVALID fallos seguidos pasa a
     `invalid` (se reintenta una vez a la semana); uno congelado desde hace >45 días pasa a `delisted`. Si fallan casi todos a la vez (Yahoo caído)
     no se penaliza a nadie.
-  * NUNCA PRECIOS <= 0: una barra con open/high/low/close no finito o <= 0 (el WTI cerró en negativo el 2020-04-20) se descarta antes de escribir y se
-    anota en `health.json` (problems.dropped_bars). Más de MAX_DROPPED_BARS (3) o más del 1 % de las barras de un símbolo = datos sospechosos: no se publica.
+  * NUNCA PRECIOS <= 0: una barra con CIERRE no finito o <= 0 (el WTI cerró en negativo el 2020-04-20) se descarta antes de escribir y se anota en
+    `health.json` (problems.dropped_bars) con su MOTIVO (close_le_0, close_not_finite, close_missing). Un open/high/low malo con cierre bueno NO descarta la
+    barra: se repara con el cierre (el 2020-04-21 el WTI cerró en +10,01 $ con mínimo negativo). Más de MAX_DROPPED_BARS (3) o más del 1 % de las barras
+    de un símbolo descartadas = datos sospechosos: no se publica.
   * DIVISA/UNIDAD EXPLÍCITAS (BE-01): cada serie lleva `currency` y `unit`; si Yahoo informa otra divisa/escala que la declarada en el registro
     (GBp frente a GBP), el símbolo NO se publica en este run.
   * Además: cripto (CoinGecko, hasta 250 por lote), macro (FX, tipos, IPC, VIX, Fear & Greed, calendario), noticias y salud del run.
@@ -51,6 +53,8 @@ MIN_OVERLAP = 3                    # fechas comunes mínimas para juzgar el reba
 GLOBAL_OUTAGE_RATIO = 0.5          # si falla más de la mitad de lo intentado (con ≥10 intentos) es Yahoo, no los símbolos: nadie se penaliza
 MAX_DROPPED_BARS = 3               # barras descartadas (precio no finito o <= 0) que se toleran por símbolo en todo su histórico...
 MAX_DROPPED_FRACTION = 0.01        # ...y como fracción de sus barras: por encima, los datos del símbolo se consideran sospechosos y NO se publica
+FAIL_CLASSES = ("empty", "http_error", "timeout", "parse", "unit", "suspect")   # motivos de fallo de un símbolo en health.json (clase cerrada, nunca texto libre)
+DROP_REASONS = ("close_missing", "close_not_finite", "close_le_0", "unknown")  # motivo de una barra descartada; `unknown` = anotada antes de registrar el motivo
 DROPPED_KEEP = 50                  # fechas descartadas que se recuerdan por símbolo en health.json (el tope de arriba ya las corta mucho antes)
 INTRADAY_MAX_BARS = 800
 V2_YAHOO_BUDGET_SECONDS = 13 * 60
@@ -141,12 +145,13 @@ def _field(v):
 
 
 def split_bars(df, today):
-    """DataFrame de Yahoo -> (barras, fechas_descartadas). Barras {d,o,h,l,c,v} ordenadas, sin fechas repetidas ni futuras, con low <= close <= high
-    (se reparan máximo/mínimo que no contienen apertura o cierre) y redondeo a 6 decimales.
+    """DataFrame de Yahoo -> (barras, descartadas). Barras {d,o,h,l,c,v} ordenadas, sin fechas repetidas ni futuras, con low <= close <= high
+    (se reparan máximo/mínimo que no contienen apertura o cierre) y redondeo a 6 decimales. `descartadas` es {fecha: motivo}.
 
-    El feed NUNCA lleva precios <= 0 ni no finitos (p. ej. el WTI cerró en negativo el 2020-04-20): una barra con open/high/low/close no finito o <= 0
-    se DESCARTA y su fecha se devuelve en `fechas_descartadas` (se anota en health.json). Una fila sin ningún precio (Yahoo a veces devuelve filas
-    vacías) no es una barra ni cuenta como descartada. Si falta la COLUMNA Open/High/Low (no la celda), se rellena con el cierre."""
+    El feed NUNCA lleva precios <= 0 ni no finitos (el WTI cerró en negativo el 2020-04-20). Solo se DESCARTA una barra por su CIERRE:
+    `close_missing` (celda o columna vacía), `close_not_finite` (infinito o no numérico) o `close_le_0` (cero o negativo). Un open/high/low no finito
+    o <= 0 con cierre bueno (el 2020-04-21 el WTI cerró en +10,01 $ con mínimo de -40,32) NO descarta la barra: ese campo se sustituye por el cierre.
+    Una fila sin ningún precio (Yahoo a veces devuelve filas vacías) no es una barra ni cuenta como descartada."""
     limit = today + timedelta(days=1)
 
     def col(name):
@@ -154,7 +159,7 @@ def split_bars(df, today):
 
     cols = {k: col(k) for k in ("Open", "High", "Low", "Close", "Volume")}
     days = [i.strftime("%Y-%m-%d") for i in df.index]
-    out, dropped = {}, set()
+    out, dropped = {}, {}
     for i, day in enumerate(days):
         d = parse_day(day)
         if d is None or d > limit:
@@ -163,15 +168,22 @@ def split_bars(df, today):
         present = [x for x in cells.values() if x is not None]
         if all(st == "missing" for st, _ in present):
             continue                                                        # fila vacía: no es una barra
-        if any(st != "ok" or val <= 0 for st, val in present) or cells["Close"] is None:
-            dropped.add(day)
+        close = cells["Close"]
+        if close is None or close[0] == "missing":
+            dropped[day] = "close_missing"
             continue
-        cl = cells["Close"][1]
-        o, h, lo = (cells[k][1] if cells[k] is not None else cl for k in ("Open", "High", "Low"))
+        if close[0] == "bad":
+            dropped[day] = "close_not_finite"
+            continue
+        if close[1] <= 0:
+            dropped[day] = "close_le_0"
+            continue
+        cl = close[1]
+        o, h, lo = (cells[k][1] if cells[k] is not None and cells[k][0] == "ok" and cells[k][1] > 0 else cl for k in ("Open", "High", "Low"))
         hi, lo = max(h, o, cl, lo), min(h, o, cl, lo)
         vol = _num(cols["Volume"][i] if cols["Volume"] is not None else None, 0.0)
         out[day] = {"d": day, "o": round(o, 6), "h": round(hi, 6), "l": round(lo, 6), "c": round(cl, 6), "v": int(vol) if vol > 0 else 0}
-    return [out[k] for k in sorted(out)], sorted(dropped - set(out))
+    return [out[k] for k in sorted(out)], {d: why for d, why in sorted(dropped.items()) if d not in out}
 
 
 def bars_from_df(df, today):
@@ -218,6 +230,23 @@ def period_for_gap(gap_days):
     return "10y"
 
 
+def fail_class_of(exc):
+    """Clase cerrada (FAIL_CLASSES) de una excepción: nunca el texto de la excepción (puede llevar URLs, claves o cuerpos de respuesta)."""
+    name = type(exc).__name__.lower()
+    if isinstance(exc, TimeoutError) or "timeout" in name or "timedout" in name:
+        return "timeout"
+    if isinstance(exc, (ValueError, KeyError, TypeError, IndexError, AttributeError, ArithmeticError)):
+        return "parse"
+    return "http_error"
+
+
+def unit_info(entry, observed):
+    """Lo que se publica de un desajuste de unidad: {registro: "GBp/subunit", yahoo: "GBP"|None}. `yahoo` es solo la divisa que informó Yahoo (3-4 letras)
+    o None si no la informó o no tiene ese formato; nunca texto libre."""
+    seen = observed if isinstance(observed, str) and c.CURRENCY_RE.fullmatch(observed) else None
+    return {"registro": "%s/%s" % (entry["currency"], entry["unit"]), "yahoo": seen}
+
+
 def check_unit(entry, observed):
     """None si la divisa/escala observada en Yahoo concuerda con la del registro; si no, el motivo (el símbolo NO se publica).
     Índices y pares de divisas (unit points/rate) no se comprueban: Yahoo no da ahí una divisa fiable. En `subunit` (GBp...) es OBLIGATORIO que
@@ -243,14 +272,16 @@ class Run:
         self.force_all = force_all
         self.generated_at = iso_z(now)
         self.stats = Counter()
-        self.problems = {"unit_mismatch": [], "failed": [], "rebased": [], "deferred": [], "frozen": [], "suspect": []}
-        self.dropped_now = {}          # símbolo -> fechas descartadas (todo el histórico) calculadas en este run
+        self.problems = {"unit_mismatch": {}, "failed": {}, "rebased": [], "deferred": [], "frozen": [], "suspect": []}
+        self.dropped_now = {}          # símbolo -> {fecha: motivo} de las barras descartadas (todo el histórico) calculadas en este run
+        self.not_listed = []           # criptos del registro que no aparecen en el lote de CoinGecko de este run
         self.state = {}                # símbolo -> estado nuevo
         self.latest = {}               # símbolo -> latest.json publicado (para índice y macro)
         self.written = {}              # ruta -> bytes
         self.yahoo_calls = 0
         self.stop = False
         self.backfills = 0
+        self.unit_seen = {}            # símbolo -> {registro, yahoo} del desajuste de unidad de este run
         self.prev_state = self._load_prev_state()
 
     # -- E/S -----------------------------------------------------------------------------------------------------------------
@@ -315,6 +346,8 @@ class Run:
 
     def final_status(self, entry):
         """Estado con el que acaba este run (el índice lo publica): lo fijado en el registro, o el que han dejado los fallos/éxitos de hoy."""
+        if entry["status"] == "active" and entry["symbol"] in self.not_listed:
+            return "dormant"
         if entry["status"] != "active" or entry["kind"] != "yahoo":
             return entry["status"]
         return (self.state.get(entry["symbol"]) or {}).get("status", "active")
@@ -355,18 +388,22 @@ class Run:
             self.stop = True
             return "deferred", "%s" % type(e).__name__
         except Exception as e:                                           # noqa: BLE001 - cualquier fallo de Yahoo = fallo de este símbolo
-            return "fail", "yahoo: %s" % type(e).__name__
+            return "fail", fail_class_of(e)
         if heavy:
             self.backfills += 1
-        why = check_unit(entry, df.attrs.get("currency") if df is not None else None)
+        observed = df.attrs.get("currency") if df is not None else None
+        why = check_unit(entry, observed)
         if why:
-            return "fail", "unit_mismatch: " + why
+            self.unit_seen[sym] = unit_info(entry, observed)
+            log("  ! %s: %s" % (sym, why))
+            return "fail", "unit"
         new, dropped = split_bars(df, self.today)
         if len(new) < 2:
-            return "fail", "sin datos suficientes"
+            return "fail", "empty"
         last_day = parse_day(new[-1]["d"])
         if (self.today - last_day).days > FROZEN_DAYS:
-            return "fail", "frozen: última barra %s" % new[-1]["d"]
+            log("  ! %s: última barra %s" % (sym, new[-1]["d"]))
+            return "fail", "frozen"
         rewrite_all = heavy or not years
         if recent and not heavy:
             r = rebase_ratio(recent, new)
@@ -380,12 +417,17 @@ class Run:
                     self.stop = True
                     return "deferred", "%s" % type(e).__name__
                 except Exception as e:                                   # noqa: BLE001
-                    return "fail", "yahoo: %s" % type(e).__name__
+                    return "fail", fail_class_of(e)
                 self.backfills += 1
-                why = check_unit(entry, df2.attrs.get("currency") if df2 is not None else None)
-                new2, dropped2 = split_bars(df2, self.today) if not why else ([], [])
-                if why or len(new2) < 2:
-                    return "fail", "unit_mismatch: " + why if why else "sin datos suficientes"
+                observed2 = df2.attrs.get("currency") if df2 is not None else None
+                why = check_unit(entry, observed2)
+                new2, dropped2 = split_bars(df2, self.today) if not why else ([], {})
+                if why:
+                    self.unit_seen[sym] = unit_info(entry, observed2)
+                    log("  ! %s: %s" % (sym, why))
+                    return "fail", "unit"
+                if len(new2) < 2:
+                    return "fail", "empty"
                 new, dropped, recent, rewrite_all = new2, dropped2, [], True
                 self.problems["rebased"].append(sym)
         merged = merge_bars(recent, new)
@@ -394,14 +436,17 @@ class Run:
         # y se recuerdan las de runs anteriores, que esta descarga incremental ya no vuelve a ver, para aplicar el tope sobre todo el histórico.
         have = {b["d"] for b in merged}
         first = merged[0]["d"] if rewrite_all else "%04d-01-01" % cutoff_year
-        before = (self.prev_state.get(sym) or {}).get("dropped")
+        prev_st = self.prev_state.get(sym) or {}
+        before = prev_st.get("dropped")
         before = [d for d in before if isinstance(d, str) and parse_day(d)] if isinstance(before, list) else []
+        before_why = prev_st.get("dropped_why") if isinstance(prev_st.get("dropped_why"), dict) else {}
         dropped_all = sorted({d for d in set(before) | set(dropped) if d >= first and d not in have})
-        self.dropped_now[sym] = dropped_all
+        self.dropped_now[sym] = {d: dropped.get(d) or (before_why.get(d) if before_why.get(d) in DROP_REASONS else "unknown") for d in dropped_all}
         if dropped:
-            log("  ~ %s: %d barras descartadas en este run (precio no finito o <= 0), %d en el histórico" % (sym, len(dropped), len(dropped_all)))
+            log("  ~ %s: %d barras descartadas en este run (cierre no finito o <= 0), %d en el histórico" % (sym, len(dropped), len(dropped_all)))
         if len(dropped_all) > MAX_DROPPED_BARS or len(dropped_all) > MAX_DROPPED_FRACTION * (len(merged) + len(dropped_all)):
-            return "fail", "suspect_data: %d barras con precio no finito o <= 0 en %d" % (len(dropped_all), len(merged) + len(dropped_all))
+            log("  ! %s: %d barras descartadas de %d" % (sym, len(dropped_all), len(merged) + len(dropped_all)))
+            return "fail", "suspect"
         by_year = {}
         for b in merged:
             y = int(b["d"][:4])
@@ -517,7 +562,8 @@ class Run:
             try:
                 results[sym] = self.update_symbol(e)
             except Exception as exc:                                       # noqa: BLE001 - un símbolo con un fallo inesperado no tumba el run
-                results[sym] = ("fail", "interno: %s" % type(exc).__name__)
+                log("  ! %s: error interno (%s)" % (sym, type(exc).__name__))
+                results[sym] = ("fail", "parse")
             kind, why = results[sym]
             if kind != "ok":
                 log("  ! %s: %s (%s)" % (sym, kind, why))
@@ -546,35 +592,38 @@ class Run:
             else:
                 kept = self.carry(e, failed=True)
                 self.stats["failed"] += 1
-                self.problems["failed"].append(sym)
-                reason = res[1]
-                if reason.startswith("unit_mismatch"):
-                    self.problems["unit_mismatch"].append(sym)
+                reason = res[1]                                          # clase interna: FAIL_CLASSES + `frozen` (se publica como `empty`)
+                self.problems["failed"][sym] = "empty" if reason == "frozen" else reason
+                if reason == "unit":
+                    self.problems["unit_mismatch"][sym] = self.unit_seen.get(sym) or {"registro": "%s/%s" % (e["currency"], e["unit"]), "yahoo": None}
                     self.stats["unit_mismatch"] += 1
-                if reason.startswith("frozen"):
+                if reason == "frozen":
                     self.problems["frozen"].append(sym)
-                if reason.startswith("suspect_data"):
+                if reason == "suspect":
                     self.problems["suspect"].append(sym)
                     self.stats["suspect"] += 1
                 st["last_try"] = self.generated_at
-                if not outage or reason.startswith(("unit_mismatch", "frozen", "suspect_data")):
+                if not outage or reason in ("unit", "frozen", "suspect"):
                     st["fail_streak"] = int(st.get("fail_streak", 0)) + 1
-                    if reason.startswith("frozen"):
+                    if reason == "frozen":
                         st["status"] = "delisted"
                     elif st["fail_streak"] >= c.FAIL_STREAK_INVALID:
                         st["status"] = "invalid"
-            if sym in self.dropped_now and res is not None and (res[0] == "ok" or res[1].startswith("suspect_data")):
+            if sym in self.dropped_now and res is not None and (res[0] == "ok" or res[1] == "suspect"):
                 if self.dropped_now[sym]:
-                    st["dropped"] = self.dropped_now[sym][-DROPPED_KEEP:]
+                    keep = sorted(self.dropped_now[sym])[-DROPPED_KEEP:]
+                    st["dropped"] = keep
+                    st["dropped_why"] = {d: self.dropped_now[sym][d] for d in keep}
                 else:
                     st.pop("dropped", None)
+                    st.pop("dropped_why", None)
             if kept and res is not None and res[0] != "ok":
                 self.stats["carried_stale"] += 1
             if res is None and status == "dormant":
                 self.stats["dormant"] += 1
             st["tier"] = e["tier"]
             st["status"] = st.get("status") if st.get("status") in ("active", "invalid", "delisted") else "active"
-            self.state[sym] = {k: v for k, v in st.items() if k in ("status", "fail_streak", "last_ok", "last_try", "tier", "dropped") and v is not None}
+            self.state[sym] = {k: v for k, v in st.items() if k in ("status", "fail_streak", "last_ok", "last_try", "tier", "dropped", "dropped_why") and v is not None}
         self.stats["backfilled"] = self.backfills
 
     # -- Criptomonedas -------------------------------------------------------------------------------------------------------
@@ -595,8 +644,13 @@ class Run:
                             "count": len(coins), "coins": coins})
             have = {co["symbol"] for co in coins}
             miss = [e["symbol"] for e in self.registry if e["kind"] == "crypto" and e["symbol"].upper() not in have]
+            self.not_listed = [s for s in miss if next(e for e in self.registry if e["symbol"] == s)["status"] == "active"]
+            for e in self.registry:
+                if e["symbol"] in self.not_listed:
+                    # No bloquea nada: el registro no se toca; solo queda anotada en health.json (status dormant, motivo not_listed) y en el log.
+                    self.state[e["symbol"]] = {"status": "dormant", "reason": "not_listed", "fail_streak": 0, "tier": e["tier"]}
             if miss:
-                log("  ! cripto del registro que no aparece en el top de CoinGecko: %s" % miss[:10])
+                log("  ! cripto del registro que no aparece en el lote de CoinGecko (dormant, not_listed): %s" % miss[:10])
             self.stats["crypto"] = len(coins)
             self.crypto_coins = coins
             return
@@ -677,10 +731,12 @@ class Run:
 
     def build_health(self, duration, http):
         cap = lambda l: sorted(set(l))[:40]                                  # noqa: E731
+        capd = lambda d: dict(sorted(d.items())[:40])                        # noqa: E731
         published = sum(1 for e in self.registry if e["kind"] == "yahoo" and e["symbol"] in self.latest)
         counts = {k: int(self.stats.get(k, 0)) for k in ("due", "updated", "failed", "carried_stale", "deferred", "backfilled",
                                                          "unit_mismatch", "crypto", "outage", "suspect")}
         dropped = {s: st["dropped"] for s, st in sorted(self.state.items()) if st.get("dropped")}
+        why = {s: st.get("dropped_why") or {} for s, st in self.state.items()}
         counts.update({"registry": len(self.registry), "published": published, "rebased": len(self.problems["rebased"]),
                        "dropped_bars": sum(len(v) for v in dropped.values())})
         doc = {
@@ -689,8 +745,9 @@ class Run:
                     "http_requests": dict(sorted(http.items())), "yahoo_rate_limited": int(fm._YF_429_TOTAL),
                     "yahoo_abandoned": bool(fm._YF_ABANDONED), "budget_exhausted": bool(fm._BUDGET_HIT)},
             "counts": counts,
-            "problems": {**{k: cap(v) for k, v in self.problems.items()},
-                         "dropped_bars": {s: {"n": len(v), "dates": v[:10]} for s, v in list(dropped.items())[:40]}},
+            "problems": {**{k: (capd(v) if isinstance(v, dict) else cap(v)) for k, v in self.problems.items()},
+                         "dropped_bars": {s: {"n": len(v), "dates": v[:10], "reasons": {d: why[s].get(d, "unknown") for d in v[:10]}}
+                                          for s, v in list(dropped.items())[:40]}},
             "symbols": self.state,
         }
         self.emit("health.json", doc)
