@@ -48,8 +48,7 @@ es borrar una línea. Los símbolos pausados a mano (`dormant` en el registro) n
   cada motivo; columna `Close` ausente; motivos que sobreviven al run incremental; `unknown` para estado antiguo. **No he verificado los valores reales de CL=F en Yahoo** (sin red): la serie es sintética con la forma descrita.
 
 ## E) Registro y criptos
-* **VUSA.L y VWRL.L: NO modificados.** El mensaje traía el marcador sin rellenar («`<RELLENAR: GBP o GBp>`») y no puedo saber qué informa Yahoo desde esta sesión. Si Yahoo informa `GBp`, el registro ya es correcto y
-  entonces el `unit_mismatch` que viste tiene otra causa; si informa `GBP`, hay que poner `currency: "GBP"`, `unit: "currency"` en las dos líneas. Dime cuál y lo cambio (un commit de dos líneas).
+* **VUSA.L y VWRL.L**: Yahoo informa `GBP` (confirmado por el dueño; no verificado desde la sesión). Registro cambiado a `currency: "GBP"`, `unit: "currency"` (antes `GBp`/`subunit`). El precio se publica ya en libras, sin divisor.
 * **Cripto no listada**: una cripto `active` del registro que no aparece en el lote de CoinGecko queda en `health.json.symbols.<SYM>` como `{status: "dormant", reason: "not_listed", fail_streak: 0, tier}`, con `index.json`
   `status: "dormant"`, una línea en el log y un `::warning::` del validador. No bloquea nada, no es alerta (salvo que sean > 10 % del registro, caso (ii)), y se recupera sola cuando la moneda reaparece. Si CoinGecko falla
   entero no se marca ninguna (no se sabe). El registro no se modifica (el test de registro exige `status: active` en todas).
