@@ -5,7 +5,7 @@ import json
 import os
 import stat
 import threading
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -95,12 +95,26 @@ def bars(n=300, start=100.0, end=date(2026, 10, 23)):
     return list(reversed(out))
 
 
+def long_bars(years):
+    """Serie diaria de `years` años (solo días laborables) terminada en 2026-10-23; cierres crecientes y > 0."""
+    from datetime import timedelta
+    out, d, i = [], date(2026, 10, 23), 0
+    while d > date(2026, 10, 23) - timedelta(days=int(years * 365.25)):
+        if d.weekday() < 5:
+            out.append({"d": d.isoformat(), "o": 1, "h": 1, "l": 1, "c": round(200.0 - i * 0.01, 4), "v": 0})
+            i += 1
+        d -= timedelta(days=1)
+    return list(reversed(out))
+
+
 class Spy:
     """Fuentes externas simuladas; guardan qué se pidió."""
     def __init__(self, nav_price=25.5, series_currency="USD"):
         self.nav_calls, self.facts_calls, self.series_calls = [], [], []
         self.nav_price, self.series_currency = nav_price, series_currency
         self.noise = False
+        self.periods = {}
+        self.long = None
 
     def nav(self, url, isin):
         self.nav_calls.append((url, isin))
@@ -114,10 +128,13 @@ class Spy:
         self.facts_calls.append(url)
         return {"ongoing_charges_pct": 0.1, "domicile": "Ireland", "evil_key": "x"}
 
-    def series(self, sym):
+    def series(self, sym, period="2y"):
         self.series_calls.append(sym)
+        self.periods[sym] = period
         if sym == "BOOM":
             raise RuntimeError("falla")
+        if self.long is not None and period == "max":
+            return self.long, self.series_currency
         return bars(), self.series_currency
 
     def fetchers(self):
@@ -196,7 +213,7 @@ def test_flujo_completo_lee_la_lista_y_publica_por_usuario(sb, tmp_path, capsys)
         assert headers["apikey"] == PUB_KEY and "authorization" not in headers                 # SOLO la clave publicable en `apikey`
         assert body["p_token"] == TOKEN and set(body) <= {"p_token", "p_user", "p_payload"}
     p1 = pubs[0][2]["p_payload"]
-    assert pv.payload_problems(p1, date(2026, 10, 26)) == []
+    assert pv.payload_problems(p1, datetime.now(timezone.utc).date()) == []       # (build usa el reloj real: la fecha fija de NOW caducaba)
     assert set(p1) == {"schema", "generated_at", "funds", "series", "public"}
     assert p1["funds"][0]["isin"] == ISIN_A and p1["funds"][0]["price"] == 25.5 and p1["funds"][0]["currency"] == "EUR"
     assert p1["funds"][0]["facts"] == {"ongoing_charges_pct": 0.1, "domicile": "Ireland"}      # claves fuera de la lista blanca, descartadas
@@ -393,27 +410,118 @@ def test_un_simbolo_que_falla_no_tumba_el_resto(sb, tmp_path):
     assert [s["symbol"] for s in sb.calls(pv.RPC_PUBLISH)[0][2]["p_payload"]["series"]] == ["FAKE1"]
 
 
-def test_el_proxy_publico_no_se_repite_y_el_no_publico_se_incluye(sb, tmp_path):
+def test_el_proxy_se_incluye_aunque_este_en_el_universo_publico(sb, tmp_path):
+    """El público solo conserva HISTORY_YEARS años: la historia larga de un proxy va SIEMPRE en lo propio. Un símbolo extra público no se repite."""
     sb.watch = [watch_row(funds=[{"isin": ISIN_A, "name": "F", "url": URL_A, "proxy_symbol": "AAPL"},
-                                 {"isin": ISIN_B, "name": "G", "url": URL_B, "proxy_symbol": "FAKEP"}], symbols=[])]
+                                 {"isin": ISIN_B, "name": "G", "url": URL_B, "proxy_symbol": "FAKEP"}], symbols=["AAPL", "FAKE1"])]
+    spy = Spy()
+    run_all(sb, tmp_path, spy)
+    p = sb.calls(pv.RPC_PUBLISH)[0][2]["p_payload"]
+    assert p["public"] == [] and [s["symbol"] for s in p["series"]] == ["AAPL", "FAKEP", "FAKE1"]       # proxies primero, luego los extra
+    assert [f.get("proxy_symbol") for f in p["funds"]] == ["AAPL", "FAKEP"]
+    assert spy.periods == {"AAPL": "max", "FAKEP": "max", "FAKE1": "2y"} and spy.series_calls.count("AAPL") == 1
+
+
+def test_proxy_con_historia_larga_y_extra_recortado(sb, tmp_path):
+    sb.watch = [watch_row(funds=[{"isin": ISIN_A, "name": "F", "url": URL_A, "proxy_symbol": "FAKEP"}], symbols=["FAKE1"])]
+    spy = Spy()
+    spy.long = long_bars(17)
+    run_all(sb, tmp_path, spy)
+    s = {x["symbol"]: x for x in sb.calls(pv.RPC_PUBLISH)[0][2]["p_payload"]["series"]}
+    assert len(s["FAKEP"]["d"]) > 4000 and set(s["FAKEP"]) == {"symbol", "currency", "unit", "price_unit_divisor", "price", "change_pct", "as_of", "d", "c"}
+    assert len(s["FAKE1"]["d"]) <= 2 * 366 and s["FAKEP"]["currency"] == "USD" and s["FAKEP"]["unit"] == "currency"
+
+
+def test_historia_de_proxy_se_recorta_a_25_anos():
+    b = long_bars(40)
+    e = pv.series_entry("FAKEP", b, "USD", date(2026, 10, 26), long=True)
+    assert e["d"][0] >= (date(2026, 10, 26) - timedelta(days=pv.PROXY_DAYS)).isoformat() and len(e["d"]) <= pv.MAX_PROXY_BARS
+    assert len(pv.series_entry("FAKEP", b, "USD", date(2026, 10, 26))["d"]) <= pv.MAX_SERIES_BARS
+
+
+def test_hueco_en_una_descarga_defectuosa_conserva_solo_el_tramo_final():
+    b = long_bars(5)
+    gap = [x for i, x in enumerate(b) if not 300 <= i < 400]                        # faltan ~100 días en mitad de la serie
+    e = pv.series_entry("FAKEP", gap, "USD", date(2026, 10, 26), long=True)
+    assert e["d"][0] == b[400]["d"] and e["d"][-1] == b[-1]["d"]
+
+
+def test_proxy_sin_divisa_no_se_publica_y_se_cuenta(sb, tmp_path, capsys):
+    sb.watch = [watch_row(funds=[{"isin": ISIN_A, "name": "F", "url": URL_A, "proxy_symbol": "FAKEP"}], symbols=[])]
+    run_all(sb, tmp_path, Spy(series_currency=None))
+    p = sb.calls(pv.RPC_PUBLISH)[0][2]["p_payload"]
+    assert p["series"] == [] and p["funds"][0]["proxy_symbol"] == "FAKEP" and "proxy_sin_divisa_o_datos" in capsys.readouterr().out
+
+
+def test_proxy_que_falla_no_tumba_el_nav(sb, tmp_path, capsys):
+    sb.watch = [watch_row(funds=[{"isin": ISIN_A, "name": "F", "url": URL_A, "proxy_symbol": "BOOM"}], symbols=[])]
     run_all(sb, tmp_path)
     p = sb.calls(pv.RPC_PUBLISH)[0][2]["p_payload"]
-    assert p["public"] == ["AAPL"] and [s["symbol"] for s in p["series"]] == ["FAKEP"]
-    assert [f.get("proxy_symbol") for f in p["funds"]] == ["AAPL", "FAKEP"]
+    assert p["series"] == [] and p["funds"][0]["price"] == 25.5 and "proxy_fallo" in capsys.readouterr().out
+
+
+def test_dos_usuarios_con_el_mismo_proxy_descargan_una_vez(sb, tmp_path):
+    f = [{"isin": ISIN_A, "name": "F", "url": URL_A, "proxy_symbol": "FAKEP"}]
+    sb.watch = [watch_row("u1", funds=f, symbols=["FAKEP"]), watch_row("u2", funds=f, symbols=["FAKEP", "FAKE1"]), watch_row("u3", funds=[], symbols=["FAKE1"])]
+    spy = Spy()
+    run_all(sb, tmp_path, spy)
+    assert sorted(spy.series_calls) == ["FAKE1", "FAKEP"] and len(sb.calls(pv.RPC_PUBLISH)) == 3
 
 
 # ------------------------------------------------------------------ tope de 1 MB
-def test_payload_enorme_se_recorta_hasta_caber(monkeypatch):
-    series = [{"symbol": "S%d" % i, "currency": "USD", "unit": "currency", "price_unit_divisor": 1, "price": 100.0, "change_pct": 0.1, "as_of": "2026-10-23",
-               "d": [b["d"] for b in bars(600)], "c": [b["c"] for b in bars(600)]} for i in range(40)]
-    for s in series:
-        s["c"][-1] = s["price"]
-    p = {"schema": 2, "generated_at": "2026-10-26T12:00:00Z", "funds": [], "series": series, "public": []}
-    monkeypatch.setattr(pv, "MAX_PAYLOAD_BYTES", 150_000)
-    out = pv.fit_payload(p)
-    assert out is not None and len(c.dumps(out)) <= 150_000
-    assert all(len(s["d"]) in (1, 60, 260) for s in out["series"]) or out["series"] == []
-    assert pv.payload_problems(out, date(2026, 10, 26)) == []
+def _serie(sym, n, price=100.0, cur="USD"):
+    b = long_bars(n / 252.0 + 0.2)[-n:]
+    return {"symbol": sym, "currency": cur, "unit": "currency", "price_unit_divisor": 1, "price": b[-1]["c"], "change_pct": 0.1, "as_of": b[-1]["d"],
+            "d": [x["d"] for x in b], "c": [x["c"] for x in b]}
+
+
+def _fund(i, proxy=None):
+    f = {"isin": "IE0FAKE%05d" % i, "name": "F", "price": 25.0, "currency": "EUR", "unit": "currency", "source": "none"}
+    if proxy:
+        f["proxy_symbol"] = proxy
+    return f
+
+
+def _worst_case(n_proxy_bars=6300, n_funds=20, n_symbols=40):
+    """20 fondos con proxy distinto + 20 símbolos extra (40 series en total: el tope de símbolos por usuario)."""
+    funds = [_fund(i, "P%d" % i) for i in range(n_funds)]
+    series = [_serie("P%d" % i, n_proxy_bars) for i in range(n_funds)] + [_serie("X%d" % i, 500) for i in range(n_symbols - n_funds)]
+    return {"schema": 2, "generated_at": "2026-10-26T12:00:00Z", "funds": funds, "series": series, "public": []}
+
+
+def test_peor_caso_real_se_recorta_de_forma_determinista_y_conserva_antes_los_proxies():
+    p1, p2 = _worst_case(), _worst_case()
+    assert len(c.dumps(p1)) > pv.MAX_PAYLOAD_BYTES                          # el caso máximo SIN recortar no cabe en 1 MB
+    o1, o2 = pv.fit_payload(p1), pv.fit_payload(p2)
+    assert o1 is not None and c.dumps(o1) == c.dumps(o2)                    # determinista
+    assert len(c.dumps(o1)) <= pv.MAX_PAYLOAD_BYTES and pv.payload_problems(o1, date(2026, 10, 26)) == []
+    prox = [len(s["d"]) for s in o1["series"] if s["symbol"].startswith("P")]
+    extra = [len(s["d"]) for s in o1["series"] if s["symbol"].startswith("X")]
+    assert len(set(prox)) == 1 and prox[0] in pv.PROXY_KEEP and all(n == 1 for n in extra) and prox[0] > 1     # los extra caen primero y al mínimo
+    assert [s["symbol"] for s in o1["series"]] == [s["symbol"] for s in _worst_case()["series"]]               # mismo orden
+
+
+def test_fit_payload_no_toca_lo_que_ya_cabe_y_recorta_extra_antes_que_proxies():
+    ok = _worst_case(n_funds=2, n_symbols=4)
+    before = c.dumps(ok)
+    assert c.dumps(pv.fit_payload(ok)) == before
+    # con un tope que obliga a recortar solo los extra, los proxies quedan íntegros
+    p = _worst_case(n_funds=2, n_symbols=40)
+    proxies_bytes = len(c.dumps({"x": [s for s in p["series"] if s["symbol"].startswith("P")]}))
+    old = pv.MAX_PAYLOAD_BYTES
+    pv.MAX_PAYLOAD_BYTES = proxies_bytes + 20_000
+    try:
+        out = pv.fit_payload(p)
+    finally:
+        pv.MAX_PAYLOAD_BYTES = old
+    assert out and all(len(s["d"]) == 6300 for s in out["series"] if s["symbol"].startswith("P"))
+    assert all(len(s["d"]) < 500 for s in out["series"] if s["symbol"].startswith("X"))
+
+
+def test_tamano_real_con_dos_fondos_de_17_anos():
+    p = {"schema": 2, "generated_at": "2026-10-26T12:00:00Z", "funds": [_fund(1, "P1"), _fund(2, "P2")], "series": [_serie("P1", 4300), _serie("P2", 4300)], "public": []}
+    size = len(c.dumps(p))
+    assert 150_000 < size < 400_000 and pv.fit_payload(p) is p and pv.payload_problems(p, date(2026, 10, 26)) == []
 
 
 def test_payload_que_no_cabe_ni_recortado_se_descarta(monkeypatch):
@@ -476,3 +584,110 @@ def test_el_codigo_publico_no_contiene_datos_del_dueno():
         for f in fm.YOUR_FUNDS:
             for secret in (f["isin"], f["product_url"], f["name"], f["proxy_symbol"]):
                 assert secret not in text, (rel, "dato del dueño")
+
+
+# ------------------------------------------------------------------ controles negativos del validador de series largas
+def _with(series, **fund_over):
+    f = _fund(1, "P1")
+    f.update(fund_over)
+    return {"schema": 2, "generated_at": "2026-10-26T12:00:00Z", "funds": [f], "series": series, "public": []}
+
+
+def _problems(p):
+    return pv.payload_problems(p, date(2026, 10, 26))
+
+
+def test_serie_larga_valida_pasa():
+    assert _problems(_with([_serie("P1", 6300)])) == []
+
+
+def test_serie_truncada_o_con_columnas_desiguales_se_rechaza():
+    s = _serie("P1", 4000)
+    s["c"] = s["c"][:-100]                                                  # la columna de cierres quedó más corta que la de fechas
+    assert _problems(_with([s]))
+    s = _serie("P1", 4000)
+    s["d"], s["c"] = s["d"][:-100], s["c"][:-100]                           # cortada por el final: as_of y price ya no son el último cierre
+    assert "serie incoherente" in _problems(_with([s]))
+
+
+def test_fechas_desordenadas_o_repetidas_se_rechazan():
+    s = _serie("P1", 4000)
+    s["d"][1000], s["d"][1001] = s["d"][1001], s["d"][1000]
+    assert "serie con fechas no crecientes" in _problems(_with([s]))
+    s = _serie("P1", 4000)
+    s["d"][1001] = s["d"][1000]
+    assert "serie con fechas no crecientes" in _problems(_with([s]))
+
+
+def test_hueco_enorme_se_rechaza():
+    s = _serie("P1", 4000)
+    del s["d"][2000:2100], s["c"][2000:2100]
+    assert any("huecos" in x for x in _problems(_with([s])))
+
+
+@pytest.mark.parametrize("bad", [0, -1.5, float("nan"), float("inf"), None, "100", True])
+def test_cierre_no_positivo_o_no_finito_se_rechaza(bad):
+    s = _serie("P1", 4000)
+    s["c"][1500] = bad
+    assert _problems(_with([s]))
+
+
+def test_nan_no_se_puede_serializar():
+    s = _serie("P1", 10)
+    s["c"][3] = float("nan")
+    with pytest.raises(ValueError):
+        c.dumps(s)
+
+
+@pytest.mark.parametrize("over", [{"currency": None}, {"currency": ""}, {"currency": "EURO€"}, {"currency": "US"}])
+def test_proxy_sin_divisa_valida_se_rechaza(over):
+    s = _serie("P1", 4000)
+    s.update(over)
+    assert _problems(_with([s]))
+
+
+def test_proxy_sin_divisa_en_la_serie_falta_la_clave():
+    s = _serie("P1", 4000)
+    del s["currency"]
+    assert _problems(_with([s]))
+
+
+@pytest.mark.parametrize("over", [{"unit": "subunit", "currency": "USD", "price_unit_divisor": 100}, {"unit": "currency", "currency": "GBp"},
+                                  {"unit": "subunit", "currency": "GBp", "price_unit_divisor": 1}, {"unit": "currency", "price_unit_divisor": 100},
+                                  {"unit": "points"}, {"unit": "rate"}, {"unit": "raro"}])
+def test_divisa_y_unidad_incoherentes_se_rechazan(over):
+    s = _serie("P1", 4000)
+    s.update(over)
+    assert _problems(_with([s]))
+
+
+def test_subunidad_coherente_pasa():
+    s = _serie("P1", 4000, cur="GBp")
+    s.update(unit="subunit", price_unit_divisor=100)
+    assert _problems(_with([s])) == []
+
+
+def test_serie_demasiado_larga_segun_su_clase():
+    assert any("demasiado larga" in x for x in _problems(_with([_serie("P1", 6300), _serie("X1", 700)])))     # un extra no puede llevar historia larga
+    assert any("demasiado larga" in x or "no es una lista" in x for x in _problems(_with([_serie("P1", 6700)])))
+
+
+def test_simbolo_repetido_o_en_series_y_en_public_se_rechaza():
+    assert "símbolo repetido en series" in _problems(_with([_serie("P1", 300), _serie("P1", 300)]))
+    p = _with([_serie("P1", 300)])
+    p["public"] = ["P1"]
+    assert "símbolo en series y en public a la vez" in _problems(p)
+
+
+def test_payload_demasiado_grande_se_rechaza_y_el_build_no_lo_envia(monkeypatch):
+    p = _worst_case()
+    assert any("payload >" in x for x in _problems(p))
+    monkeypatch.setattr(pv, "MAX_PAYLOAD_BYTES", 10)
+    assert pv.fit_payload(_with([_serie("P1", 300)])) is None
+
+
+def test_payload_demasiado_grande_no_se_publica_en_el_flujo(sb, tmp_path, monkeypatch, capsys):
+    sb.watch = [watch_row(funds=[{"isin": ISIN_A, "name": "F", "url": URL_A, "proxy_symbol": "FAKEP"}], symbols=[])]
+    monkeypatch.setattr(pv, "MAX_PAYLOAD_BYTES", 10)
+    run_all(sb, tmp_path)
+    assert sb.calls(pv.RPC_PUBLISH) == [] and "payload_invalido" in capsys.readouterr().out

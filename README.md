@@ -158,8 +158,9 @@ El backend **no** lleva en el repo ISIN, fondos clase S ni listas del dueño (el
   [documento del contrato](docs/CONTRATO_FEED_V2.md#5-datos-propios-supabase-fuera-del-repo));
 * **solo** la clave publicable en la cabecera `apikey` + un token aleatorio (secreto `PERSONAL_FEED_TOKEN`) en el cuerpo. **Nunca** `service_role` ni `sb_secret_`: si la clave lo
   parece, `scripts/personal_v2.py` aborta sin enviar nada (igual que `supabase-keepalive.yml`);
-* el payload (≤ 1 MB) lleva el NAV por ISIN (scraping de iShares), los *facts* y las series (≤ 2 años) solo de lo que **no** está en el universo público; un NAV con un salto fuera de 0,5–2×
-  respecto al anterior no se publica;
+* el payload (≤ 1 MB) lleva el NAV por ISIN (scraping de iShares), los *facts* y las series de cierres diarios: los **proxies de los fondos** con todo el histórico disponible (hasta ~25 años,
+  esté o no el proxy en el universo público, que solo guarda 10 años) y el resto de símbolos extra con ≤ 2 años, y estos últimos solo si **no** están en el universo público; si el
+  payload pasa de 1 MB se recortan primero los extra y después los proxies (ver el contrato); un NAV con un salto fuera de 0,5–2× respecto al anterior no se publica;
 * es **opcional**: sin Supabase o sin token, o si algo falla, solo hay un `::warning::` y el feed público sale igual;
 * privacidad: los logs de un repo público son públicos, así que `personal_v2.py` solo escribe contadores (nunca ISIN, símbolos, URL, clave ni token); el payload nunca va en un artefacto;
   el token solo está en los pasos de biblioteca estándar (`python3 -S`), no en el paso que ejecuta código de terceros.
