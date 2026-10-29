@@ -134,7 +134,7 @@ def run_all(sb, tmp_path, spy=None, **over):
     reg = str(tmp_path / "registry.json")
     open(reg, "w").write(json.dumps({"schema": 1, "symbols": [
         {"symbol": "AAPL", "kind": "yahoo", "name": "Apple", "currency": "USD", "unit": "currency", "tier": "hot", "status": "active", "fail_streak": 0}]}))
-    rc = pv.main(["all", "--dir", str(tmp_path / "work"), "--registry", reg], fetchers=spy.fetchers(), env=sb.env(**over))
+    rc = pv.main(["all", "--dir", str(tmp_path / "work"), "--registry", reg], fetchers=spy.fetchers(), env=sb.env(**over), now=NOW)     # reloj fijo: los tests no dependen de la fecha real
     return rc, spy
 
 
