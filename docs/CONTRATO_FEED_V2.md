@@ -502,8 +502,25 @@ Supabase y lo escribe el backend con dos RPC. El código del repo no contiene ni
 
   `funds[].url` debe ser `https://*.ishares.com/...` (cualquier otra URL se descarta y no se pide jamás); `prev_price` (opcional) es el último NAV publicado: un NAV nuevo fuera de
   0,5–2× su valor se considera un error de parseo y no se publica. `symbols` y `proxy_symbol` siguen la regla de símbolo del §2. Máximos: 20 usuarios, 20 fondos y 40 símbolos por usuario.
-* **`publish_personal_feed(p_token text, p_user text, p_payload jsonb)`** recibe, por usuario, este payload (≤ 1 MB; el backend lo recorta si hace falta). Solo lleva series de símbolos
-  que **no** están en el universo público (`public` lista los que sí, para que el cliente los lea del feed público); `d`/`c` son fechas y cierres (≤ 2 años diarios):
+* **`publish_personal_feed(p_token text, p_user text, p_payload jsonb)`** recibe, por usuario, este payload (≤ 1 MB; el backend lo recorta si hace falta, ver «Series»). Campos:
+  `funds` (NAV y facts por ISIN), `series` (solo cierres diarios `d`/`c`, sin `o`/`h`/`l`/`v`) y `public` (símbolos extra que sí están en el universo público y por eso **no** se repiten).
+
+  **Series** (`series[]`, claves exactas `symbol, currency, unit, price_unit_divisor, price, change_pct, as_of, d, c`):
+  * **Proxy de un fondo** (`funds[].proxy_symbol`): **siempre** va en `series`, con todo el histórico diario disponible hasta ~25 años (≤ 6.600 cierres), **esté o no en el universo
+    público**. Motivo: el público solo conserva 10 años naturales por símbolo (`HISTORY_YEARS`; §3 `d/<AAAA>.json`), insuficiente para reproducir la analítica de v1 (serie `max`). Un proxy
+    nunca aparece en `public`. Es la serie completa y sin ajustar por dividendos (`auto_adjust=False`, igual que el público), escalada tal cual: reescalar al NAV es cosa del cliente.
+  * **Símbolo extra** (`symbols[]` de la lista) fuera del universo público: ≤ 2 años de cierres (≤ 600). Si está en el universo público no se incluye y figura en `public`.
+  * Las series de proxies van **primero**, en el orden de los fondos; después las de los símbolos extra.
+  * `currency` es obligatoria y se publica tal cual (`GBp` ≠ `GBP`); `unit` ∈ `currency|subunit|points|rate` y `price_unit_divisor` coherentes con ella (`subunit` ⇒ divisa en subunidad y
+    divisor 100; `currency` con divisa en subunidad **no** es válido; `points` ⇒ símbolo `^…`; `rate` ⇒ símbolo `…=X`). Una serie sin divisa conocida **no se publica**: el fondo conserva su
+    `proxy_symbol` pero no habrá serie para él (el cliente debe tolerarlo; el backend lo cuenta como `proxy_sin_divisa_o_datos` / `proxy_fallo` en el log).
+  * `d` estrictamente creciente (sin repetidas), `c > 0` y finitos (nada de NaN/Infinity), mismo largo, `d[-1] == as_of` y `c[-1] == price`. Sin huecos de más de 15 días: si la descarga trae uno,
+    el backend publica solo el tramo posterior al último hueco.
+  * Un símbolo no aparece dos veces en `series` ni a la vez en `series` y en `public`.
+  * **Recorte si el payload pasa de 1 MB** (determinista; lo hace `fit_payload`): primero los símbolos extra (260 → 60 → 1 cierres); si no basta, los proxies, todos al mismo nivel
+    (2.600 ≈ 10 años → 1.300 ≈ 5 → 780 ≈ 3 → 260 ≈ 1 año → 60 → 1); si ni así cabe, sin series; si sigue sin caber, ese usuario no se publica. Un cliente no debe suponer que un proxy trae 25 años:
+    mire `d[0]`.
+  * Una descarga del proxy por ejecución (histórico completo, `period=max`); nada incremental (el backend no lee lo publicado antes).
 
 <!-- ejemplo:payload -->
 ```json
@@ -533,7 +550,7 @@ Supabase y lo escribe el backend con dos RPC. El código del repo no contiene ni
   ],
   "series": [
     {
-      "symbol": "FAKE1",
+      "symbol": "FAKEP",
       "currency": "USD",
       "unit": "currency",
       "price_unit_divisor": 1,
@@ -552,7 +569,7 @@ Supabase y lo escribe el backend con dos RPC. El código del repo no contiene ni
       ]
     },
     {
-      "symbol": "FAKEP",
+      "symbol": "FAKE1",
       "currency": "USD",
       "unit": "currency",
       "price_unit_divisor": 1,
@@ -582,7 +599,7 @@ Supabase y lo escribe el backend con dos RPC. El código del repo no contiene ni
 * **Quién publica y con qué cadencia**: el workflow `personal-nav.yml` (no `publish-feed-v2.yml`), cada 30 min de lunes a viernes entre 05:23 y 21:53 UTC (`23,53 5-21 * * 1-5`), con concurrencia
   propia: es el **único escritor** de `publish_personal_feed`. Cada llamada **sustituye** el payload del usuario (no hay lectura del anterior ni fusión), así que **cada run envía el payload completo**
   (`funds` y `series`): si una serie de Yahoo falla en un run, ese run publica sin ella hasta el siguiente. Un cliente debe tratar `generated_at` como «último intento correcto», no como «NAV de hoy».
-* **Variante de la petición**: por cada ficha se piden dos variantes (la normal y una sin caché con parámetro único) y se publica la de fecha de NAV más reciente; es un detalle del backend y no aparece en el payload.
+* **Petición a la ficha**: una sola por ficha y run (la variante `base`); el desfase de fecha que se vio en el dashboard venía de un dato guardado en la app. El diagnóstico manual `nav-probe.yml` existe por si vuelve a pasar.
 * **Frescura del NAV**: `funds[].nav_date_iso` es la fecha del NAV tal como la escribe la ficha de iShares (normalmente 1-2 días hábiles por detrás; `nav_stale` si supera 6 días). La ficha da el NAV con **2 decimales**
   (`EUR 12.48`); el backend lo guarda con 4 por prudencia, pero la precisión real es la de la ficha. Si la ficha trae varios «NAV as of» distintos se usa el primero. Sin NAV exacto (ficha ilegible, ISIN ausente,
   salto fuera de 0,5–2×) `source` es `"none"` y `price` es `null`: el cliente conserva su último valor. El log del paso de construcción solo imprime contadores y fechas de NAV (ver README), nunca ISIN ni nombres.
@@ -598,7 +615,7 @@ Supabase y lo escribe el backend con dos RPC. El código del repo no contiene ni
 | `price` sin divisa, `price_unit_divisor` solo si Yahoo la informa | `currency` + `unit` + `price_unit_divisor` siempre |
 | `history` (objetos con `date/close/open/high/low/volume`, `max` reducido a mensual) | `s/<SYM>/d/<AAAA>.json` en columnas, 10 años diarios |
 | `intraday` (`time`/`close`) + `intraday_tz` | `s/<SYM>/i.json` (`t`/`c` + `tz`), solo hot |
-| `your_funds` (ISIN, NAV, facts, analytics) | **datos propios** (§5): `funds` del payload; sin `analytics` ni `history` rescalado |
+| `your_funds` (ISIN, NAV, facts, analytics) | **datos propios** (§5): `funds` del payload; `analytics` y `history` los calcula el cliente con `series` del proxy (histórico largo, a reescalar al NAV) |
 | `news.positions` | `news.watchlist` |
 | `rates`, `cpi`, `cpi_meta`, `market_mood` (sin altcoin), `fx_usd` | `macro.json` (mismas claves) |
 | `market_mood.altcoin_season`, `staking` | no están en v2 |

@@ -55,7 +55,7 @@ def examples(world, tmp_path, monkeypatch):
     spy_bars = [{"d": (date(2026, 10, 23) - timedelta(days=i)).isoformat(), "o": 1, "h": 1, "l": 1, "c": round(100 + i * 0.5, 2), "v": 0} for i in range(3)][::-1]
     fetchers = pv.Fetchers(lambda url, isin: {"price": 25.5, "nav_date": "23/Oct/2026", "nav_date_iso": "2026-10-23", "nav_stale": False, "change_pct": 0.4,
                                              "wk52_low": 20.0, "wk52_high": 30.0},
-                           lambda url: {"ongoing_charges_pct": 0.1, "domicile": "Ireland"}, lambda sym: (spy_bars, "USD"))
+                           lambda url: {"ongoing_charges_pct": 0.1, "domicile": "Ireland"}, lambda sym, period="2y": (spy_bars, "USD"))
     user = {"user": "usuario-1", "funds": [{"isin": "IE0FAKE00001", "name": "Fondo Falso A", "url": "https://www.ishares.com/ch/individual/en/products/000001/fake-fund-a",
                                             "proxy_symbol": "FAKEP"}], "symbols": ["AAPL", "FAKE1"]}
     payload = pv.build_payload(user, {"AAPL"}, fetchers, NOW, lambda code: None)

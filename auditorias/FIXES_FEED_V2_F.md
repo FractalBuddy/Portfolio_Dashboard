@@ -3,48 +3,24 @@
 Rama nueva desde `main`. **Sin red real** desde la sesión (el proxy da 403 a ishares.com y a Yahoo): todo lo que sigue se ha probado con datos simulados y con **texto real de fichas de iShares ya guardado en el repo**
 (`tests/fixtures_fund_facts.json`). Lo que no se ha podido medir en vivo lo digo explícitamente. No se ha lanzado ni publicado ningún workflow; no se ha tocado el SQL ni la app.
 
-## T0 (tarea añadida, la primera): desfase de fecha del NAV — navegador «28/Oct», scraper «27/Oct»
-**Estado: causa NO determinada; mitigación y diagnóstico entregados.** Desde la sesión no llego a ishares.com (el proxy responde 403, comprobado de nuevo con `curl`), así que no he podido ejecutar ninguna
-variante ni ver la ficha real. No voy a dar por «arreglado» lo que no he visto: hay una mitigación razonable ya activa y un diagnóstico que te dirá la causa en un run manual.
+## T0 (tarea añadida, la primera): desfase de fecha del NAV — navegador «28/Oct», scraper «27/Oct» — **RESUELTO: era un dato guardado en la app**
+**Evidencia (del dueño, no verificada por mí):** tras lanzar el workflow, el dashboard ya mostraba la fecha de NAV de la ficha y sus valores exactos. Es decir, la petición de siempre (`base`) ya lee el NAV más reciente
+y el desfase venía de un dato guardado en la app. Desde esta sesión no llego a ishares.com (proxy 403), así que no he podido reproducirlo; me fío de esa observación porque es directa (fecha y valor coinciden con la ficha).
+Las hipótesis que había planteado (caché del HTML, cabeceras/sesión, XHR aparte, varias fechas en la página) quedan **descartadas por la evidencia, no por prueba mía**.
 
-**Hipótesis, de más a menos probable (ninguna verificada):**
-1. **Caché del HTML** (CDN delante de la ficha): el navegador y `requests` reciben copias con distinta antigüedad. Se prueban `nocache`, `bust` (parámetro único) y `fresh` (ambas) y se imprimen las cabeceras
-   `Age`/`Cache-Control`/`Date`/`Last-Modified`/`Expires`/`X-Cache` de cada respuesta.
-2. **Contenido distinto por cabeceras / sesión / geografía** (User-Agent de navegador, cookie de entrada del sitio, IP de EE. UU. del runner): variantes `browser`, `browser_fresh`, `passthrough`
-   (`siteEntryPassthrough=true`, parámetro que usa iShares para saltar su pantalla de entrada; *no verificado que siga vigente*) y la misma ficha en otros sitios (`alt:uk|de|ie|es|pro`, que pueden no existir: saldrá HTTP 404).
-3. **El NAV del navegador viene de una XHR/JSON aparte** que el HTML no incluye. El diagnóstico busca en el HTML las URLs `*.ajax`/`*.json`, las describe sin id ni nombre del producto y las prueba (`xhr1`...), buscando
-   un NAV con fecha en JSON, HTML o CSV. **No he implementado ninguna XHR en el scraper**: sin ver su forma real sería escribir un parser a ciegas; si el diagnóstico encuentra una más fresca y estable, es el siguiente paso.
-4. **Varias fechas en la misma página** (por ejemplo, un «NAV as of 27/Oct» en una caja y el 28 en otra): el parser usa el primero. El diagnóstico imprime las fechas distintas junto a «NAV as of» (`x2`...) y el log del build ya cuenta
-   `nav_varios`.
-5. **Hora**: que el navegador se mirase después de publicarse el 28. Se descarta repitiendo la `base` (`base_again`) y mirando `Date`/`Age`.
-(Descartado por lectura de código: no hay caché propia entre runs — `_ISHARES_PAGES` vive solo dentro del proceso — ni el NAV pasa por Supabase antes de leerse.)
-
-**Qué hay hecho:**
-* `fetch_market_data.ishares_request(url, variante)` define las variantes; `_ishares_plain` acepta `variant` (por defecto la petición de siempre, así que v1 no cambia; cada variante tiene su propia entrada de caché).
-* **Mitigación activa** `fetch_ishares_nav_freshest`: el scraper de datos propios pide `base` y `fresh` y publica el NAV de **fecha más reciente** (empate: `fresh`; si una variante falla, vale la otra). La ficha ganadora es la que usan los *facts*.
-  Cuesta **2 peticiones a iShares por ficha y run** (antes 1): con dos fondos, 136 al día. Si el diagnóstico demuestra que basta una variante (o que ninguna sirve), se deja `NAV_FETCH_VARIANTS` con una sola.
-  No se usa User-Agent de navegador por defecto: hacerse pasar por un navegador para esquivar protección anti-bots es una decisión tuya (términos de uso), no un arreglo técnico neutro.
-* **Log del build** (sin identificar fondos): fecha de NAV más reciente y más antigua con su edad, `variante de la petición ganadora: fresh x1` y `una variante distinta de la base adelantó la fecha en N fondos (hasta +K d)`.
-  Ejemplo: `… fecha de NAV más reciente 2026-10-28 (0 d), más antigua 2026-10-28 (0 d), decimales del NAV: 2 (x2), variante de la petición ganadora: fresh x2, una variante distinta de la base adelantó la fecha en 2 fondos (hasta +1 d) [run …]`.
-* **Diagnóstico `nav-probe.yml`** (+ `scripts/nav_probe.py`): solo `workflow_dispatch`, permisos `contents: read`, sin artefactos, sin escribir en Supabase ni en ningún sitio. *Matiz sobre «sin secretos»:* necesita `PERSONAL_FEED_TOKEN` para leer tus fichas
-  (lo pediste), pero solo en el paso de lectura (`python3 -S`, biblioteca estándar); el paso que hace las peticiones (`requests`) no lo recibe. Entradas: `max_funds` (4), `cache_headers` (true), `try_xhr` (true).
-  *Matiz sobre «imprime SOLO fecha y valor»:* además imprimo código HTTP, tamaño y —desactivable con `cache_headers=false`— cabeceras de caché de la respuesta, porque son lo que distingue «caché» de «otra fuente» y no identifican ninguna ficha.
-  Las fichas salen como `#1`, `#2`; nunca ISIN, nombre ni URL (tests con ISIN/nombre/URL/ticker falsos y fallos de red cuyo mensaje lleva la URL). Con 4 fichas hace ~100 peticiones a ishares.com con 1 s entre ellas.
-  Salida de ejemplo (simulada):
-  ```
-  #1 base           HTTP 200    63 KB  NAV 27/Oct/2026 = 12.48  [age=5400 date=Wed, 28 Oct 2026 10:00:00 GMT cache-control=max-age=7200]
-  #1 fresh          HTTP 200    63 KB  NAV 28/Oct/2026 = 12.48  [age=0 cache-control=no-store]
-  #1 xhr1           /ch/individual/en/products/*/*/1521942788811.ajax?fileType=json&tab=overview HTTP 200  1 KB  NAV 28/Oct/2026 = 13.64
-  #1 RESUMEN: fecha de NAV más reciente 28/Oct/2026; la dan: fresh bust browser_fresh; la base da 27/Oct/2026  <-- la base va por detrás
-  VEREDICTO: variantes que dan una fecha más reciente que la base (nº de fichas): fresh x1, bust x1, browser_fresh x1
-  ```
-* Tests: `tests/test_nav_probe_F2.py` (29): variantes, elección del NAV más reciente (gana la fresca / empate / la fresca va por detrás / una variante falla / todas fallan), log, diagnóstico completo con respuestas simuladas (texto real de ficha con la fecha
-  cambiada), privacidad, XHR descubierta y redactada, y el workflow (solo manual, sin escritura, token solo al leer, SHA fijados).
-
-**Qué haces tú:** Actions → **NAV probe (diagnóstico)** → Run workflow (valores por defecto). Pégame (o léete) el `RESUMEN`/`VEREDICTO`. Según salga: caché → ya mitigado (quitar la variante sobrante); XHR/`alt` → cambio de fuente (lo implemento con la forma real a la vista);
-nada supera a la base → el navegador usa sesión/JS: mira en su pestaña *Red* (DevTools) la petición que trae el NAV y dime su ruta sin ISIN.
+**Decisión aplicada:** `NAV_FETCH_VARIANTS = ("base",)` → **una sola petición a iShares por ficha y run** (no se dobla la carga). Se conserva, sin usarse por defecto:
+* `fetch_market_data.ishares_request(url, variante)` y `fetch_ishares_nav_freshest(url, isin, variantes)`: si algún día hiciera falta, basta añadir `"fresh"` a `NAV_FETCH_VARIANTS` (se queda con la fecha de NAV más reciente).
+  Con solo `base` el log no imprime la línea de variantes (no aporta nada).
+* **`nav-probe.yml` + `scripts/nav_probe.py`: diagnóstico manual opcional, sin cron** (`workflow_dispatch` únicamente). Permisos `contents: read`, sin artefactos, no escribe en Supabase ni en ningún sitio; el token solo en el paso de lectura
+  (`python3 -S`), no en el que hace las peticiones (`requests`). Las fichas salen como `#1`, `#2`; por variante imprime código HTTP, tamaño, fecha y valor del NAV y (desactivable) cabeceras de caché; nunca ISIN, nombre ni URL.
+  Variantes: `base`, `nocache`, `bust`, `fresh`, `browser`, `browser_fresh`, `passthrough`, `base_again`, la misma ficha en `alt:uk|de|ie|es|pro` y las XHR/JSON que cite el HTML (`xhr1`...). Cada ejecución hace ~25 peticiones por ficha probada.
+* **Log del build** (sin identificar fondos): fecha de NAV más reciente y más antigua con su edad, decimales, hora UTC del run y coste (ver §3).
+* El User-Agent de navegador solo existe en el diagnóstico (hacerse pasar por un navegador ante la protección de un sitio es decisión del dueño).
+* Tests: `tests/test_nav_probe_F2.py` (29): variantes, elección del NAV más reciente cuando se activan varias, **una sola petición por defecto**, diagnóstico completo con respuestas simuladas (texto real de ficha con la fecha cambiada),
+  privacidad, XHR descubierta y redactada, y el workflow (solo manual, sin escritura, token solo al leer, SHA fijados).
 
 ## 0. Lo que NO está demostrado (leer primero)
+*(Esta sección es del primer análisis; el desfase concreto de fecha ya está explicado en T0. Sigue siendo cierto que no he visto cuándo publica iShares.)*
 * **La causa «el cron va por detrás de iShares» es una hipótesis razonable, no un hecho.** Cuadra con el diseño (el job `personal` solo corría 4 veces al día), pero no he podido ver cuándo publica iShares ni qué
   muestra tu dashboard. Los números que das (iShares 13,64 / 12,64 frente a dashboard 13,38 / 12,61) son **+1,94 %** y **+0,24 %**. En las fichas reales guardadas la variación diaria es −1,39 % (EM) y −0,07 % (dev):
   un 1,9 % en el fondo EM equivale a ≥ 1 día de movimiento, no a unas horas de retraso del cron.
@@ -77,27 +53,34 @@ nada supera a la base → el navegador usa sesión/JS: mira en su pestaña *Red*
 * **Concurrencia propia** `personal-nav` (`cancel-in-progress: false`): único escritor de Supabase; los runs se serializan en orden.
 * Ya no hay `continue-on-error`: aquí no hay feed público al que proteger. Los fallos suaves siguen siendo `::warning::` con salida 0; solo una clave secreta o URL no https hacen fallar el job (y GitHub te avisa).
 
-## 2. Coste de cada run frecuente (payload completo) — **medidas simuladas**
-Sin red no se pueden medir las descargas reales; he medido con el código real (`build_payload` + validador) y series sintéticas de ~520 cierres (2 años), y cuento peticiones, bytes y CPU. Cada run baja **dos variantes de la ficha de
-iShares por fondo (ver T0)** y **una serie de Yahoo (2 años, 1 petición) por símbolo único** que no esté en el universo público (los proxies `EUNL.DE` e `IS3N.DE` **no** están en `registry.json`, así que cuentan).
+## 2. Coste de cada run frecuente (payload completo, CON histórico largo del proxy) — medidas simuladas, rehechas tras integrar `main`
+Con `feat/personal-history` los proxies de los fondos se piden con `period="max"` (hasta ~25 años, tope 6.600 barras) y siempre van en `series`, estén o no en el universo público; los símbolos extra siguen con 2 años.
+Medido con el código real (`build_payload` + `payload_problems` + `fit_payload`) y series sintéticas; las **peticiones y los bytes del payload** son del código, los **bytes de descarga de Yahoo son una estimación** (≈ 80 B por barra sin
+comprimir; sin red no los he medido). Supuesto del caso A: proxies de ~4.350 y ~2.850 barras (≈ 17 y 11 años de cotización en Xetra); la sintética da 137 KB, y **tu medida real es ~165 KB** (precios con más dígitos): uso tu cifra para A y
+escalo el resto.
 
-| Escenario | Peticiones a Yahoo/run | Yahoo/día (×34) | Payload/run | Escrituras a Supabase/día | CPU build+valida |
-|---|---|---|---|---|---|
-| A) 2 fondos + sus 2 proxies (tu caso probable) | 2 | **68** | 20,6 KB | 0,7 MB | 0,01 s |
-| B) A + 10 símbolos propios | 12 | 408 | 119,5 KB | 4,1 MB | 0,04 s |
-| C) 5 usuarios × (2 fondos, 10 símbolos, 5 comunes) | 32 (60 sin dedup) | 1.088 | 603 KB | 20 MB | 0,12 s |
-| D) tope: 20 usuarios × (20 fondos, 40 símbolos) | 420 (1.200 sin dedup) | 14.280 | 8,1 MB | 276 MB | 1,9 s |
+| Escenario | Peticiones a Yahoo/run (/día ×34) | Barras bajadas/run (≈ KB sin comprimir) | Payload/run | Escrituras a Supabase/día (34 runs) |
+|---|---|---|---|---|
+| **A) 2 fondos + sus 2 proxies (tu caso)** | **2 (68)** | ~7.200 (≈ 560 KB) | **~165 KB** (sintético 137) | **~5,6 MB** (≈ 170 MB/mes) |
+| B) A + 10 símbolos extra (2 años) | 12 (408) | ~12.400 (≈ 970 KB) | ~285 KB (sint. 238) | ~9,5 MB |
+| C) 5 usuarios × (2 fondos con proxy de 25 años, 10 símbolos, 5 comunes) | 32 (1.088) | ~28.200 (≈ 2,2 MB) | ~2,1 MB en total (máx. ~415 KB/usuario) | ~69 MB |
+| D) tope: 20 usuarios × (20 fondos sin proxy, 40 símbolos) | 420 (14.280) | ~218.000 (≈ 17 MB) | ~9,8 MB en total (máx. 490 KB/usuario) | ~330 MB |
+| E) 1 usuario × 20 fondos con 20 proxies de 25 años | 20 (680) | ~126.000 (≈ 9,8 MB) | ~600 KB (el recorte determinista de `fit_payload` baja de 25 a ~10 años para caber en 1 MB) | ~20 MB |
 
-* Referencia: el feed público hace ~545 peticiones a Yahoo al día; el job `personal` antiguo hacía 2 × 4 = 8.
-* **Optimización incluida (sin SQL):** los símbolos que siguen varios usuarios (y los que fallan) se piden **una sola vez por run** (`series_cache`). Antes: una petición por usuario y símbolo.
-* **Tiempo y bytes reales de Yahoo/iShares: no medidos.** Estimación a verificar: ficha de iShares (~cientos de KB de HTML) y serie 2 años de Yahoo (~decenas de KB); el ritmo mínimo entre peticiones a Yahoo es 0,15–0,35 s.
-  Run A: ~10–30 s de build; el run completo ronda **1,5–2 min de runner**, casi todo `pip install` (con caché). 34 × 2 min × ~22 días ≈ **1.500 min/mes**: gratis en repo público; en un repo privado se comería ~75 % del
-  cupo gratuito. **El primer run real lo medirá:** el log trae `coste del run: N series pedidas a Yahoo, X KB, T s` (solo contadores).
-* **Veredicto:** A y B son aceptables con 30 min. C está en el límite de lo razonable para la IP compartida del runner (≈2× el feed público solo en Yahoo). D **no es viable** con payload completo: 420 peticiones ≈ 7–14 min,
-  rozando el presupuesto de 14 min de Yahoo.
-* **Alternativa si el coste molesta (requiere SQL, NO tocado):** una RPC nueva que actualice **solo `funds`** del payload guardado (p. ej. `publish_personal_nav(p_token, p_user, p_funds jsonb)` con fusión), de modo que el
-  workflow frecuente solo lea iShares (sin Yahoo ni series: ~2 peticiones, <1 KB) y el histórico largo se refresque con el cron antiguo (4/día). Además evita el riesgo 2 de abajo.
-  **Pregunta para ti:** ¿quieres esa RPC? Con tu lista actual (A) no hace falta; sí si vas a seguir muchos símbolos o más usuarios.
+(B–E: las cifras sintéticas multiplicadas ×1,21, el factor entre tu 165 KB y mi 137 KB; CPU de build+validación ≤ 0,5 s salvo D, 1,7 s.)
+
+* **Peticiones a Yahoo: igual que antes** (una por símbolo y periodo único; los proxies ya contaban). **Lo que cambia es el tamaño**: cada petición de un proxy baja ~3.000–6.000 barras en vez de ~520, así que el caso A pasa de
+  ~40 KB a **~560 KB sin comprimir por run** (≈ 19 MB/día de descarga, estimado), y el payload de 21 KB a **165 KB**.
+* Referencia: el feed público hace ~545 peticiones a Yahoo al día; el job `personal` antiguo hacía 2 × 4 = 8 (con 2 años de historia: ~40 KB/run).
+* **Deduplicación (sin SQL):** una descarga por símbolo y run aunque lo sigan varios usuarios; una descarga `max` sirve también para `2y`. Esa caché la trajo `main` (envoltorio de `fetchers.series` en `step_build`); yo había escrito una equivalente y la he retirado para no tener dos. Añadido encima: **los fallos también se recuerdan** (un símbolo que falla no se vuelve a pedir a Yahoo por cada usuario). Antes: una petición por usuario y símbolo.
+* **Tiempo real de Yahoo/iShares: no medido.** El primer run real lo dará: el log trae `coste del run: N series pedidas a Yahoo, X KB, T s`. Estimación: build ~15–40 s en A; run completo **1,5–2 min de runner** (casi todo `pip install`).
+  34 × 2 min × ~22 días ≈ 1.500 min/mes: gratis en repo público.
+* **Veredicto actualizado:**
+  * **A (tu caso) sigue siendo aceptable** a 30 min: 2 peticiones por run, ~0,5 MB de descarga y 165 KB de subida. Pero ahora es **muy redundante**: ~165 KB × 34 reescritos al día para unos datos cuyo histórico cambia **una barra al día**
+    (el 99,9 % de lo que sube cada run es idéntico a lo del run anterior); solo el NAV cambia durante el día. No es un problema de cuota (5,6 MB/día), sí de desperdicio y de churn en la base (cada escritura reescribe el `jsonb` de 165 KB).
+  * **B** es aceptable; **C** es el límite (2× el feed público en peticiones y ~70 MB/día a Supabase); **D no es viable** (420 peticiones ≈ 7–14 min, rozando el presupuesto de Yahoo); **E** funciona gracias al recorte pero pierde años de histórico.
+  * Recomendación reforzada: **la RPC de solo `funds`** (requiere SQL, **no tocado**, p. ej. `publish_personal_nav(p_token, p_user, p_funds jsonb)` que fusione `funds` en el payload guardado). El workflow de 30 min leería solo iShares
+    (≈ 2 peticiones, <1 KB) y el payload completo con el histórico largo se publicaría 1–4 veces al día. Evita además los riesgos 1 y 2. **Pregunta pendiente para ti.** Sin SQL, la alternativa es bajar la frecuencia (p. ej. cada hora: 17 runs/día, ~2,8 MB/día).
 
 ## 3. Trazabilidad sin datos privados (`personal_v2.py build`)
 Ejemplo de lo que imprime (salida de un test con datos falsos):
@@ -131,7 +114,11 @@ Probado con texto real de las fichas (`dev`, `em`; `iwda`/`sgln` son USD y se re
 * Los tests no tocan la red real (`conftest.py` lo prohíbe y hay un test que ejecuta `python3 -S … watch` contra un Supabase local falso).
 
 ## 5. Verificación y otros hallazgos
-* `python -m pytest -q`: **1232 passed**. `ruff check --select F scripts tests`: limpio. `python -m py_compile scripts/*.py tests/*.py`: ok. `sanity_check_v2` pasa dentro de `tests/test_sanity_check_v2.py` y los tests
+* **Integración con `main` (`df99c60`, `feat/personal-history`)**: merge de `origin/main` en `feat/nav-fresco` (sin rebase; el historial publicado no se reescribe). Conflictos solo en `scripts/personal_v2.py` (`build_payload`) y `README.md`.
+  Resueltos **conservando las dos cosas**: de `main`, proxies siempre en `series` con `period="max"`, `MAX_PROXY_BARS`, `series_entry(long=...)`, `fit_payload` determinista (extra → proxies a ~10/5/3/1 años/3 meses/último cierre) y el validador con huecos
+  (`MAX_GAP_DAYS`), fechas crecientes y tope por clase; de la sesión F, `personal-nav.yml`, el log de frescura, el parser y el recuerdo de los fallos de Yahoo en la caché de series de `main` (mi caché propia, que duplicaba la suya, se retiró).
+  Los tests de `main` (`test_personal_v2.py`, contrato) se ejecutan tal cual.
+* `python -m pytest -q`: **1270 passed** (tras integrar `main`). `ruff check --select F scripts tests`: limpio. `python -m py_compile scripts/*.py tests/*.py`: ok. `sanity_check_v2` pasa dentro de `tests/test_sanity_check_v2.py` y los tests
   de generación (no hay CLI que ejecutar sin un sitio generado). `actionlint` no está disponible en la sesión (CI lo omite con aviso); YAML validado con PyYAML.
 * **Fallo previo en `main`** (no mío): `test_flujo_completo_lee_la_lista_y_publica_por_usuario` dependía del reloj real (`generated_at` > fecha fijada del test) y falla con el reloj real actual (el sandbox marca 29-10-2026). `main()` acepta ahora `now` y el
   test lo inyecta. (Si lo ves en rojo en otras ramas, es eso.)
@@ -139,15 +126,16 @@ Probado con texto real de las fichas (`dev`, `em`; `iwda`/`sgln` son USD y se re
   stdlib-only con `python3 -S`).
 
 ## 6. Riesgos
-1. **Una serie de Yahoo que falla borra esa serie en Supabase hasta el siguiente run** (el payload se sustituye entero y `build_payload` descarta la serie fallida). Con 34 runs/día hay más oportunidades de un 429
-   puntual; el NAV no se ve afectado, el histórico sí durante ≤30 min. No lo he cambiado (decidir entre «publicar sin la serie» y «no publicar a ese usuario» es tuyo y depende de cómo lo trate la app). La RPC de solo
+1. **Una serie de Yahoo que falla borra esa serie en Supabase hasta el siguiente run** (el payload se sustituye entero y `build_payload` descarta la serie fallida). Con el histórico largo esto pesa más: un proxy que falle quita hasta ~25 años de
+   histórico durante ≤30 min, y **una descarga `max` parcial (Yahoo devolviendo menos barras) sobrescribiría el histórico largo con uno corto sin que nada lo detecte** (no hay comparación con lo publicado antes; el validador solo mira huecos y orden).
+   Con 34 runs/día hay más oportunidades de un 429 puntual; el NAV no se ve afectado. No lo he cambiado (decidir entre «publicar sin la serie» y «no publicar a ese usuario» es tuyo y depende de cómo lo trate la app). La RPC de solo
    `funds` (§2) lo resuelve de raíz.
 2. **Tope de series sin avisar** (ya existía): `series` admite ≤ 40 y el payload lleva símbolos + proxies de los fondos. Un usuario con > 40 en total queda con payload inválido y **no se publica nada de él, ni el NAV**
    (cuenta `payload_invalido` en el log). No afecta a una lista como la tuya.
 3. **Sin heartbeat** de Healthchecks para este workflow: si el cron deja de dispararse (60 días sin actividad en el repo, FEED_V2_ENABLED mal puesta, GitHub descartando runs) solo lo notarás por la fecha del NAV. Opcional:
    un check propio con periodo ~1 h y un secreto nuevo (no lo he añadido para no inventar secretos).
 4. **Solo corren los `schedule` del workflow en la rama por defecto**: hasta que se fusione en `main`, no hay cron (el lanzamiento manual sí).
-5. **Términos de uso de iShares/Yahoo**: 34 lecturas al día de la misma ficha es más tráfico que 4; sigue siendo pequeño (2 peticiones por run) pero el riesgo documentado en el README se mantiene y aumenta con la frecuencia.
+5. **Términos de uso de iShares/Yahoo**: 34 lecturas al día de la misma ficha (una por run, ya sin variante extra) es más tráfico que 4; sigue siendo pequeño pero el riesgo documentado en el README se mantiene y aumenta con la frecuencia.
 6. **Minutos de Actions**: gratuitos en repo público; ~1.500 min/mes si algún día fuera privado.
 7. **Suposiciones sin verificar por falta de red:** hora de publicación de iShares, que no haya cambios en fin de semana, tamaños/tiempos reales de Yahoo/iShares, y que el formato de 2 decimales sea estable.
 
@@ -156,6 +144,6 @@ Probado con texto real de las fichas (`dev`, `em`; `iwda`/`sgln` son USD y se re
 2. Actions → **Personal NAV** → *Run workflow* (una vez, a mano). Abrir el paso «Build personal payloads» y leer la línea `datos propios: NAV: …`: fondos, con NAV exacto, fecha más reciente/más antigua, decimales (debe decir `2`),
    `coste del run` (te da los números reales de peticiones, KB y segundos que aquí solo pude estimar) y que **no** haya `::warning::` de «sin NAV exacto».
 3. Comparar esa fecha de NAV y los valores con la ficha pública de iShares y con el dashboard. Si el log y la ficha coinciden y el dashboard no → el fallo está en la app (caché o `change_pct` sobre un NAV fresco).
-4. Durante 3–5 días laborables, mirar a qué hora (`[run …Z]`) pasa la fecha más reciente a la del día. Con eso se decide si 30 min sobran (pasar a cada hora o estrechar 05–21) o si hay que afinar.
+4. (Opcional) Si vuelve a verse un desfase, lanza **NAV probe** a mano. Durante 3–5 días laborables, mirar a qué hora (`[run …Z]`) pasa la fecha más reciente a la del día. Con eso se decide si 30 min sobran (pasar a cada hora o estrechar 05–21) o si hay que afinar.
 5. Si quieres evitar re-publicar series cada 30 min: decidir la RPC de solo `funds` (§2). **No** he escrito SQL.
 6. Opcional: un check de Healthchecks para este workflow (§6.3).

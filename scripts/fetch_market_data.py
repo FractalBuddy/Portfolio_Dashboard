@@ -1451,7 +1451,9 @@ ISHARES_UA = "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"
 # una decisión del dueño (términos de uso), no una mejora técnica gratuita.
 ISHARES_UA_BROWSER = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
 ISHARES_VARIANTS = ("base", "nocache", "bust", "fresh", "browser", "browser_fresh", "passthrough")
-NAV_FETCH_VARIANTS = ("base", "fresh")      # las que usa el scraper de datos propios: la ficha tal cual y la «fresca»; gana la fecha de NAV más reciente
+# Variantes que usa el scraper de datos propios. Solo la base: el dashboard ya mostraba la fecha y los valores exactos de la ficha tras lanzar el workflow, así que el desfase venía de un dato
+# guardado en la app y no de una caché del HTML; con ("base", "fresh") se doblarían las peticiones a iShares sin ganar nada. fetch_ishares_nav_freshest y nav_probe.py siguen disponibles.
+NAV_FETCH_VARIANTS = ("base",)
 
 
 def ishares_request(product_url, variant="base", now_ms=None):

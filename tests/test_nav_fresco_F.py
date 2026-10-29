@@ -340,3 +340,14 @@ def test_readme_documenta_el_workflow_nuevo_su_cron_y_la_salida_temprana():
         assert frag in readme, frag
     for frag in ("personal-nav.yml", cron, "único escritor", "2 decimales", "payload completo"):
         assert frag in doc, frag
+
+
+def test_una_descarga_max_de_un_proxy_sirve_tambien_como_extra_de_otro_usuario(sb, tmp_path, capsys):
+    """Integración con el histórico largo: el proxy se pide con period=max y la misma descarga sirve al usuario que lo sigue como símbolo extra (2y)."""
+    spy = Spy()
+    rows = [watch_row("u1", funds=[{"isin": ISIN_A, "name": "A", "url": URL_A, "proxy_symbol": "PROXY1"}], symbols=["PROXY1", "FAKE1"]),
+            watch_row("u2", funds=[{"isin": ISIN_B, "name": "B", "url": URL_B, "proxy_symbol": "PROXY1"}], symbols=["FAKE1"]),
+            watch_row("u3", funds=[], symbols=["PROXY1"])]
+    rc, _ = run_all(sb_with(sb, *rows), tmp_path, spy=spy)
+    assert rc == 0 and sorted(spy.series_calls) == ["FAKE1", "PROXY1"] and spy.periods == {"PROXY1": "max", "FAKE1": "2y"}
+    assert "coste del run: 2 series pedidas a Yahoo" in capsys.readouterr().out

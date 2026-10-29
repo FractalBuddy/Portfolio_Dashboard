@@ -68,8 +68,18 @@ def test_variantes_de_cabeceras_y_parametro():
         fm.ishares_request(URL, "inventada")
 
 
-def test_el_scraper_no_se_hace_pasar_por_un_navegador_por_defecto():
-    assert "browser" not in fm.NAV_FETCH_VARIANTS and fm.NAV_FETCH_VARIANTS == ("base", "fresh")
+def test_el_scraper_usa_una_sola_variante_la_base_y_no_dobla_las_peticiones(monkeypatch):
+    """Evidencia del dueño: el dashboard ya mostraba la fecha y los valores exactos de la ficha, así que la base lee el NAV más reciente (el desfase venía de la app)."""
+    assert fm.NAV_FETCH_VARIANTS == ("base",)
+    calls = []
+    monkeypatch.setattr(fm.requests, "get", lambda url, headers=None, timeout=None: calls.append((url, headers)) or Resp(html(NEW)))
+    r = freshest(fm.NAV_FETCH_VARIANTS)
+    assert r["nav_variant"] == "base" and "nav_gain_days" not in r and calls == [(URL, {"User-Agent": fm.ISHARES_UA})]
+    calls.clear()
+    fm._ISHARES_PAGES.clear()
+    with contextlib.redirect_stderr(io.StringIO()):
+        assert fm.fetch_ishares_nav_freshest(URL, ISIN)["nav_date_iso"] == "2026-10-28"           # el valor por defecto de la función
+    assert len(calls) == 1 and "cb=" not in calls[0][0]
 
 
 def test_plain_pide_cada_variante_con_su_url_y_cabeceras_y_las_cachea_por_separado(monkeypatch):
@@ -92,9 +102,12 @@ def serve(monkeypatch, base=OLD, fresh=OLD, base_status=200, fresh_status=200):
     monkeypatch.setattr(fm.requests, "get", get)
 
 
-def freshest(monkeypatch=None):
+BOTH = ("base", "fresh")
+
+
+def freshest(variants=BOTH):
     with contextlib.redirect_stderr(io.StringIO()):
-        return fm.fetch_ishares_nav_freshest(URL, ISIN)
+        return fm.fetch_ishares_nav_freshest(URL, ISIN, variants)
 
 
 def test_si_la_variante_fresca_trae_un_nav_mas_nuevo_gana(monkeypatch):

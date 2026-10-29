@@ -36,7 +36,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import feed_v2_common as c
 import sanity_check_v2 as v
@@ -45,7 +45,15 @@ RPC_WATCH = "personal_watch_for_backend"
 RPC_PUBLISH = "publish_personal_feed"
 MAX_PAYLOAD_BYTES = 1_000_000
 MAX_USERS, MAX_FUNDS, MAX_SYMBOLS = 20, 20, 40
-SERIES_DAYS = 2 * 366                       # ≤ 2 años de cierres diarios
+SERIES_DAYS = 2 * 366                       # ≤ 2 años de cierres diarios (símbolos extra)
+PROXY_YEARS = 25                            # histórico de los proxies de fondos: todo lo disponible hasta ~25 años
+PROXY_DAYS = PROXY_YEARS * 366
+MAX_SERIES_BARS = 600                       # tope de cierres de un símbolo extra (2 años ≈ 505)
+MAX_PROXY_BARS = 6600                       # tope de cierres de un proxy (25 años ≈ 6.300)
+MAX_GAP_DAYS = 15                           # hueco máximo entre dos cierres consecutivos (el mayor real es el cierre de bolsas de 2001: 6 días)
+# fit_payload: nº de cierres que se conservan por serie, de más a menos. Primero se recortan los símbolos extra; los proxies, lo último.
+EXTRA_KEEP = (260, 60, 1)
+PROXY_KEEP = (2600, 1300, 780, 260, 60, 1)          # ~10, 5, 3, 1 año, 3 meses, último cierre
 TIMEOUT = 20
 TRIES = 2
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
@@ -222,7 +230,7 @@ FUND_SPEC = v.obj({
 SERIES_SPEC = v.obj({
     "symbol": v.symbol, "currency": v.text(4, c.CURRENCY_RE), "unit": v.enum(*c.UNITS), "price_unit_divisor": v.integer(1, 100),
     "price": v.number(1e-9, 1e9, positive=True), "change_pct": v.number(-1000, 100000, nullable=True), "as_of": v.day(),
-    "d": v.seq(v.day(), 600), "c": v.seq(v.number(1e-9, 1e9, positive=True), 600)})
+    "d": v.seq(v.day(), MAX_PROXY_BARS), "c": v.seq(v.number(1e-9, 1e9, positive=True), MAX_PROXY_BARS)})
 PAYLOAD_SPEC = v.obj({
     "schema": v.SCHEMA_V, "generated_at": v.stamp, "funds": v.seq(FUND_SPEC, MAX_FUNDS), "series": v.seq(SERIES_SPEC, MAX_SYMBOLS),
     "public": v.seq(v.symbol, MAX_SYMBOLS + MAX_FUNDS)})
@@ -237,26 +245,52 @@ def payload_problems(payload, today=None):
     out = []
     v._scan_strings(payload, "payload", ctx)
     out += ctx.errors
+    proxies = {f["proxy_symbol"] for f in payload["funds"] if f.get("proxy_symbol")}
+    syms = [s["symbol"] for s in payload["series"]]
+    if len(set(syms)) != len(syms):
+        out.append("símbolo repetido en series")
+    if set(syms) & set(payload["public"]):
+        out.append("símbolo en series y en public a la vez")
     for s in payload["series"]:
-        if not (len(s["d"]) == len(s["c"]) and all(a < b for a, b in zip(s["d"], s["d"][1:])) and s["d"] and s["d"][-1] == s["as_of"]
-                and abs(s["c"][-1] - s["price"]) <= 1e-6 * s["price"]):
-            out.append("serie incoherente")
+        d, cl = s["d"], s["c"]
+        if not (len(d) == len(cl) and d and d[-1] == s["as_of"] and abs(cl[-1] - s["price"]) <= 1e-6 * s["price"]):
+            out.append("serie incoherente")                      # truncada, columnas de distinto largo, as_of o price que no son el último cierre
+        elif not all(a < b for a, b in zip(d, d[1:])):
+            out.append("serie con fechas no crecientes")
+        elif any((date.fromisoformat(b) - date.fromisoformat(a)).days > MAX_GAP_DAYS for a, b in zip(d, d[1:])):
+            out.append("serie con huecos de más de %d días" % MAX_GAP_DAYS)
+        if len(d) > (MAX_PROXY_BARS if s["symbol"] in proxies else MAX_SERIES_BARS):
+            out.append("serie demasiado larga para su clase")
+        if s["unit"] == "subunit" and s["currency"] not in c.SUBUNIT_FAMILIES or s["unit"] == "currency" and s["currency"] in c.SUBUNIT_FAMILIES:
+            out.append("divisa y unidad incoherentes")             # GBp como `currency` se valoraría ×100; `subunit` exige una divisa en subunidad
+        if s["price_unit_divisor"] != c.price_unit_divisor(s["currency"], s["unit"]):
+            out.append("price_unit_divisor incoherente con la unidad")
+        if s["unit"] == "points" and not s["symbol"].startswith("^") or s["unit"] == "rate" and not s["symbol"].endswith("=X"):
+            out.append("unidad incoherente con el símbolo")
     if len(c.dumps(payload).encode("ascii")) > MAX_PAYLOAD_BYTES:
         out.append("payload > %d bytes" % MAX_PAYLOAD_BYTES)
     return out
 
 
 def fit_payload(payload):
-    """Recorta el payload hasta que quepa en MAX_PAYLOAD_BYTES: primero las series a 1 año, luego sin histórico, luego sin series. None si no cabe."""
+    """Recorta el payload (determinista) hasta que quepa en MAX_PAYLOAD_BYTES. Orden: los símbolos extra a 260 / 60 / 1 cierres; luego los proxies de
+    fondos (siempre todos al mismo nivel) a ~10 / 5 / 3 / 1 años / 3 meses / último cierre; luego sin series. None si ni así cabe."""
     def size():
         return len(c.dumps(payload).encode("ascii"))
+
+    def cut(series, keep):
+        for s in series:
+            s["d"], s["c"] = s["d"][-keep:], s["c"][-keep:]
     if size() <= MAX_PAYLOAD_BYTES:
         return payload
-    for keep in (260, 60, 0):
-        for s in payload["series"]:
-            s["d"], s["c"] = s["d"][-keep:] if keep else s["d"][-1:], s["c"][-keep:] if keep else s["c"][-1:]
-        if size() <= MAX_PAYLOAD_BYTES:
-            return payload
+    proxies = {f["proxy_symbol"] for f in payload["funds"] if f.get("proxy_symbol")}
+    extra = [s for s in payload["series"] if s["symbol"] not in proxies]
+    prox = [s for s in payload["series"] if s["symbol"] in proxies]
+    for series, steps in ((extra, EXTRA_KEEP), (prox, PROXY_KEEP)):
+        for keep in steps:
+            cut(series, keep)
+            if size() <= MAX_PAYLOAD_BYTES:
+                return payload
     payload["series"] = []
     return payload if size() <= MAX_PAYLOAD_BYTES else None
 
@@ -289,12 +323,17 @@ def nav_entry(fund, scraped, facts, warn, stats=None):
     return out
 
 
-def series_entry(sym, bars, currency, today):
-    """Serie recortada de un símbolo FUERA del universo público. Sin divisa conocida no se publica (None)."""
+def series_entry(sym, bars, currency, today, long=False):
+    """Serie de un símbolo: ≤ 2 años si es un símbolo extra, hasta PROXY_YEARS si `long` (proxy de un fondo). Solo cierres. Sin divisa conocida no se
+    publica (None). Si hay un hueco de más de MAX_GAP_DAYS entre dos cierres (descarga defectuosa), se conserva solo el tramo posterior al último hueco."""
     if not (isinstance(currency, str) and c.CURRENCY_RE.match(currency)) or len(bars) < 2:
         return None
-    cutoff = (today - timedelta(days=SERIES_DAYS)).isoformat()
+    cutoff = (today - timedelta(days=PROXY_DAYS if long else SERIES_DAYS)).isoformat()
     bars = [b for b in bars if b["d"] >= cutoff]
+    for i in range(len(bars) - 1, 0, -1):
+        if (date.fromisoformat(bars[i]["d"]) - date.fromisoformat(bars[i - 1]["d"])).days > MAX_GAP_DAYS:
+            bars = bars[i:]
+            break
     if len(bars) < 2:
         return None
     unit = "points" if sym.startswith("^") else "rate" if sym.endswith("=X") else "subunit" if currency in c.SUBUNIT_FAMILIES else "currency"
@@ -303,44 +342,33 @@ def series_entry(sym, bars, currency, today):
             "change_pct": round((last["c"] / prev["c"] - 1) * 100, 2), "as_of": last["d"], "d": [b["d"] for b in bars], "c": [b["c"] for b in bars]}
 
 
-def build_payload(user, public, fetchers, now, warn, stats=None, series_cache=None):
-    """Payload de un usuario. `public`: símbolos del universo público (esos NO se incluyen: el cliente los lee del feed público).
-    `series_cache` (opcional, compartida entre usuarios del mismo run): una sola descarga de Yahoo por símbolo aunque lo sigan varios usuarios."""
+def build_payload(user, public, fetchers, now, warn, stats=None):
+    """Payload de un usuario. Los proxies de fondos van SIEMPRE en `series` y con histórico largo, estén o no en el universo público (allí solo hay
+    HISTORY_YEARS años). Del resto, los símbolos del universo público NO se incluyen (`public`: el cliente los lee del feed público)."""
     funds = []
     for f in user["funds"]:
         scraped = facts = None
         if f["url"]:
             scraped, facts = fetchers.nav(f["url"], f["isin"]), fetchers.facts(f["url"])
         funds.append(nav_entry(f, scraped, facts, warn, stats))
-    wanted = list(dict.fromkeys(user["symbols"] + [f["proxy_symbol"] for f in user["funds"] if f.get("proxy_symbol")]))
+    proxies = list(dict.fromkeys(f["proxy_symbol"] for f in user["funds"] if f.get("proxy_symbol")))
+    wanted = proxies + [s for s in dict.fromkeys(user["symbols"]) if s not in proxies]           # proxies primero: orden estable y recorte determinista
     series, pub = [], []
     for sym in wanted:
-        if sym.upper() in public:
+        long = sym in proxies
+        if not long and sym.upper() in public:
             pub.append(sym)
             continue
         try:
-            if series_cache is not None and sym in series_cache:
-                hit = series_cache[sym]
-                if isinstance(hit, Exception):
-                    raise hit
-                bars, cur = hit
-            else:
-                try:
-                    bars, cur = fetchers.series(sym)
-                except Exception as e:                           # noqa: BLE001 - se recuerda el fallo: no se vuelve a pedir a Yahoo en este run
-                    if series_cache is not None:
-                        series_cache[sym] = e
-                    raise
-                if series_cache is not None:
-                    series_cache[sym] = (bars, cur)
+            bars, cur = fetchers.series(sym, "max" if long else "2y")
         except Exception:                                        # noqa: BLE001 - un símbolo que falla no tumba el resto
-            warn("serie_fallo")
+            warn("proxy_fallo" if long else "serie_fallo")
             continue
-        entry = series_entry(sym, bars, cur, now.date())
+        entry = series_entry(sym, bars, cur, now.date(), long)
         if entry:
             series.append(entry)
         else:
-            warn("serie_sin_divisa_o_datos")
+            warn("proxy_sin_divisa_o_datos" if long else "serie_sin_divisa_o_datos")
     payload = {"schema": c.SCHEMA, "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "funds": funds, "series": series, "public": pub}
     return fit_payload(payload)
 
@@ -363,7 +391,7 @@ def nav_report(payloads, now, warn_days=NAV_WARN_DAYS, stats=None):
     if dec:
         line += ", decimales del NAV: " + "/".join("%d (x%d)" % (k, n) for k, n in sorted(dec.items()))
     var = (stats or {}).get("variants") or {}
-    if var:
+    if set(var) - {"base"}:                      # con solo la variante base no hay nada que contar
         line += ", variante de la petición ganadora: " + "/".join("%s x%d" % (k, n) for k, n in sorted(var.items()))
     gains = (stats or {}).get("gains") or []
     if gains:
@@ -379,7 +407,8 @@ def nav_report(payloads, now, warn_days=NAV_WARN_DAYS, stats=None):
 
 
 class Fetchers:
-    """Las tres fuentes de datos externas, inyectables en los tests: nav(url, isin), facts(url), series(symbol) -> (barras, divisa)."""
+    """Las tres fuentes de datos externas, inyectables en los tests: nav(url, isin), facts(url), series(symbol, period) -> (barras, divisa).
+    `period` es "2y" (símbolos extra) o "max" (proxies de fondos: una sola petición con todo el histórico)."""
     def __init__(self, nav, facts, series):
         self.nav, self.facts, self.series = nav, facts, series
 
@@ -389,8 +418,8 @@ def default_fetchers():
     import feed_v2 as f2
     import fetch_market_data as fm
 
-    def series(sym):
-        df = fm.yf_history(sym, period="2y", interval="1d", auto_adjust=False)
+    def series(sym, period="2y"):
+        df = fm.yf_history(sym, period=period, interval="1d", auto_adjust=False)
         return f2.bars_from_df(df, datetime.now(timezone.utc).date()), df.attrs.get("currency")
     return Fetchers(fm.fetch_ishares_nav_freshest, fm.fetch_ishares_fund_facts, series), fm._plain_text
 
@@ -460,19 +489,35 @@ def step_build(directory, registry_path, fetchers=None, plain_text=None, now=Non
     sink = io.StringIO()
     warns = {}
     stats = {"decimals": {}}
-    series_cache = {}
 
     def warn(code):
         warns[code] = warns.get(code, 0) + 1
     if fetchers is None:
         with contextlib.redirect_stderr(sink), contextlib.redirect_stdout(sink):
             fetchers, plain_text = default_fetchers()
+    downloads = []                                                 # una descarga por símbolo y run, aunque lo sigan varios usuarios
+    cache = {}
+    raw_series = fetchers.series
+
+    def series(sym, period="2y"):
+        hit = cache.get(sym)
+        if hit is None or (period == "max" and hit[0] != "max"):   # una descarga "max" sirve también para "2y" (series_entry recorta)
+            downloads.append(sym)
+            try:
+                hit = cache[sym] = (period, raw_series(sym, period))
+            except Exception as e:                                 # noqa: BLE001 - el fallo también se recuerda: Yahoo no se vuelve a martillear por cada usuario
+                cache[sym] = (period, e)
+                raise
+        if isinstance(hit[1], Exception):
+            raise hit[1]
+        return hit[1]
+    fetchers = Fetchers(fetchers.nav, fetchers.facts, series)
     with contextlib.redirect_stderr(sink), contextlib.redirect_stdout(sink):
         users, dropped = parse_watch(_read_private(path), plain_text or _plain)
         payloads = []
         for u in users:
             try:
-                p = build_payload(u, public, fetchers, now, warn, stats, series_cache)
+                p = build_payload(u, public, fetchers, now, warn, stats)
             except Exception:                                      # noqa: BLE001
                 warn("usuario_fallo")
                 continue
@@ -482,16 +527,16 @@ def step_build(directory, registry_path, fetchers=None, plain_text=None, now=Non
                 continue
             payloads.append({"user": u["user"], "payload": p})
     _write_private(os.path.join(directory, "payloads.json"), payloads)
-    say("datos propios: %d payloads (%d fondos, %d series), %d elementos descartados%s" % (
-        len(payloads), sum(len(p["payload"]["funds"]) for p in payloads), sum(len(p["payload"]["series"]) for p in payloads), dropped,
+    say("datos propios: %d payloads (%d fondos, %d series, %d barras, %d bytes máx.), %d descargas de series, %d elementos descartados%s" % (
+        len(payloads), sum(len(p["payload"]["funds"]) for p in payloads), sum(len(p["payload"]["series"]) for p in payloads),
+        sum(len(s["d"]) for p in payloads for s in p["payload"]["series"]), max([len(c.dumps(p["payload"])) for p in payloads] or [0]), len(downloads), dropped,
         "".join("; %s x%d" % (k, n) for k, n in sorted(warns.items()))))
     lines, nav_warns = nav_report(payloads, now, nav_warn_days, stats)
     size = sum(len(c.dumps(p["payload"]).encode("ascii")) for p in payloads)
     for line in lines:
         say(line)
     say("datos propios: coste del run: %d series pedidas a Yahoo (únicas entre usuarios), payload %.1f KB, %.1f s" % (
-        len(series_cache),
-        size / 1024.0, time.monotonic() - t0))
+        len(downloads), size / 1024.0, time.monotonic() - t0))
     for w in nav_warns:
         say(w)
     if warns or dropped:
