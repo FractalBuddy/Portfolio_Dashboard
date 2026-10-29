@@ -1,0 +1,75 @@
+name: Personal NAV
+
+# Datos PROPIOS del dueño (NAV exacto de la ficha de iShares + facts + series), refrescados con más frecuencia que el feed público. La lista a seguir se lee de
+# Supabase y el resultado se publica de vuelta en Supabase; NUNCA en el repo, en un artefacto ni en los logs (los de un repo público son públicos: solo
+# contadores). Antes vivía como job `personal` dentro de publish-feed-v2 (4 runs al día): el NAV de iShares sale entre medias y el dashboard iba por detrás.
+#
+# Frecuencia: cada 30 min, de lunes a viernes, de 05:23 a 21:53 UTC (34 runs al día). Justificación (detalle y medidas en auditorias/FIXES_FEED_V2_F.md):
+#   * Un run cuesta ~2 peticiones a iShares (una por ficha) + ~2 a Yahoo (los proxies de los fondos, con histórico largo `period=max`: ~7.000 barras entre los dos; payload ~165 KB) y ~1,5-2 min de runner;
+#     el feed público hace ~545 peticiones a Yahoo al día; este workflow ~70 con dos fondos y sus dos proxies (34 runs x 2). Con más símbolos sube en proporción (una descarga por símbolo único y run). Repo público => minutos de Actions gratuitos.
+#   * Solo laborables: la ficha no cambia en fin de semana. Ventana 05-21 UTC: cubre la mañana y la tarde europeas (verano e invierno).
+#   * Minutos «feos» (:23 y :53) a propósito: GitHub retrasa y a veces descarta los cron en :00/:30; tampoco coinciden con update-data (:17) ni con
+#     publish-feed-v2 (:47). Un run descartado o retrasado no importa: cada run publica el estado completo y el siguiente lo corrige.
+#
+# Mientras la variable de repo FEED_V2_ENABLED no valga `true` el cron NO hace nada; el lanzamiento manual (Run workflow) funciona siempre.
+# Si la lista de Supabase no tiene nada que refrescar (ningún fondo con ficha de iShares ni símbolos) el job sale justo después de leerla, sin instalar nada.
+on:
+  schedule:
+    - cron: '23,53 5-21 * * 1-5'
+  workflow_dispatch:
+
+# Por defecto NADA. El único job pide solo lectura del repo.
+permissions: {}
+
+# Nunca dos runs a la vez: cada run publica el payload COMPLETO del usuario (la RPC lo sustituye), así que un run viejo que termine después de uno nuevo
+# pisaría datos frescos con datos viejos. Grupo PROPIO: publish-feed-v2 ya no escribe en Supabase (este es el único escritor). `cancel-in-progress: false`:
+# un run a medias nunca se mata a mitad de publicación. GitHub guarda UN run pendiente por grupo; es inocuo (cada run lee la lista y el NAV más recientes).
+concurrency:
+  group: personal-nav
+  cancel-in-progress: false
+
+jobs:
+  personal:
+    if: ${{ github.event_name != 'schedule' || vars.FEED_V2_ENABLED == 'true' }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+          cache: pip
+
+      # Solo biblioteca estándar (`python3 -S`: sin site-packages, ningún paquete de terceros puede cargarse). Escribe work=true|false en $GITHUB_OUTPUT.
+      - name: Read personal watch list (token, stdlib only)
+        id: watch
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          PERSONAL_FEED_TOKEN: ${{ secrets.PERSONAL_FEED_TOKEN }}
+        run: python3 -S scripts/personal_v2.py watch --dir "$RUNNER_TEMP/personal" --github-output
+
+      # Solo lo fijado en requirements.txt (versiones exactas + hashes). Se omite (con el resto) si no hay nada que refrescar.
+      - name: Install dependencies (hash-pinned)
+        if: ${{ steps.watch.outputs.work == 'true' }}
+        run: pip install --require-hashes --no-deps -r requirements.txt
+
+      # Código de terceros (yfinance, requests...): NO recibe el token. Imprime solo contadores de frescura (ver personal_v2.py).
+      - name: Build personal payloads (third-party code, NO token)
+        if: ${{ steps.watch.outputs.work == 'true' }}
+        run: python scripts/personal_v2.py build --dir "$RUNNER_TEMP/personal" --registry registry.json
+
+      - name: Publish personal payloads (token, stdlib only)
+        if: ${{ steps.watch.outputs.work == 'true' }}
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          PERSONAL_FEED_TOKEN: ${{ secrets.PERSONAL_FEED_TOKEN }}
+        run: python3 -S scripts/personal_v2.py publish --dir "$RUNNER_TEMP/personal"

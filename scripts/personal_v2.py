@@ -4,6 +4,7 @@ Datos PROPIOS del dueño del dashboard, FUERA del repo: la lista a seguir vive e
 cubre y lo publica de vuelta en Supabase. En el repo (público) no hay ISIN, listas ni fixtures del dueño; los tests usan ISIN y símbolos FALSOS.
 
     python3 scripts/personal_v2.py watch   --out  $RUNNER_TEMP/personal      # lee la lista (RPC personal_watch_for_backend)   [con token; solo stdlib]
+                                          [--github-output: escribe work=true|false en $GITHUB_OUTPUT para la salida temprana del workflow]
     python3 scripts/personal_v2.py build   --dir  $RUNNER_TEMP/personal      # NAV de iShares, facts y series (código de terceros) [SIN token]
     python3 scripts/personal_v2.py publish --dir  $RUNNER_TEMP/personal      # publica (RPC publish_personal_feed)              [con token; solo stdlib]
     python3 scripts/personal_v2.py all     --dir  $RUNNER_TEMP/personal      # los tres pasos en un proceso (tests y uso local)
@@ -16,6 +17,9 @@ Contrato con Supabase (lo define el dueño en SQL; ver docs/CONTRATO_FEED_V2.md)
 
 Es OPCIONAL: si Supabase o el token no están configurados, o algo falla, se emite un `::warning::` y el run publica el feed público igualmente (salida 0).
 Solo es un error (salida 1) una configuración peligrosa: clave secreta o URL que no sea https.
+
+FRESCURA: el workflow personal-nav.yml lo ejecuta cada ~30 min en días laborables. `build` imprime solo contadores de frescura (nº de fondos, nº con NAV
+exacto, fecha de NAV más reciente y más antigua, decimales, aviso si hay NAV con más de N días) para poder comprobar desde el log público que el NAV es el de la ficha.
 
 PRIVACIDAD: los logs de Actions de un repo público son públicos. Aquí solo se escriben contadores: nunca ISIN, símbolos, nombres, URL, clave ni token. Todo
 lo que imprimen las funciones reutilizadas de fetch_market_data (que citan ISIN en sus avisos) se descarta. El payload nunca va en un artefacto.
@@ -64,6 +68,9 @@ FACTS_KEYS = frozenset({
     "share_class_currency", "use_of_income", "structure", "methodology", "holdings", "domicile"})
 # NAV: un salto mayor entre dos runs no es un movimiento real de un fondo indexado: parseo erróneo o cambio de página (R4 del apéndice A).
 NAV_RATIO_LIMITS = (0.5, 2.0)
+# Aviso (solo informativo) si el NAV publicado tiene más de tantos días naturales. Calibrado con el comentario de NAV_STALE_DAYS en fetch_market_data:
+# con la ficha 1-2 días hábiles por detrás lo normal llega a 5 días (puente largo) y a 6 en algún festivo; >5 es raro y merece mirarlo.
+NAV_WARN_DAYS = 5
 
 
 def _plain(text, limit):
@@ -288,8 +295,8 @@ def fit_payload(payload):
     return payload if size() <= MAX_PAYLOAD_BYTES else None
 
 
-def nav_entry(fund, scraped, facts, warn):
-    """Entrada de un fondo: NAV de iShares (si es creíble frente al anterior) + facts."""
+def nav_entry(fund, scraped, facts, warn, stats=None):
+    """Entrada de un fondo: NAV de iShares (si es creíble frente al anterior) + facts. `stats` (opcional): contadores para el log de frescura."""
     out = {"isin": fund["isin"], "name": fund["name"], "price": None, "currency": "EUR", "unit": "currency", "source": "none"}
     if scraped and c.finite(scraped.get("price")):
         price, prev = float(scraped["price"]), fund.get("prev_price")
@@ -297,6 +304,15 @@ def nav_entry(fund, scraped, facts, warn):
             warn("nav_salto")                                    # R4: NAV x10 respecto al anterior => no se publica ese NAV
         else:
             out.update({"price": round(price, 4), "source": "ishares_nav_scrape"})
+            if scraped.get("nav_multi"):
+                warn("nav_varios")                               # la página trae varios «NAV as of» distintos: se usó el primero (decisión previa)
+            if stats is not None and isinstance(scraped.get("nav_decimals"), int):
+                stats["decimals"][scraped["nav_decimals"]] = stats["decimals"].get(scraped["nav_decimals"], 0) + 1
+            if stats is not None:
+                if isinstance(scraped.get("nav_variant"), str) and re.fullmatch(r"[a-z_]{1,16}", scraped["nav_variant"]):
+                    stats.setdefault("variants", {})[scraped["nav_variant"]] = stats.get("variants", {}).get(scraped["nav_variant"], 0) + 1
+                if isinstance(scraped.get("nav_gain_days"), int) and scraped["nav_gain_days"] > 0:
+                    stats.setdefault("gains", []).append(scraped["nav_gain_days"])
             for k in ("nav_date", "nav_date_iso", "nav_stale", "change_pct", "wk52_low", "wk52_high"):
                 if scraped.get(k) is not None:
                     out[k] = scraped[k]
@@ -326,7 +342,7 @@ def series_entry(sym, bars, currency, today, long=False):
             "change_pct": round((last["c"] / prev["c"] - 1) * 100, 2), "as_of": last["d"], "d": [b["d"] for b in bars], "c": [b["c"] for b in bars]}
 
 
-def build_payload(user, public, fetchers, now, warn):
+def build_payload(user, public, fetchers, now, warn, stats=None):
     """Payload de un usuario. Los proxies de fondos van SIEMPRE en `series` y con histórico largo, estén o no en el universo público (allí solo hay
     HISTORY_YEARS años). Del resto, los símbolos del universo público NO se incluyen (`public`: el cliente los lee del feed público)."""
     funds = []
@@ -334,7 +350,7 @@ def build_payload(user, public, fetchers, now, warn):
         scraped = facts = None
         if f["url"]:
             scraped, facts = fetchers.nav(f["url"], f["isin"]), fetchers.facts(f["url"])
-        funds.append(nav_entry(f, scraped, facts, warn))
+        funds.append(nav_entry(f, scraped, facts, warn, stats))
     proxies = list(dict.fromkeys(f["proxy_symbol"] for f in user["funds"] if f.get("proxy_symbol")))
     wanted = proxies + [s for s in dict.fromkeys(user["symbols"]) if s not in proxies]           # proxies primero: orden estable y recorte determinista
     series, pub = [], []
@@ -357,6 +373,39 @@ def build_payload(user, public, fetchers, now, warn):
     return fit_payload(payload)
 
 
+def nav_report(payloads, now, warn_days=NAV_WARN_DAYS, stats=None):
+    """Líneas de log de frescura del NAV (solo contadores y fechas públicas de NAV; nunca ISIN, nombres ni importes). Devuelve (líneas, avisos):
+    nº de fondos, nº con NAV exacto leído de la ficha, fecha de NAV más reciente y más antigua (con su edad en días), decimales con los que escribe el
+    NAV la ficha, y un aviso si algún NAV tiene más de `warn_days` días."""
+    funds = [f for p in payloads for f in p["payload"]["funds"]]
+    exact = [f for f in funds if f.get("source") == "ishares_nav_scrape"]
+    dated = sorted(f["nav_date_iso"] for f in exact if f.get("nav_date_iso"))
+    today = now.date()
+    age = lambda iso: (today - datetime.strptime(iso, "%Y-%m-%d").date()).days     # noqa: E731
+    line = "datos propios: NAV: %d fondos, %d con NAV exacto leído de la ficha" % (len(funds), len(exact))
+    if dated:
+        line += ", fecha de NAV más reciente %s (%d d), más antigua %s (%d d)" % (dated[-1], age(dated[-1]), dated[0], age(dated[0]))
+    if len(exact) > len(dated):
+        line += ", %d sin fecha legible" % (len(exact) - len(dated))
+    dec = (stats or {}).get("decimals") or {}
+    if dec:
+        line += ", decimales del NAV: " + "/".join("%d (x%d)" % (k, n) for k, n in sorted(dec.items()))
+    var = (stats or {}).get("variants") or {}
+    if set(var) - {"base"}:                      # con solo la variante base no hay nada que contar
+        line += ", variante de la petición ganadora: " + "/".join("%s x%d" % (k, n) for k, n in sorted(var.items()))
+    gains = (stats or {}).get("gains") or []
+    if gains:
+        line += ", una variante distinta de la base adelantó la fecha en %d fondos (hasta +%d d)" % (len(gains), max(gains))
+    line += " [run %s]" % now.strftime("%Y-%m-%dT%H:%MZ")
+    old = sum(1 for d in dated if age(d) > warn_days)
+    warns = []
+    if old:
+        warns.append("::warning::datos propios: %d NAV con más de %d días (la ficha de iShares puede ir retrasada, o el parseo falla)" % (old, warn_days))
+    if len(exact) < len(funds):
+        warns.append("::warning::datos propios: %d de %d fondos sin NAV exacto (se usa el proxy o el último valor)" % (len(funds) - len(exact), len(funds)))
+    return [line], warns
+
+
 class Fetchers:
     """Las tres fuentes de datos externas, inyectables en los tests: nav(url, isin), facts(url), series(symbol, period) -> (barras, divisa).
     `period` es "2y" (símbolos extra) o "max" (proxies de fondos: una sola petición con todo el histórico)."""
@@ -372,7 +421,7 @@ def default_fetchers():
     def series(sym, period="2y"):
         df = fm.yf_history(sym, period=period, interval="1d", auto_adjust=False)
         return f2.bars_from_df(df, datetime.now(timezone.utc).date()), df.attrs.get("currency")
-    return Fetchers(fm.fetch_ishares_nav, fm.fetch_ishares_fund_facts, series), fm._plain_text
+    return Fetchers(fm.fetch_ishares_nav_freshest, fm.fetch_ishares_fund_facts, series), fm._plain_text
 
 
 # ------------------------------------------------------------------------------------------------------------------------------
@@ -390,12 +439,23 @@ def _read_private(path):
         return json.load(f)
 
 
-def step_watch(cfg, directory):
-    """Lee la lista de Supabase y la guarda (sin validar: lo valida `build`). Devuelve 0."""
+def _set_output(env, name, value):
+    """Escribe `name=value` en el fichero $GITHUB_OUTPUT (si lo hay). Solo valores fijos (true/false): nunca datos del dueño."""
+    path = (os.environ if env is None else env).get("GITHUB_OUTPUT")
+    if path:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("%s=%s\n" % (name, value))
+
+
+def step_watch(cfg, directory, github_output=False, env=None):
+    """Lee la lista de Supabase y la guarda (sin validar: lo valida `build`). Con `github_output`, escribe work=true|false (¿hay algo que refrescar?:
+    algún fondo con ficha de iShares válida o algún símbolo) para la salida temprana del workflow. Devuelve 0."""
     try:
         raw = rpc(cfg, RPC_WATCH, {"p_token": cfg["token"]})
     except RpcError as e:
         say("::warning::datos propios: no se pudo leer la lista en Supabase (%s); el feed público se publica igualmente" % e)
+        if github_output:
+            _set_output(env, "work", "false")
         return 0
     _write_private(os.path.join(directory, "watch.json"), raw)
     rows = raw if isinstance(raw, list) else [raw] if isinstance(raw, dict) else []
@@ -403,13 +463,23 @@ def step_watch(cfg, directory):
         for f in (row.get("funds") if isinstance(row, dict) and isinstance(row.get("funds"), list) else []):
             if isinstance(f, dict) and isinstance(f.get("isin"), str) and _ISIN_RE.match(f["isin"]):
                 say("::add-mask::" + f["isin"])
-    say("datos propios: lista leída (%d usuarios)" % len(rows))
+    users, _dropped = parse_watch(raw, _plain)
+    n_funds = sum(1 for u in users for f in u["funds"] if f["url"])
+    n_symbols = sum(len(u["symbols"]) for u in users)
+    say("datos propios: lista leída (%d usuarios, %d fondos con ficha, %d símbolos)" % (len(rows), n_funds, n_symbols))
+    if github_output:
+        work = bool(n_funds or n_symbols)
+        _set_output(env, "work", "true" if work else "false")
+        if not work:
+            say("datos propios: nada que refrescar (ningún fondo con ficha de iShares ni símbolos): se omiten build y publish")
     return 0
 
 
-def step_build(directory, registry_path, fetchers=None, plain_text=None, now=None):
+def step_build(directory, registry_path, fetchers=None, plain_text=None, now=None, nav_warn_days=NAV_WARN_DAYS):
     """Valida la lista, recoge NAV/facts/series y escribe un payload por usuario. NO usa el token. Descarta TODA la salida de las funciones
     reutilizadas (citan ISIN y símbolos)."""
+    import time
+    t0 = time.monotonic()
     now = now or datetime.now(timezone.utc)
     path = os.path.join(directory, "watch.json")
     if not os.path.isfile(path):
@@ -418,6 +488,7 @@ def step_build(directory, registry_path, fetchers=None, plain_text=None, now=Non
     public = {e["symbol"].upper() for e in registry}
     sink = io.StringIO()
     warns = {}
+    stats = {"decimals": {}}
 
     def warn(code):
         warns[code] = warns.get(code, 0) + 1
@@ -431,8 +502,14 @@ def step_build(directory, registry_path, fetchers=None, plain_text=None, now=Non
     def series(sym, period="2y"):
         hit = cache.get(sym)
         if hit is None or (period == "max" and hit[0] != "max"):   # una descarga "max" sirve también para "2y" (series_entry recorta)
-            hit = cache[sym] = (period, raw_series(sym, period))
             downloads.append(sym)
+            try:
+                hit = cache[sym] = (period, raw_series(sym, period))
+            except Exception as e:                                 # noqa: BLE001 - el fallo también se recuerda: Yahoo no se vuelve a martillear por cada usuario
+                cache[sym] = (period, e)
+                raise
+        if isinstance(hit[1], Exception):
+            raise hit[1]
         return hit[1]
     fetchers = Fetchers(fetchers.nav, fetchers.facts, series)
     with contextlib.redirect_stderr(sink), contextlib.redirect_stdout(sink):
@@ -440,7 +517,7 @@ def step_build(directory, registry_path, fetchers=None, plain_text=None, now=Non
         payloads = []
         for u in users:
             try:
-                p = build_payload(u, public, fetchers, now, warn)
+                p = build_payload(u, public, fetchers, now, warn, stats)
             except Exception:                                      # noqa: BLE001
                 warn("usuario_fallo")
                 continue
@@ -454,6 +531,14 @@ def step_build(directory, registry_path, fetchers=None, plain_text=None, now=Non
         len(payloads), sum(len(p["payload"]["funds"]) for p in payloads), sum(len(p["payload"]["series"]) for p in payloads),
         sum(len(s["d"]) for p in payloads for s in p["payload"]["series"]), max([len(c.dumps(p["payload"])) for p in payloads] or [0]), len(downloads), dropped,
         "".join("; %s x%d" % (k, n) for k, n in sorted(warns.items()))))
+    lines, nav_warns = nav_report(payloads, now, nav_warn_days, stats)
+    size = sum(len(c.dumps(p["payload"]).encode("ascii")) for p in payloads)
+    for line in lines:
+        say(line)
+    say("datos propios: coste del run: %d series pedidas a Yahoo (únicas entre usuarios), payload %.1f KB, %.1f s" % (
+        len(downloads), size / 1024.0, time.monotonic() - t0))
+    for w in nav_warns:
+        say(w)
     if warns or dropped:
         say("::warning::datos propios: algunos elementos no se han podido recoger (solo contadores arriba; sin datos personales en el log)")
     return 0
@@ -478,11 +563,13 @@ def step_publish(cfg, directory):
     return 0
 
 
-def main(argv=None, fetchers=None, plain_text=None, env=None):
+def main(argv=None, fetchers=None, plain_text=None, env=None, now=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
     ap.add_argument("step", choices=("watch", "build", "publish", "all"))
     ap.add_argument("--dir", "--out", dest="dir", required=True, help="carpeta de trabajo PRIVADA (p. ej. $RUNNER_TEMP/personal); nunca un artefacto")
     ap.add_argument("--registry", default="registry.json")
+    ap.add_argument("--github-output", action="store_true", help="watch: escribe work=true|false en $GITHUB_OUTPUT (salida temprana del workflow)")
+    ap.add_argument("--nav-warn-days", type=int, default=NAV_WARN_DAYS, help="build: avisa si algún NAV tiene más de tantos días (por defecto %d)" % NAV_WARN_DAYS)
     a = ap.parse_args(argv)
     if a.step in ("watch", "publish", "all"):
         cfg, problem, fatal = read_config(env)
@@ -492,9 +579,9 @@ def main(argv=None, fetchers=None, plain_text=None, env=None):
     else:
         cfg = None
     if a.step in ("watch", "all"):
-        step_watch(cfg, a.dir)
+        step_watch(cfg, a.dir, a.github_output, env)
     if a.step in ("build", "all"):
-        step_build(a.dir, a.registry, fetchers, plain_text)
+        step_build(a.dir, a.registry, fetchers, plain_text, now, a.nav_warn_days)
     if a.step in ("publish", "all"):
         step_publish(cfg, a.dir)
     return 0

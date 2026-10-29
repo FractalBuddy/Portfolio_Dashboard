@@ -1,0 +1,69 @@
+name: NAV probe (diagnóstico)
+
+# DIAGNÓSTICO MANUAL del desfase de fecha del NAV de iShares: la ficha pública enseña en el navegador una fecha de NAV más reciente que la que ve el scraper (requests).
+# Solo workflow_dispatch (nunca se programa). NO escribe en ningún sitio: no publica en Supabase, no sube artefactos, no despliega nada, permisos de solo lectura del repo.
+# Lee del Supabase del dueño la lista de fichas con el MISMO paso que el job personal (token, solo biblioteca estándar) y las pide a ishares.com con varias variantes de la
+# petición (cabeceras no-cache, parámetro único, User-Agent de navegador, otros sitios de iShares, XHR/JSON que cite la ficha). El log es PÚBLICO (repo público): las fichas salen
+# como #1, #2... y por variante solo se imprimen la fecha y el valor del NAV leídos, el código HTTP, el tamaño y (si no se desactiva) las cabeceras de caché de la respuesta;
+# nunca ISIN, nombres ni URLs. El token solo está en el paso de lectura; el paso que ejecuta código de terceros (requests) no lo recibe.
+on:
+  workflow_dispatch:
+    inputs:
+      max_funds:
+        description: 'Cuántas fichas de la lista probar (cada una hace ~20 peticiones a ishares.com, con 1 s entre ellas).'
+        type: string
+        default: '4'
+      cache_headers:
+        description: 'Imprimir también las cabeceras de caché de cada respuesta (Age, Cache-Control, Date...): no identifican nada y son clave para saber si es una caché.'
+        type: boolean
+        default: true
+      try_xhr:
+        description: 'Buscar en el HTML de la ficha las peticiones XHR/JSON (*.ajax, *.json) y probarlas.'
+        type: boolean
+        default: true
+
+permissions: {}
+
+concurrency:
+  group: nav-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14'
+          cache: pip
+
+      - name: Read personal watch list (token, stdlib only)
+        env:
+          SUPABASE_URL: ${{ vars.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ vars.SUPABASE_PUBLISHABLE_KEY }}
+          PERSONAL_FEED_TOKEN: ${{ secrets.PERSONAL_FEED_TOKEN }}
+        run: python3 -S scripts/personal_v2.py watch --dir "$RUNNER_TEMP/personal"
+
+      - name: Install dependencies (hash-pinned)
+        run: pip install --require-hashes --no-deps -r requirements.txt
+
+      # Código de terceros (requests): NO recibe el token. Solo LEE ishares.com; no escribe en ningún sitio.
+      - name: Probe NAV date per request variant (third-party code, NO token)
+        env:
+          MAX_FUNDS: ${{ inputs.max_funds }}
+          CACHE_HEADERS: ${{ inputs.cache_headers }}
+          TRY_XHR: ${{ inputs.try_xhr }}
+        run: |
+          args=(--dir "$RUNNER_TEMP/personal" --max-funds "$MAX_FUNDS")
+          if [ "$CACHE_HEADERS" = "false" ]; then args+=(--no-headers); fi
+          if [ "$TRY_XHR" = "false" ]; then args+=(--no-xhr); fi
+          python scripts/nav_probe.py "${args[@]}"

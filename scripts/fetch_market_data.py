@@ -1277,9 +1277,18 @@ def build_position_news():
     return deduped[:30]
 
 
+_THOUSANDS_APOS = "’'ʼ"     # la ficha suiza (/ch/) agrupa miles con apóstrofo tipográfico: «1’296’938’547», «EUR 1’234.56»
+_NUM_CHARS = r"[\d.,%s]+" % _THOUSANDS_APOS
+
+
 def _parse_num(txt):
-    """'1,234.56' -> 1234.56 ; '12,3000' (decimal comma) -> 12.3 ; '12.30' -> 12.3. None if ambiguous/invalid."""
+    """'1,234.56' -> 1234.56 ; '1’234.56' (ficha suiza) -> 1234.56 ; '1.234,56' -> 1234.56 ; '12,3000' (decimal comma) -> 12.3 ; '12.30' -> 12.3.
+    None if ambiguous/invalid."""
     t = txt.strip()
+    if re.fullmatch(r"\d{1,3}(?:[%s]\d{3})+(\.\d+)?" % _THOUSANDS_APOS, t):
+        return float(re.sub("[%s]" % _THOUSANDS_APOS, "", t))
+    if re.fullmatch(r"\d{1,3}(\.\d{3})+,\d+", t):
+        return float(t.replace(".", "").replace(",", "."))
     if re.fullmatch(r"\d{1,3}(,\d{3})+(\.\d+)?", t):
         return float(t.replace(",", ""))
     if re.fullmatch(r"\d+,\d+", t):
@@ -1287,6 +1296,15 @@ def _parse_num(txt):
     if re.fullmatch(r"\d+(\.\d+)?", t):
         return float(t)
     return None
+
+
+def _num_decimals(raw):
+    """Decimales con los que está ESCRITO un número ya aceptado por _parse_num: '12.48' -> 2, '12,3000' -> 4, '1,234' (miles) -> 0."""
+    t = raw.strip()
+    m = re.search(r"[.,](\d+)$", t)
+    if not m or re.fullmatch(r"\d{1,3}(?:,\d{3})+", t):
+        return 0
+    return len(m.group(1))
 
 
 # Meses en inglés y español (nombre completo): se acepta cualquier prefijo de >= 3 letras («Sep», «Sept», «Sept.», «septiembre»).
@@ -1323,7 +1341,7 @@ def _month_from_token(tok):
 
 def _parse_nav_date(txt):
     """Fecha del NAV -> date, o None si no se entiende de forma inequívoca. Sin depender del locale.
-    Admite '03/Oct/2026', '3-oct-2026', '03 Oct 2026', '26/Sept/2026', '03/Octubre/2026', ISO '2026-10-03' y numéricas
+    Admite '03/Oct/2026', '3-oct-2026', '03 Oct 2026', 'Oct 03, 2026', '26/Sept/2026', '03/Octubre/2026', ISO '2026-10-03' y numéricas
     'dd/mm/yyyy' o 'dd.mm.yyyy' SOLO si no son ambiguas (un campo > 12): '03/10/2026' (¿3 oct o 10 mar?) -> None."""
     t = str(txt).strip()
     try:
@@ -1331,6 +1349,10 @@ def _parse_nav_date(txt):
         if m:
             mo = _month_from_token(m.group(2))
             return datetime(int(m.group(3)), mo, int(m.group(1))).date() if mo else None
+        m = re.fullmatch(r"([A-Za-z]{3,10})\.?\s+(\d{1,2}),?\s+(\d{4})", t)        # estilo US: «Oct 03, 2026»
+        if m:
+            mo = _month_from_token(m.group(1))
+            return datetime(int(m.group(3)), mo, int(m.group(2))).date() if mo else None
         m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})(?:[T ].*)?", t)
         if m:
             return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).date()
@@ -1349,12 +1371,17 @@ def _parse_nav_date(txt):
 def parse_ishares_nav(plain, isin, today=None):
     """
     Extrae el NAV del texto plano (sin etiquetas) de la página de producto de iShares.
-    Devuelve un dict {price, nav_date, [nav_date_iso, nav_stale], [change_pct], [wk52_low, wk52_high]} o None si no hay
+    Devuelve un dict {price, nav_date, nav_decimals, [nav_multi], [nav_date_iso, nav_stale], [change_pct], [wk52_low, wk52_high]} o None si no hay
     un NAV fiable (patrón ausente, ISIN ausente o precio inverosímil). Los campos secundarios
     (variación, rango 52 semanas) se parsean cada uno en su propio try: si uno viene malformado
     se descarta ese campo, pero NO se pierde el NAV válido.
+    `nav_decimals`: decimales con los que la ficha escribe el NAV (la de iShares da 2: «EUR 12.48»; el precio se redondea a 4 solo por prudencia).
+    `nav_multi`: nº de «NAV as of» DISTINTOS de la página (solo si > 1; se usa el primero): contador para los logs sin datos personales.
+    El ISIN va DESPUÉS del NAV en la ficha real, así que una página cortada a mitad del número no tiene ISIN y se rechaza (probado en cada punto de
+    corte de las fichas reales de tests/fixtures_fund_facts.json).
     """
-    nav_re = r'NAV as of\s+(\d{1,2}\s+[A-Za-z]{3,10}\.?\s+\d{4}|[\w/.\-]+)\s+EUR\s*([\d.,]+)'
+    plain = html.unescape(plain)            # «EUR&nbsp;12.48» o «1&#8217;234.56» si la ficha llega sin pasar por el quitaetiquetas del fetch
+    nav_re = (r'NAV as of\s+(\d{1,2}\s+[A-Za-z]{3,10}\.?\s+\d{4}|[A-Za-z]{3,10}\.?\s+\d{1,2},?\s+\d{4}|[\w/.\-]+)\s+EUR\s*(%s)(?![\d.,%s]|\s*WK)' % (_NUM_CHARS, _THOUSANDS_APOS))   # sin cifra tras EUR no se «roba» el 52 de «52 WK»
     nav_match = re.search(nav_re, plain)
     # El ISIN debe aparecer como token entero (no dentro de otro código más largo), no como simple subcadena.
     isin_ok = bool(isin) and re.search(r'(?<![A-Za-z0-9])' + re.escape(isin) + r'(?![A-Za-z0-9])', plain) is not None
@@ -1366,9 +1393,10 @@ def parse_ishares_nav(plain, isin, today=None):
     if price is None or not (0.1 < price < 10000):
         print(f"  ! implausible NAV {nav_match.group(2)!r} for {isin} -- falling back to proxy", file=sys.stderr)
         return None
-    result = {"price": round(price, 4), "nav_date": nav_match.group(1)}
+    result = {"price": round(price, 4), "nav_date": nav_match.group(1), "nav_decimals": _num_decimals(nav_match.group(2))}
     others = {(m.group(1), m.group(2)) for m in re.finditer(nav_re, plain)} - {(nav_match.group(1), nav_match.group(2))}
     if others:   # una página con varios «NAV as of» distintos (¿varias clases?): se sigue usando el primero (decisión previa), pero se deja rastro
+        result["nav_multi"] = len(others) + 1
         print(f"  ! {isin}: la página trae {len(others) + 1} «NAV as of» distintos; se usa el primero ({nav_match.group(1)} EUR {nav_match.group(2)})", file=sys.stderr)
 
     # Antigüedad del NAV: si iShares congela la página, el NAV de hace días no debe pasar por "de hoy".
@@ -1389,7 +1417,7 @@ def parse_ishares_nav(plain, isin, today=None):
         print(f"  ! nav_date ilegible para {isin}: {e}", file=sys.stderr)
 
     try:
-        cm = re.search(r'1 Day NAV Change.*?EUR\s*(-?[\d.,]+)\s*\(?\s*(-?[\d.,]+)%\s*\)?', plain)
+        cm = re.search(r'1 Day NAV Change.*?EUR\s*(-?%s)\s*\(?\s*(-?%s)%%\s*\)?' % (_NUM_CHARS, _NUM_CHARS), plain)
         if cm:
             chg = _parse_signed(cm.group(2))
             if chg is not None and abs(chg) <= CHANGE_PCT_MAX:
@@ -1400,7 +1428,7 @@ def parse_ishares_nav(plain, isin, today=None):
         print(f"  ! variación diaria no parseable para {isin}: {e}", file=sys.stderr)
 
     try:
-        wm = re.search(r'52\s*WK:\s*([\d.,]+)\s*-\s*([\d.,]+)', plain)
+        wm = re.search(r'52\s*WK:\s*(%s)\s*-\s*(%s)' % (_NUM_CHARS, _NUM_CHARS), plain)
         if wm:
             lo, hi = _parse_num(wm.group(1)), _parse_num(wm.group(2))
             if lo is not None and hi is not None and 0 < lo <= hi and lo * 0.8 <= price <= hi * 1.2:
@@ -1416,33 +1444,65 @@ ISHARES_TRIES = 2           # un fallo transitorio (timeout, 5xx, corte de red) 
 ISHARES_RETRY_WAIT = 4      # segundos entre intentos
 
 
-_ISHARES_PAGES = {}   # url -> texto plano de la ficha, o la excepción con la que falló: UNA descarga por URL y run (BE-17)
+_ISHARES_PAGES = {}   # url (variante «base») o (url, variante) -> texto plano de la ficha, o la excepción con la que falló: UNA descarga por URL, variante y run (BE-17)
+
+ISHARES_UA = "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"
+# Solo para DIAGNÓSTICO (nav_probe.py) y para decidir con datos; NO es la variante por defecto: hacerse pasar por un navegador ante la protección anti-bots de un sitio es
+# una decisión del dueño (términos de uso), no una mejora técnica gratuita.
+ISHARES_UA_BROWSER = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+ISHARES_VARIANTS = ("base", "nocache", "bust", "fresh", "browser", "browser_fresh", "passthrough")
+# Variantes que usa el scraper de datos propios. Solo la base: el dashboard ya mostraba la fecha y los valores exactos de la ficha tras lanzar el workflow, así que el desfase venía de un dato
+# guardado en la app y no de una caché del HTML; con ("base", "fresh") se doblarían las peticiones a iShares sin ganar nada. fetch_ishares_nav_freshest y nav_probe.py siguen disponibles.
+NAV_FETCH_VARIANTS = ("base",)
 
 
-def _ishares_plain(product_url, label="ficha"):
+def ishares_request(product_url, variant="base", now_ms=None):
+    """(url, cabeceras) de una variante de la petición a la ficha. Cada variante prueba una hipótesis de por qué el scraper ve un NAV más viejo que el navegador:
+    nocache (Cache-Control/Pragma: no-cache), bust (parámetro `cb` único: salta cachés por URL), fresh (ambas), browser* (User-Agent y cabeceras de navegador),
+    passthrough (`siteEntryPassthrough=true`, el parámetro que usa iShares para saltar su pantalla de entrada). `base` es exactamente la petición de siempre."""
+    if variant not in ISHARES_VARIANTS:
+        raise ValueError("variante desconocida: %r" % (variant,))
+    headers = {"User-Agent": ISHARES_UA}
+    url = product_url
+    if variant.startswith("browser"):
+        headers = {"User-Agent": ISHARES_UA_BROWSER, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US,en;q=0.9"}
+    if variant in ("nocache", "fresh", "browser_fresh"):
+        headers.update({"Cache-Control": "no-cache", "Pragma": "no-cache"})
+    extra = None
+    if variant in ("bust", "fresh", "browser_fresh"):
+        extra = "cb=%d" % (now_ms if now_ms is not None else int(time.time() * 1000))
+    elif variant == "passthrough":
+        extra = "siteEntryPassthrough=true"
+    if extra:
+        url = product_url + ("&" if "?" in product_url else "?") + extra
+    return url, headers
+
+
+def _ishares_plain(product_url, label="ficha", variant="base"):
     """Texto plano (sin etiquetas) de la ficha de producto de iShares, con UNA sola descarga por URL y por run: el NAV y la ficha de
     «Key Facts» salen de la misma página y antes la bajaban dos veces (el doble de peticiones a ishares.com, y los facts sin reintento).
     Reintenta UNA vez solo ante fallos transitorios (timeout, error de conexión, HTTP 5xx/429): un 403/404 o una página de captcha
     (200 sin el patrón) no se arreglan reintentando. El fallo también se recuerda (no se vuelve a pedir una página que ya ha fallado).
-    Lanza la excepción si no se pudo."""
-    hit = _ISHARES_PAGES.get(product_url)
+    `variant`: ver ishares_request (por defecto la petición de siempre). Lanza la excepción si no se pudo."""
+    key = product_url if variant == "base" else (product_url, variant)
+    hit = _ISHARES_PAGES.get(key)
     if isinstance(hit, Exception):
         raise hit
     if hit is not None:
         return hit
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
+    url, headers = ishares_request(product_url, variant)
     err = None
     for attempt in range(ISHARES_TRIES):
         if _budget_exhausted():
             err = TimeoutError("presupuesto de tiempo del job agotado")
             break
         try:
-            res = requests.get(product_url, headers=headers, timeout=_net_timeout(20))
+            res = requests.get(url, headers=headers, timeout=_net_timeout(20))
             res.raise_for_status()
             # Strip tags to plain text so we don't depend on exact HTML structure/classes.
             plain = re.sub(r'<[^>]+>', ' ', res.text)
             plain = re.sub(r'\s+', ' ', plain)
-            _ISHARES_PAGES[product_url] = plain
+            _ISHARES_PAGES[key] = plain
             return plain
         except Exception as e:
             err = e
@@ -1454,7 +1514,7 @@ def _ishares_plain(product_url, label="ficha"):
                 continue
             break
     if not isinstance(err, TimeoutError):      # un fallo por falta de presupuesto no es de la página: no se recuerda
-        _ISHARES_PAGES[product_url] = err
+        _ISHARES_PAGES[key] = err
     raise err
 
 
@@ -1469,6 +1529,36 @@ def fetch_ishares_nav(product_url, isin):
     except Exception as e:
         print(f"  ! ishares scrape failed for {isin}: {e} -- falling back to proxy", file=sys.stderr)
         return None
+
+
+def fetch_ishares_nav_freshest(product_url, isin, variants=NAV_FETCH_VARIANTS):
+    """Como fetch_ishares_nav, pero pide la ficha con cada variante de la petición (ver ishares_request) y se queda con el NAV de fecha MÁS RECIENTE
+    (empate: la última variante, la «fresca»). Defensa contra una copia en caché más vieja que la que ve un navegador. Añade al resultado `nav_variant`
+    (qué variante ganó) y, si una variante distinta de `base` supera a `base`, `nav_gain_days` (días de ventaja). La ficha ganadora pasa a ser la que
+    usa fetch_ishares_fund_facts (una sola ficha por URL). Nunca lanza: None si ninguna variante da un NAV fiable."""
+    found = []
+    for v in variants:
+        try:
+            r = parse_ishares_nav(_ishares_plain(product_url, isin, v), isin)
+        except Exception as e:
+            print(f"  ! ishares scrape failed for {isin} ({v}): {e}", file=sys.stderr)
+            r = None
+        if r:
+            found.append((v, r))
+    if not found:
+        print(f"  ! ishares scrape failed for {isin} (todas las variantes) -- falling back to proxy", file=sys.stderr)
+        return None
+    best = found[0]
+    for cand in found[1:]:
+        if (cand[1].get("nav_date_iso") or "") >= (best[1].get("nav_date_iso") or ""):
+            best = cand
+    out = dict(best[1], nav_variant=best[0])
+    base = dict(found).get("base")
+    if best[0] != "base" and base and base.get("nav_date_iso") and out.get("nav_date_iso") and out["nav_date_iso"] > base["nav_date_iso"]:
+        out["nav_gain_days"] = (datetime.strptime(out["nav_date_iso"], "%Y-%m-%d") - datetime.strptime(base["nav_date_iso"], "%Y-%m-%d")).days
+    if best[0] != "base" and (product_url, best[0]) in _ISHARES_PAGES:
+        _ISHARES_PAGES[product_url] = _ISHARES_PAGES[(product_url, best[0])]
+    return out
 
 
 # La unidad viene en cualquier capitalización ("EUR 1.20 B", "USD 29.5 bn", "EUR 820.50 M"). Sin unidad, iShares escribe el número

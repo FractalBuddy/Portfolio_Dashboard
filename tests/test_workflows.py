@@ -646,7 +646,7 @@ def _v2_triggers():
 def test_v2_estructura_permisos_minimos_y_dependencias():
     wf = load(V2)
     jobs = wf["jobs"]
-    assert set(jobs) == {"fetch", "personal", "publish", "verify", "heartbeat"}
+    assert set(jobs) == {"fetch", "publish", "verify", "heartbeat"}          # `personal` vive en personal-nav.yml
     assert wf["permissions"] == {}                                                       # nada por defecto
     assert jobs["fetch"]["permissions"] == {"contents": "read"}
     assert jobs["publish"]["permissions"] == {"pages": "write", "id-token": "write"}      # los dos y solo esos
@@ -703,7 +703,7 @@ def test_v2_publish_valida_antes_de_subir_y_desplegar_y_con_descarga_propia():
 
 def test_v2_el_cron_esta_gobernado_por_la_variable_y_el_workflow_viejo_no_cambia():
     wf = load(V2)
-    for jn in ("fetch", "personal", "heartbeat"):
+    for jn in ("fetch", "heartbeat"):
         cond = wf["jobs"][jn]["if"]
         assert "FEED_V2_ENABLED" in cond and "schedule" in cond
     assert "always()" in wf["jobs"]["heartbeat"]["if"]
@@ -835,37 +835,88 @@ def test_v2_verify_sin_datos_no_hace_nada(sandbox):
     assert r.returncode == 0 and calls(sandbox) == []
 
 
-# ---- datos propios (Supabase): personal_v2.py
-def test_v2_personal_es_independiente_opcional_y_no_toca_pages_ni_artefactos():
-    jobs = load(V2)["jobs"]
-    p = jobs["personal"]
-    assert p["permissions"] == {"contents": "read"} and p["continue-on-error"] is True and "needs" not in p
-    assert all("personal" not in (j.get("needs") if isinstance(j.get("needs"), list) else [j.get("needs")]) for n, j in jobs.items() if n != "personal")
-    uses = [s.get("uses", "") for s in p["steps"]]
+# ---- datos propios (Supabase): personal_v2.py, en su propio workflow (personal-nav.yml)
+PN = "personal-nav.yml"
+PN_WATCH, PN_BUILD, PN_PUBLISH = ("Read personal watch list (token, stdlib only)", "Build personal payloads (third-party code, NO token)",
+                                  "Publish personal payloads (token, stdlib only)")
+PN_ENV = {"SUPABASE_URL": "${{ vars.SUPABASE_URL }}", "SUPABASE_PUBLISHABLE_KEY": "${{ vars.SUPABASE_PUBLISHABLE_KEY }}",
+          "PERSONAL_FEED_TOKEN": "${{ secrets.PERSONAL_FEED_TOKEN }}"}
+
+
+def _pn_triggers():
+    wf = load(PN)
+    return wf.get("on", wf.get(True))
+
+
+def test_v2_ya_no_lleva_el_job_personal_ni_toca_supabase():
+    text = (WF / V2).read_text(encoding="utf-8")
+    assert "personal_v2" not in text and "PERSONAL_FEED_TOKEN" not in text and "SUPABASE" not in text and "personal" not in load(V2)["jobs"]
+
+
+def test_personal_nav_estructura_permisos_y_concurrencia_propia():
+    wf = load(PN)
+    assert wf["permissions"] == {} and set(wf["jobs"]) == {"personal"}
+    job = wf["jobs"]["personal"]
+    assert job["permissions"] == {"contents": "read"} and "needs" not in job and job["timeout-minutes"] <= 15
+    assert wf["concurrency"] == {"group": "personal-nav", "cancel-in-progress": False}           # escritor único de Supabase, sin cancelar a medias
+    assert wf["concurrency"]["group"] != load(V2)["concurrency"]["group"]
+    uses = [s.get("uses", "") for s in job["steps"]]
     assert not any("upload-artifact" in u or "pages" in u for u in uses)          # el payload personal NUNCA va en un artefacto (en un repo público es descargable)
-    assert "id-token" not in json.dumps(p) and "pages" not in p["permissions"]
+    assert "id-token" not in json.dumps(job) and "pages" not in job["permissions"] and "contents: write" not in (WF / PN).read_text(encoding="utf-8")
 
 
-def test_v2_personal_el_token_solo_en_los_pasos_de_biblioteca_estandar():
-    p = load(V2)["jobs"]["personal"]
-    by = {s["name"]: s for s in p["steps"]}
-    watch, build, publish = (by["Read personal watch list (token, stdlib only)"], by["Build personal payloads (third-party code, NO token)"],
-                             by["Publish personal payloads (token, stdlib only)"])
+def test_personal_nav_cron_frecuente_en_minutos_feos_solo_laborables_y_con_dispatch():
+    t = _pn_triggers()
+    assert "workflow_dispatch" in t
+    [entry] = t["schedule"]
+    minute, hour, dom, month, dow = entry["cron"].split()
+    assert (dom, month, dow) == ("*", "*", "1-5")                                  # solo lunes a viernes
+    minutes = [int(m) for m in minute.split(",")]
+    assert len(minutes) == 2 and all(m not in (0, 15, 30, 45, 17, 47) for m in minutes)         # ni a en punto ni a los minutos de los otros dos workflows
+    lo, hi = (int(x) for x in hour.split("-"))
+    assert 0 <= lo < hi <= 23 and (hi - lo + 1) * len(minutes) <= 40                  # tope razonable de runs al día (carga sobre iShares/Yahoo)
+    assert load("update-data.yml").get("on", load("update-data.yml").get(True))["schedule"] == [{"cron": "17 6,11,15,21 * * *"}]
+
+
+def test_personal_nav_esta_gobernado_por_feed_v2_enabled_como_el_resto():
+    cond = load(PN)["jobs"]["personal"]["if"]
+    assert "FEED_V2_ENABLED" in cond and "schedule" in cond
+
+
+def test_personal_nav_el_token_solo_en_los_pasos_de_biblioteca_estandar():
+    job = load(PN)["jobs"]["personal"]
+    by = {s["name"]: s for s in job["steps"]}
+    watch, build, publish = by[PN_WATCH], by[PN_BUILD], by[PN_PUBLISH]
     for s in (watch, publish):
-        assert s["env"] == {"SUPABASE_URL": "${{ vars.SUPABASE_URL }}", "SUPABASE_PUBLISHABLE_KEY": "${{ vars.SUPABASE_PUBLISHABLE_KEY }}",
-                            "PERSONAL_FEED_TOKEN": "${{ secrets.PERSONAL_FEED_TOKEN }}"}
+        assert s["env"] == PN_ENV
         assert s["run"].startswith("python3 -S scripts/personal_v2.py ")                  # sin site-packages: ningún paquete de terceros puede cargarse
     assert "env" not in build and build["run"].startswith("python scripts/personal_v2.py build")
-    names = [s["name"] for s in p["steps"]]
-    assert names.index(watch["name"]) < names.index(build["name"]) < names.index(publish["name"])
-    # el token y las variables de Supabase no aparecen en ningún otro job ni paso
-    for jn, job in load(V2)["jobs"].items():
-        for s in job["steps"]:
-            if (jn, s.get("name")) not in {("personal", watch["name"]), ("personal", publish["name"])}:
-                assert "PERSONAL_FEED_TOKEN" not in json.dumps(s) and "SUPABASE" not in json.dumps(s), (jn, s.get("name"))
+    names = [s["name"] for s in job["steps"]]
+    assert names.index(watch["name"]) < names.index("Install dependencies (hash-pinned)") < names.index(build["name"]) < names.index(publish["name"])
+    for s in job["steps"]:
+        if s["name"] not in (PN_WATCH, PN_PUBLISH):
+            assert "PERSONAL_FEED_TOKEN" not in json.dumps(s) and "SUPABASE" not in json.dumps(s), s["name"]
+    text = (WF / PN).read_text(encoding="utf-8")
+    assert text.count("secrets.PERSONAL_FEED_TOKEN") == 2 and text.count("vars.SUPABASE_PUBLISHABLE_KEY") == 2
+    assert "service_role" not in text and "sb_secret" not in text
 
 
-def test_v2_personal_los_pasos_con_token_importan_solo_biblioteca_estandar():
+def test_personal_nav_sale_pronto_si_no_hay_nada_que_refrescar():
+    job = load(PN)["jobs"]["personal"]
+    watch = next(s for s in job["steps"] if s["name"] == PN_WATCH)
+    assert watch["id"] == "watch" and "--github-output" in watch["run"]
+    gated = [s["name"] for s in job["steps"] if s.get("if") == "${{ steps.watch.outputs.work == 'true' }}"]
+    assert gated == ["Install dependencies (hash-pinned)", PN_BUILD, PN_PUBLISH]          # sin fondos: ni se instala ni se construye ni se publica
+    assert "--require-hashes --no-deps -r requirements.txt" in next(s for s in job["steps"] if s["name"] == "Install dependencies (hash-pinned)")["run"]
+
+
+def test_personal_nav_las_acciones_van_fijadas_por_sha():
+    for s in load(PN)["jobs"]["personal"]["steps"]:
+        if "uses" in s:
+            assert re.fullmatch(r"[\w.\-]+/[\w.\-]+@[0-9a-f]{40}", s["uses"]), s["uses"]
+
+
+def test_personal_los_pasos_con_token_importan_solo_biblioteca_estandar():
     code = ("import sys; sys.path.insert(0, %r); import personal_v2; "
             "bad = [m for m in ('requests', 'yfinance', 'feedparser', 'pandas', 'fetch_market_data', 'feed_v2') if m in sys.modules]; "
             "assert not bad, bad" % str(ROOT / "scripts"))
@@ -873,16 +924,10 @@ def test_v2_personal_los_pasos_con_token_importan_solo_biblioteca_estandar():
     assert r.returncode == 0, r.stderr
 
 
-def test_v2_el_token_se_referencia_en_exactamente_dos_pasos_y_no_hay_claves_de_servidor():
-    text = (WF / V2).read_text(encoding="utf-8")
-    assert text.count("secrets.PERSONAL_FEED_TOKEN") == 2 and text.count("vars.SUPABASE_PUBLISHABLE_KEY") == 2
-    assert "service_role" not in text and "sb_secret" not in text
-
-
 def test_v2_el_readme_documenta_la_activacion_los_secretos_y_los_riesgos():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    wf = (WF / V2).read_text(encoding="utf-8")
-    # cada secreto/variable que usa el workflow v2 está en el README
+    wf = (WF / V2).read_text(encoding="utf-8") + (WF / PN).read_text(encoding="utf-8") + (WF / "nav-probe.yml").read_text(encoding="utf-8")
+    # cada secreto/variable que usan el workflow v2 y personal-nav está en el README
     for name in set(re.findall(r"(?:secrets|vars)\.([A-Z][A-Z0-9_]+)", wf)):
         assert name in readme, name
     for frag in ("Settings → Pages → Source: GitHub Actions", "FEED_V2_ENABLED", "allow_regression", "docs/CONTRATO_FEED_V2.md", "BE-09", "recrear el repositorio",

@@ -215,6 +215,11 @@ def _nav_date(f):
             tok = m.group(2).lower()
             hits = {k for k, names in _MES_NOMBRES.items() for n in names if n.startswith(tok)}
             return dt.date(int(m.group(3)), hits.pop(), int(m.group(1))) if len(hits) == 1 else None
+        m = re.fullmatch(r"([A-Za-z]{3,10})\.?\s+(\d{1,2}),?\s+(\d{4})", t)           # estilo US: «Oct 03, 2026»
+        if m:
+            tok = m.group(1).lower()
+            hits = {k for k, names in _MES_NOMBRES.items() for n in names if n.startswith(tok)}
+            return dt.date(int(m.group(3)), hits.pop(), int(m.group(2))) if len(hits) == 1 else None
         m = re.fullmatch(r"(\d{4})-(\d{2})-(\d{2})(?:[T ].*)?", t)
         if m:
             return dt.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))

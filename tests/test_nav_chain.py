@@ -49,6 +49,9 @@ def alerts(warns):
     ("04/dic/2026", "2026-12-04"),
     ("03-Oct-2026", "2026-10-03"),
     ("03 Oct 2026", "2026-10-03"),
+    ("Oct 03 2026", "2026-10-03"),           # estilo US (mes primero): inequívoco porque el mes va en letras
+    ("Oct 3, 2026", "2026-10-03"),
+    ("October 03, 2026", "2026-10-03"),
     ("2026-10-03", "2026-10-03"),            # ISO
     ("25/12/2026", "2026-12-25"),            # numérica inequívoca (25 > 12)
     ("12.25.2026", "2026-12-25"),            # numérica inequívoca (mm.dd)
@@ -58,7 +61,7 @@ def test_nav_date_formatos_parseables(raw, iso):
     assert sc._nav_date({"nav_date": raw}).isoformat() == iso            # el parser del sanity coincide
 
 
-@pytest.mark.parametrize("raw", ["03/10/2026", "01/02/2026", "31/Foo/2026", "31/Feb/2026", "Oct 03 2026", "", "hoy", "03/Oc/2026", "03/Ju/2026", "99/Oct/2026", "03/Mar/26"])
+@pytest.mark.parametrize("raw", ["03/10/2026", "01/02/2026", "31/Foo/2026", "31/Feb/2026", "Foo 03 2026", "", "hoy", "03/Oc/2026", "03/Ju/2026", "99/Oct/2026", "03/Mar/26"])
 def test_nav_date_ambigua_o_ilegible_es_none(raw):
     assert fm._parse_nav_date(raw) is None
     assert sc._nav_date({"nav_date": raw}) is None

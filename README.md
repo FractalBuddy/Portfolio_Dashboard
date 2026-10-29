@@ -95,7 +95,7 @@ Qué cambia respecto al feed actual (auditoría 08, BE-01..BE-09):
 
 Contrato para el cliente (campos, ejemplos JSON reales, algoritmo de lectura, equivalencias con v1): **[`docs/CONTRATO_FEED_V2.md`](docs/CONTRATO_FEED_V2.md)**.
 
-### Cómo funciona `publish-feed-v2.yml` (4 jobs + `personal`)
+### Cómo funciona `publish-feed-v2.yml` (4 jobs)
 
 | Job | Permisos | Qué hace |
 |---|---|---|
@@ -103,10 +103,9 @@ Contrato para el cliente (campos, ejemplos JSON reales, algoritmo de lectura, eq
 | `publish` | solo `pages: write` + `id-token: write` | **no ejecuta código de terceros**. Hace su propia descarga del sitio anterior (modo `validate`), valida con `scripts/sanity_check_v2.py` (solo stdlib, sacado del repo) y solo entonces sube el artefacto de Pages y despliega |
 | `verify` | ninguno | informativo (`continue-on-error`): comprueba que Pages ya sirve el `manifest.json` nuevo |
 | `heartbeat` | ninguno | Healthchecks.io: ping normal, `/fail` si falla `fetch`, `publish` o el validador, y `/fail` con el motivo (`degraded: ...`) solo si se publicó con **más del 10 % de los símbolos activos sin publicar** o con **caída global de Yahoo** (429 sostenido o fallo de la mayoría a la vez). Un símbolo suelto sin publicar (`unit_mismatch`, `failed`, `suspect`...) es solo un `::warning::` en el log y el detalle queda en `health.json`. El secreto se limpia (espacios, tabuladores, `\r`, `\n`, comillas o acentos graves envolventes) y debe ser `https://hc-ping.com/...`; si no, `::warning::` sin el valor y no se llama a `curl` |
-| `personal` | `contents: read` | **opcional**, independiente: datos propios en Supabase (ver abajo). Nunca bloquea el feed público |
 
 `concurrency` serializa los runs, todos los jobs tienen `timeout-minutes`, las acciones van fijadas por SHA y el cron es `47 6,11,15,21 * * *` (media hora después del
-del feed actual para no coincidir en la IP del runner). **El cron del workflow viejo no se ha tocado.**
+del feed actual para no coincidir en la IP del runner). **El cron del workflow viejo no se ha tocado.** Los datos propios (NAV de iShares en Supabase) ya **no** se publican desde aquí: viven en `personal-nav.yml` (ver «Datos propios»).
 
 `scripts/feed_v2.py` reutiliza la lógica probada de `fetch_market_data.py` (ritmo y 429 de Yahoo con pausa y jitter, interruptor de racha de fallos, presupuesto de tiempo
 global de BE-12, FRED, CNN, alternative.me, CoinGecko, RSS) y añade: histórico incremental, niveles `hot` (en cada run, con intradía de 5 min) / `warm` (~1 vez al día) /
@@ -138,21 +137,22 @@ Además, en cada run: 1 llamada a CoinGecko (250 monedas), ~5 a FRED (con clave)
 1. **Settings → Pages → Source: GitHub Actions.** (Sin esto el despliegue falla.)
 2. **Settings → Environments → github-pages**: ese entorno suele restringir el despliegue a la rama por defecto (`main`); si lanzas el workflow desde otra rama, hay que permitirla ahí.
 3. *(Opcional)* **Secrets** (Settings → Secrets and variables → Actions): `HC_UPDATE_V2_URL` (check propio de Healthchecks; recomendado, para que el feed viejo y el nuevo
-   no se tapen entre sí; si no existe se usa `HC_UPDATE_URL`) y `PERSONAL_FEED_TOKEN` (ver «Datos propios»). `FRED_API_KEY` ya existe y se reutiliza.
-4. **Variables**: `SUPABASE_URL` y `SUPABASE_PUBLISHABLE_KEY` (ya existen para el keepalive). Opcional: `FEED_V2_BASE_URL` (dominio propio, URL de la carpeta `/v2`, https).
+   no se tapen entre sí; si no existe se usa `HC_UPDATE_URL`) y `PERSONAL_FEED_TOKEN` (lo usa solo `personal-nav.yml`; ver «Datos propios»). `FRED_API_KEY` ya existe y se reutiliza.
+4. **Variables**: `SUPABASE_URL` y `SUPABASE_PUBLISHABLE_KEY` (ya existen para el keepalive; las usa `personal-nav.yml`). Opcional: `FEED_V2_BASE_URL` (dominio propio, URL de la carpeta `/v2`, https).
 5. **Antes del primer run**, contrasta los SHA de las dos acciones nuevas (no se pudieron comprobar al escribir el workflow, BE-19):
    `gh api repos/actions/upload-pages-artifact/git/ref/tags/v3.0.1 --jq .object.sha` (debe ser `56afc609…`) y `gh api repos/actions/deploy-pages/git/ref/tags/v4.0.5 --jq .object.sha`
    (`d6db9016…`). Si Dependabot propone versiones nuevas, mejor.
 6. **Actions → «Publish feed v2» → Run workflow.** El primer run es «primer run» (404 en `manifest.json`) y solo publica ~80 símbolos (cupo de altas); lánzalo 2-3 veces seguidas
    (o espera al cron) hasta que `health.json.counts.published` iguale a los símbolos de Yahoo del registro (224). Revisa `health.json.problems.unit_mismatch` (`{símbolo: {registro, yahoo}}`) y `problems.failed` (`{símbolo: motivo}`): las divisas/unidades del `registry.json` se
    escribieron sin acceso a Yahoo; un símbolo cuya divisa real no coincide **no se publica** hasta que se corrige su entrada (`currency`/`unit`).
-7. Cuando esté a tu gusto: **variable de repo `FEED_V2_ENABLED = true`** para que el cron programado empiece a funcionar (hasta entonces el cron no hace nada; el lanzamiento manual sí).
+7. Cuando esté a tu gusto: **variable de repo `FEED_V2_ENABLED = true`** para que el cron programado empiece a funcionar (también el de `personal-nav.yml`; hasta entonces el cron no hace nada y el lanzamiento manual sí).
 
 Un split legítimo (o retirar símbolos a propósito) hace saltar las reglas de continuidad del validador (es justo lo que protege del ×100): lanza el workflow una vez con **allow_regression**.
 
 ### Datos propios del dueño (Supabase, fuera del repo)
 
-El backend **no** lleva en el repo ISIN, fondos clase S ni listas del dueño (el feed v2 es genérico). Lo suyo vive en Supabase:
+El backend **no** lleva en el repo ISIN, fondos clase S ni listas del dueño (el feed v2 es genérico). Lo suyo vive en Supabase y lo publica **`personal-nav.yml`**
+(un solo job: `watch` → `build` → `publish`, independiente de `publish-feed-v2.yml`):
 
 * lee la lista con la RPC `personal_watch_for_backend(p_token)` y publica con `publish_personal_feed(p_token, p_user, p_payload)` (contrato y ejemplos en el
   [documento del contrato](docs/CONTRATO_FEED_V2.md#5-datos-propios-supabase-fuera-del-repo));
@@ -161,13 +161,48 @@ El backend **no** lleva en el repo ISIN, fondos clase S ni listas del dueño (el
 * el payload (≤ 1 MB) lleva el NAV por ISIN (scraping de iShares), los *facts* y las series de cierres diarios: los **proxies de los fondos** con todo el histórico disponible (hasta ~25 años,
   esté o no el proxy en el universo público, que solo guarda 10 años) y el resto de símbolos extra con ≤ 2 años, y estos últimos solo si **no** están en el universo público; si el
   payload pasa de 1 MB se recortan primero los extra y después los proxies (ver el contrato); un NAV con un salto fuera de 0,5–2× respecto al anterior no se publica;
-* es **opcional**: sin Supabase o sin token, o si algo falla, solo hay un `::warning::` y el feed público sale igual;
+* **frecuencia**: cada 30 min, **lunes a viernes**, de 05:23 a 21:53 UTC (`23,53 5-21 * * 1-5`: 34 runs al día; minutos «feos» a propósito, y distintos de los de `update-data.yml` (:17) y
+  `publish-feed-v2.yml` (:47)). Antes el job vivía dentro de `publish-feed-v2` (4 runs al día) y el NAV de iShares, que sale entre medias, llegaba al dashboard con horas de retraso. Cada run publica
+  el payload **completo** (la RPC lo sustituye), por eso `personal-nav.yml` tiene su **propia concurrencia** (`personal-nav`) y es el **único escritor** en Supabase: un run viejo que acabase
+  después de uno nuevo pisaría datos frescos con datos viejos. Un cron retrasado o descartado por GitHub no importa: el siguiente lo corrige;
+* **salida temprana**: `watch` escribe `work=true|false` en `$GITHUB_OUTPUT`; si la lista no tiene ningún fondo con ficha de iShares ni símbolos, el job no instala dependencias ni construye ni publica;
+* **gating**: igual que el resto, el cron solo corre con la variable de repo `FEED_V2_ENABLED = true` (el lanzamiento manual, *Run workflow*, funciona siempre);
+* **variables y secretos que usa**: variables `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY` y `FEED_V2_ENABLED`; secreto `PERSONAL_FEED_TOKEN` (solo en los pasos `watch` y `publish`, que ejecutan únicamente biblioteca
+  estándar con `python3 -S`; el paso `build`, con código de terceros, no lo recibe);
+* es **opcional**: sin Supabase o sin token, o si algo falla, solo hay un `::warning::` y la salida es 0 (solo una clave secreta o una URL no https hacen fallar el job);
+* **cómo comprobar que el NAV es el de la ficha** (log del paso *Build personal payloads*, solo contadores y fechas de NAV, nunca ISIN, nombres ni importes):
+
+  ```
+  datos propios: NAV: 2 fondos, 2 con NAV exacto leído de la ficha, fecha de NAV más reciente 2026-10-27 (1 d), más antigua 2026-10-26 (2 d), decimales del NAV: 2 (x2) [run 2026-10-28T10:23Z]
+  datos propios: coste del run: 2 series pedidas a Yahoo (únicas entre usuarios), payload 20.6 KB, 3.4 s
+  ```
+
+  Compara la fecha de NAV con la de la ficha pública: la ficha de iShares escribe el NAV con **2 decimales** (`EUR 12.48`; lo muestran todas las fichas reales guardadas en `tests/fixtures_fund_facts.json`, y el
+  log lo confirma en cada run), así que el dashboard debe coincidir **exactamente** con la ficha, no con el redondeo de otra fuente. `::warning::` si algún NAV tiene más de 5 días (`--nav-warn-days`),
+  si algún fondo se queda sin NAV exacto, o si la página trae varios «NAV as of» distintos (`nav_varios`: se usa el primero);
 * privacidad: los logs de un repo público son públicos, así que `personal_v2.py` solo escribe contadores (nunca ISIN, símbolos, URL, clave ni token); el payload nunca va en un artefacto;
-  el token solo está en los pasos de biblioteca estándar (`python3 -S`), no en el paso que ejecuta código de terceros.
+  el token solo está en los pasos de biblioteca estándar (`python3 -S`), no en el paso que ejecuta código de terceros;
+* **coste** (medidas simuladas y estimaciones en `auditorias/FIXES_FEED_V2_F.md`): por run, **una** petición a iShares por ficha y una a Yahoo por símbolo **único** (una descarga `max` sirve también para 2 años): los proxies de los
+  fondos con `period="max"` (histórico largo) y los símbolos extra con 2 años; los que siguen varios usuarios se bajan una sola vez. Con dos fondos y sus dos proxies: 2 peticiones a Yahoo por run
+  (68 al día, frente a ~545 del feed público), pero con el histórico largo cada una baja ~3.000–6.000 barras (≈ 7.000 entre las dos) y el payload ronda **165 KB** (≈ 5,6 MB/día escritos en Supabase con 34 runs).
+  ~1,5–2 min de runner por run (casi todo es `pip install`). Si algún día el repo pasara a **privado**, 34 runs × ~2 min × ~22 días son ~1.500 min/mes: casi todo el cupo gratuito.
+
+#### Desfase de fecha del NAV (navegador 28/Oct, scraper 27/Oct): resuelto, y diagnóstico manual opcional
+
+**Causa:** un dato guardado en la app, no el scraper. Tras lanzar el workflow, el dashboard mostró la fecha de NAV de la ficha y sus valores exactos: la petición de siempre (`base`) ya lee el NAV más
+reciente. Por eso el scraper pide **una sola variante** por ficha (`NAV_FETCH_VARIANTS = ("base",)`) y no se doblan las peticiones a iShares. El log del build sigue dando la fecha de NAV más reciente y
+la más antigua (sin identificar fondos), que es la comprobación a mano si vuelve a pasar.
+
+`nav-probe.yml` se conserva como **diagnóstico manual opcional** (*Actions → NAV probe (diagnóstico) → Run workflow*; solo `workflow_dispatch`, sin cron; no escribe en ningún sitio: ni Supabase, ni artefactos,
+ni Pages). Lee la lista de fichas con el mismo paso que el job personal (token, solo biblioteca estándar) y prueba cada una (#1, #2...) con variantes de la petición (`base`, `nocache`, `bust`, `fresh`, `browser`,
+`browser_fresh`, `passthrough`, `base_again`), la misma ficha en otros sitios de iShares (`alt:uk|de|ie|es|pro`) y las XHR/JSON que cite el HTML (`xhr1`...; descritas sin id ni nombre del producto). Por variante
+imprime el código HTTP, el tamaño, la **fecha y el valor del NAV** leídos y (opcional, `cache_headers`) las cabeceras de caché; nunca ISIN, nombres ni URLs. Termina con un `RESUMEN` por ficha y un `VEREDICTO`.
+Si `base` va por detrás de `fresh`/`bust`/`nocache` → caché del HTML (en el código sigue `fetch_ishares_nav_freshest`, que elige la fecha más reciente entre las variantes de `NAV_FETCH_VARIANTS`: basta
+añadir `"fresh"` a esa tupla); si solo `alt:*` o `xhr*` dan la fecha nueva → hay que cambiar de URL/fuente.
 
 ### Riesgos que conviene tener presentes
 
-* **Términos de uso de Yahoo Finance e iShares.** `yfinance` se documenta como herramienta de uso personal, y leer automáticamente ishares.com puede chocar con sus términos. Redistribuir sus
+* **Términos de uso de Yahoo Finance e iShares.** Hacerse pasar por un navegador (User-Agent) para esquivar protecciones anti-bots podría chocar con sus términos: por eso solo está en el diagnóstico manual, no en el scraper (que pide una sola vez cada ficha). `yfinance` se documenta como herramienta de uso personal, y leer automáticamente ishares.com puede chocar con sus términos. Redistribuir sus
   datos por Pages **a un círculo reducido** (el dueño y amigos) es un riesgo asumible y acotado; **no escala a un servicio abierto**: para eso haría falta una fuente con licencia de redistribución
   (Stooq, Twelve Data, Alpha Vantage, EOD...). Revisarlo es una decisión del dueño; aquí no se ha podido contrastar con los términos vigentes.
 * **Cuota de Yahoo**: sin SLA ni límite publicado, se limita por IP. El diseño incremental baja las peticiones a ~545 al día; aun así un 429 sostenido abandona Yahoo en ese run (los símbolos
