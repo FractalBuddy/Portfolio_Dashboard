@@ -926,7 +926,7 @@ def test_personal_los_pasos_con_token_importan_solo_biblioteca_estandar():
 
 def test_v2_el_readme_documenta_la_activacion_los_secretos_y_los_riesgos():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    wf = (WF / V2).read_text(encoding="utf-8") + (WF / PN).read_text(encoding="utf-8")
+    wf = (WF / V2).read_text(encoding="utf-8") + (WF / PN).read_text(encoding="utf-8") + (WF / "nav-probe.yml").read_text(encoding="utf-8")
     # cada secreto/variable que usan el workflow v2 y personal-nav está en el README
     for name in set(re.findall(r"(?:secrets|vars)\.([A-Z][A-Z0-9_]+)", wf)):
         assert name in readme, name

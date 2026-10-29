@@ -1444,33 +1444,63 @@ ISHARES_TRIES = 2           # un fallo transitorio (timeout, 5xx, corte de red) 
 ISHARES_RETRY_WAIT = 4      # segundos entre intentos
 
 
-_ISHARES_PAGES = {}   # url -> texto plano de la ficha, o la excepción con la que falló: UNA descarga por URL y run (BE-17)
+_ISHARES_PAGES = {}   # url (variante «base») o (url, variante) -> texto plano de la ficha, o la excepción con la que falló: UNA descarga por URL, variante y run (BE-17)
+
+ISHARES_UA = "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"
+# Solo para DIAGNÓSTICO (nav_probe.py) y para decidir con datos; NO es la variante por defecto: hacerse pasar por un navegador ante la protección anti-bots de un sitio es
+# una decisión del dueño (términos de uso), no una mejora técnica gratuita.
+ISHARES_UA_BROWSER = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+ISHARES_VARIANTS = ("base", "nocache", "bust", "fresh", "browser", "browser_fresh", "passthrough")
+NAV_FETCH_VARIANTS = ("base", "fresh")      # las que usa el scraper de datos propios: la ficha tal cual y la «fresca»; gana la fecha de NAV más reciente
 
 
-def _ishares_plain(product_url, label="ficha"):
+def ishares_request(product_url, variant="base", now_ms=None):
+    """(url, cabeceras) de una variante de la petición a la ficha. Cada variante prueba una hipótesis de por qué el scraper ve un NAV más viejo que el navegador:
+    nocache (Cache-Control/Pragma: no-cache), bust (parámetro `cb` único: salta cachés por URL), fresh (ambas), browser* (User-Agent y cabeceras de navegador),
+    passthrough (`siteEntryPassthrough=true`, el parámetro que usa iShares para saltar su pantalla de entrada). `base` es exactamente la petición de siempre."""
+    if variant not in ISHARES_VARIANTS:
+        raise ValueError("variante desconocida: %r" % (variant,))
+    headers = {"User-Agent": ISHARES_UA}
+    url = product_url
+    if variant.startswith("browser"):
+        headers = {"User-Agent": ISHARES_UA_BROWSER, "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8", "Accept-Language": "en-US,en;q=0.9"}
+    if variant in ("nocache", "fresh", "browser_fresh"):
+        headers.update({"Cache-Control": "no-cache", "Pragma": "no-cache"})
+    extra = None
+    if variant in ("bust", "fresh", "browser_fresh"):
+        extra = "cb=%d" % (now_ms if now_ms is not None else int(time.time() * 1000))
+    elif variant == "passthrough":
+        extra = "siteEntryPassthrough=true"
+    if extra:
+        url = product_url + ("&" if "?" in product_url else "?") + extra
+    return url, headers
+
+
+def _ishares_plain(product_url, label="ficha", variant="base"):
     """Texto plano (sin etiquetas) de la ficha de producto de iShares, con UNA sola descarga por URL y por run: el NAV y la ficha de
     «Key Facts» salen de la misma página y antes la bajaban dos veces (el doble de peticiones a ishares.com, y los facts sin reintento).
     Reintenta UNA vez solo ante fallos transitorios (timeout, error de conexión, HTTP 5xx/429): un 403/404 o una página de captcha
     (200 sin el patrón) no se arreglan reintentando. El fallo también se recuerda (no se vuelve a pedir una página que ya ha fallado).
-    Lanza la excepción si no se pudo."""
-    hit = _ISHARES_PAGES.get(product_url)
+    `variant`: ver ishares_request (por defecto la petición de siempre). Lanza la excepción si no se pudo."""
+    key = product_url if variant == "base" else (product_url, variant)
+    hit = _ISHARES_PAGES.get(key)
     if isinstance(hit, Exception):
         raise hit
     if hit is not None:
         return hit
-    headers = {"User-Agent": "Mozilla/5.0 (compatible; personal-portfolio-dashboard/1.0)"}
+    url, headers = ishares_request(product_url, variant)
     err = None
     for attempt in range(ISHARES_TRIES):
         if _budget_exhausted():
             err = TimeoutError("presupuesto de tiempo del job agotado")
             break
         try:
-            res = requests.get(product_url, headers=headers, timeout=_net_timeout(20))
+            res = requests.get(url, headers=headers, timeout=_net_timeout(20))
             res.raise_for_status()
             # Strip tags to plain text so we don't depend on exact HTML structure/classes.
             plain = re.sub(r'<[^>]+>', ' ', res.text)
             plain = re.sub(r'\s+', ' ', plain)
-            _ISHARES_PAGES[product_url] = plain
+            _ISHARES_PAGES[key] = plain
             return plain
         except Exception as e:
             err = e
@@ -1482,7 +1512,7 @@ def _ishares_plain(product_url, label="ficha"):
                 continue
             break
     if not isinstance(err, TimeoutError):      # un fallo por falta de presupuesto no es de la página: no se recuerda
-        _ISHARES_PAGES[product_url] = err
+        _ISHARES_PAGES[key] = err
     raise err
 
 
@@ -1497,6 +1527,36 @@ def fetch_ishares_nav(product_url, isin):
     except Exception as e:
         print(f"  ! ishares scrape failed for {isin}: {e} -- falling back to proxy", file=sys.stderr)
         return None
+
+
+def fetch_ishares_nav_freshest(product_url, isin, variants=NAV_FETCH_VARIANTS):
+    """Como fetch_ishares_nav, pero pide la ficha con cada variante de la petición (ver ishares_request) y se queda con el NAV de fecha MÁS RECIENTE
+    (empate: la última variante, la «fresca»). Defensa contra una copia en caché más vieja que la que ve un navegador. Añade al resultado `nav_variant`
+    (qué variante ganó) y, si una variante distinta de `base` supera a `base`, `nav_gain_days` (días de ventaja). La ficha ganadora pasa a ser la que
+    usa fetch_ishares_fund_facts (una sola ficha por URL). Nunca lanza: None si ninguna variante da un NAV fiable."""
+    found = []
+    for v in variants:
+        try:
+            r = parse_ishares_nav(_ishares_plain(product_url, isin, v), isin)
+        except Exception as e:
+            print(f"  ! ishares scrape failed for {isin} ({v}): {e}", file=sys.stderr)
+            r = None
+        if r:
+            found.append((v, r))
+    if not found:
+        print(f"  ! ishares scrape failed for {isin} (todas las variantes) -- falling back to proxy", file=sys.stderr)
+        return None
+    best = found[0]
+    for cand in found[1:]:
+        if (cand[1].get("nav_date_iso") or "") >= (best[1].get("nav_date_iso") or ""):
+            best = cand
+    out = dict(best[1], nav_variant=best[0])
+    base = dict(found).get("base")
+    if best[0] != "base" and base and base.get("nav_date_iso") and out.get("nav_date_iso") and out["nav_date_iso"] > base["nav_date_iso"]:
+        out["nav_gain_days"] = (datetime.strptime(out["nav_date_iso"], "%Y-%m-%d") - datetime.strptime(base["nav_date_iso"], "%Y-%m-%d")).days
+    if best[0] != "base" and (product_url, best[0]) in _ISHARES_PAGES:
+        _ISHARES_PAGES[product_url] = _ISHARES_PAGES[(product_url, best[0])]
+    return out
 
 
 # La unidad viene en cualquier capitalización ("EUR 1.20 B", "USD 29.5 bn", "EUR 820.50 M"). Sin unidad, iShares escribe el número

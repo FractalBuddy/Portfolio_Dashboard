@@ -181,13 +181,29 @@ El backend **no** lleva en el repo ISIN, fondos clase S ni listas del dueño (el
   si algún fondo se queda sin NAV exacto, o si la página trae varios «NAV as of» distintos (`nav_varios`: se usa el primero);
 * privacidad: los logs de un repo público son públicos, así que `personal_v2.py` solo escribe contadores (nunca ISIN, símbolos, URL, clave ni token); el payload nunca va en un artefacto;
   el token solo está en los pasos de biblioteca estándar (`python3 -S`), no en el paso que ejecuta código de terceros;
-* **coste** (medidas simuladas y estimaciones en `auditorias/FIXES_FEED_V2_F.md`): por run, una petición a iShares por ficha y una a Yahoo por símbolo **único** (los proxies de los fondos y los símbolos
+* **coste** (medidas simuladas y estimaciones en `auditorias/FIXES_FEED_V2_F.md`): por run, **dos** peticiones a iShares por ficha (la de siempre y una «fresca» con `Cache-Control: no-cache` y un parámetro único `cb`; el scraper se queda con la fecha de NAV más reciente, ver «Desfase de fecha del NAV») y una a Yahoo por símbolo **único** (los proxies de los fondos y los símbolos
   fuera del universo público; los que siguen varios usuarios se bajan una sola vez), ~1,5–2 min de runner (casi todo es `pip install`). Con dos fondos y sus dos proxies: ~70 peticiones a Yahoo al día
   frente a ~545 del feed público. Si algún día el repo pasara a **privado**, 34 runs × ~2 min × ~22 días son ~1.500 min/mes: casi todo el cupo gratuito.
 
+#### Desfase de fecha del NAV (navegador 28/Oct, scraper 27/Oct) y diagnóstico manual
+
+Hipótesis (no demostrada desde la sesión de desarrollo, que no llega a ishares.com): el HTML de la ficha viene de una **caché** (CDN) más vieja que la que recibe un navegador, o el navegador
+obtiene el NAV por otra vía (XHR/JSON, sesión). Qué hay hecho:
+
+* **Mitigación en el scraper de datos propios**: para cada ficha se piden dos variantes (`base`, la petición de siempre, y `fresh`: `Cache-Control: no-cache`, `Pragma: no-cache` y `?cb=<ms>`) y se
+  publica el NAV de **fecha más reciente** (empate: `fresh`). El log del build lo dice sin identificar fondos: fecha de NAV más reciente y más antigua, «variante de la petición ganadora: fresh x1»
+  y «una variante distinta de la base adelantó la fecha en N fondos (hasta +K d)». La variante con User-Agent de navegador **no** se usa por defecto (ver riesgos).
+* **Diagnóstico manual `nav-probe.yml`** (*Actions → NAV probe (diagnóstico) → Run workflow*; nunca se programa; no escribe en ningún sitio: ni Supabase, ni artefactos, ni Pages): lee la lista de fichas con el
+  mismo paso que el job personal (token, solo biblioteca estándar) y prueba cada una (#1, #2...) con las variantes `base`, `nocache`, `bust`, `fresh`, `browser`, `browser_fresh`, `passthrough`, `base_again`
+  y la misma ficha en otros sitios de iShares (`alt:uk`, `alt:de`, `alt:ie`, `alt:es`, `alt:pro`), y busca en el HTML las XHR/JSON (`*.ajax`, `*.json`; las describe sin id ni nombre del producto) y las prueba
+  (`xhr1`...). Por variante imprime el código HTTP, el tamaño, la **fecha y el valor del NAV** leídos y (opcional, `cache_headers`) las cabeceras de caché de la respuesta (`Age`, `Cache-Control`, `Date`...).
+  Nunca ISIN, nombres ni URLs. Termina con un `RESUMEN` por ficha (qué variantes dan la fecha más reciente) y un `VEREDICTO`.
+  Cómo leerlo: si `base` da 27/Oct y `fresh`/`bust`/`nocache` dan 28/Oct → era la caché (ya mitigado; se puede quitar `base`). Si solo `alt:*` o `xhr*` dan 28/Oct → hay que cambiar de URL/fuente. Si `base_again`
+  cambia respecto a `base` → varios nodos de caché con contenidos distintos. Si ninguna da 28/Oct → el navegador usa cookies/sesión/JS y hay que mirar las XHR del navegador (pestaña Red).
+
 ### Riesgos que conviene tener presentes
 
-* **Términos de uso de Yahoo Finance e iShares.** `yfinance` se documenta como herramienta de uso personal, y leer automáticamente ishares.com puede chocar con sus términos. Redistribuir sus
+* **Términos de uso de Yahoo Finance e iShares.** Las peticiones «frescas» (sin caché, parámetro único) duplican las lecturas de cada ficha, y hacerse pasar por un navegador (User-Agent) para esquivar protecciones anti-bots podría chocar con sus términos: por eso solo está en el diagnóstico, no en el scraper. `yfinance` se documenta como herramienta de uso personal, y leer automáticamente ishares.com puede chocar con sus términos. Redistribuir sus
   datos por Pages **a un círculo reducido** (el dueño y amigos) es un riesgo asumible y acotado; **no escala a un servicio abierto**: para eso haría falta una fuente con licencia de redistribución
   (Stooq, Twelve Data, Alpha Vantage, EOD...). Revisarlo es una decisión del dueño; aquí no se ha podido contrastar con los términos vigentes.
 * **Cuota de Yahoo**: sin SLA ni límite publicado, se limita por IP. El diseño incremental baja las peticiones a ~545 al día; aun así un 429 sostenido abandona Yahoo en ese run (los símbolos

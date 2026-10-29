@@ -274,6 +274,11 @@ def nav_entry(fund, scraped, facts, warn, stats=None):
                 warn("nav_varios")                               # la página trae varios «NAV as of» distintos: se usó el primero (decisión previa)
             if stats is not None and isinstance(scraped.get("nav_decimals"), int):
                 stats["decimals"][scraped["nav_decimals"]] = stats["decimals"].get(scraped["nav_decimals"], 0) + 1
+            if stats is not None:
+                if isinstance(scraped.get("nav_variant"), str) and re.fullmatch(r"[a-z_]{1,16}", scraped["nav_variant"]):
+                    stats.setdefault("variants", {})[scraped["nav_variant"]] = stats.get("variants", {}).get(scraped["nav_variant"], 0) + 1
+                if isinstance(scraped.get("nav_gain_days"), int) and scraped["nav_gain_days"] > 0:
+                    stats.setdefault("gains", []).append(scraped["nav_gain_days"])
             for k in ("nav_date", "nav_date_iso", "nav_stale", "change_pct", "wk52_low", "wk52_high"):
                 if scraped.get(k) is not None:
                     out[k] = scraped[k]
@@ -357,6 +362,12 @@ def nav_report(payloads, now, warn_days=NAV_WARN_DAYS, stats=None):
     dec = (stats or {}).get("decimals") or {}
     if dec:
         line += ", decimales del NAV: " + "/".join("%d (x%d)" % (k, n) for k, n in sorted(dec.items()))
+    var = (stats or {}).get("variants") or {}
+    if var:
+        line += ", variante de la petición ganadora: " + "/".join("%s x%d" % (k, n) for k, n in sorted(var.items()))
+    gains = (stats or {}).get("gains") or []
+    if gains:
+        line += ", una variante distinta de la base adelantó la fecha en %d fondos (hasta +%d d)" % (len(gains), max(gains))
     line += " [run %s]" % now.strftime("%Y-%m-%dT%H:%MZ")
     old = sum(1 for d in dated if age(d) > warn_days)
     warns = []
@@ -381,7 +392,7 @@ def default_fetchers():
     def series(sym):
         df = fm.yf_history(sym, period="2y", interval="1d", auto_adjust=False)
         return f2.bars_from_df(df, datetime.now(timezone.utc).date()), df.attrs.get("currency")
-    return Fetchers(fm.fetch_ishares_nav, fm.fetch_ishares_fund_facts, series), fm._plain_text
+    return Fetchers(fm.fetch_ishares_nav_freshest, fm.fetch_ishares_fund_facts, series), fm._plain_text
 
 
 # ------------------------------------------------------------------------------------------------------------------------------

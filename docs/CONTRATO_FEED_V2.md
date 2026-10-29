@@ -582,6 +582,7 @@ Supabase y lo escribe el backend con dos RPC. El código del repo no contiene ni
 * **Quién publica y con qué cadencia**: el workflow `personal-nav.yml` (no `publish-feed-v2.yml`), cada 30 min de lunes a viernes entre 05:23 y 21:53 UTC (`23,53 5-21 * * 1-5`), con concurrencia
   propia: es el **único escritor** de `publish_personal_feed`. Cada llamada **sustituye** el payload del usuario (no hay lectura del anterior ni fusión), así que **cada run envía el payload completo**
   (`funds` y `series`): si una serie de Yahoo falla en un run, ese run publica sin ella hasta el siguiente. Un cliente debe tratar `generated_at` como «último intento correcto», no como «NAV de hoy».
+* **Variante de la petición**: por cada ficha se piden dos variantes (la normal y una sin caché con parámetro único) y se publica la de fecha de NAV más reciente; es un detalle del backend y no aparece en el payload.
 * **Frescura del NAV**: `funds[].nav_date_iso` es la fecha del NAV tal como la escribe la ficha de iShares (normalmente 1-2 días hábiles por detrás; `nav_stale` si supera 6 días). La ficha da el NAV con **2 decimales**
   (`EUR 12.48`); el backend lo guarda con 4 por prudencia, pero la precisión real es la de la ficha. Si la ficha trae varios «NAV as of» distintos se usa el primero. Sin NAV exacto (ficha ilegible, ISIN ausente,
   salto fuera de 0,5–2×) `source` es `"none"` y `price` es `null`: el cliente conserva su último valor. El log del paso de construcción solo imprime contadores y fechas de NAV (ver README), nunca ISIN ni nombres.

@@ -5,7 +5,7 @@ name: Personal NAV
 # contadores). Antes vivía como job `personal` dentro de publish-feed-v2 (4 runs al día): el NAV de iShares sale entre medias y el dashboard iba por detrás.
 #
 # Frecuencia: cada 30 min, de lunes a viernes, de 05:23 a 21:53 UTC (34 runs al día). Justificación (detalle y medidas en auditorias/FIXES_FEED_V2_F.md):
-#   * Un run cuesta ~2 peticiones a iShares (una por ficha) + ~2 a Yahoo (los proxies de los fondos que NO están en el universo público) y ~1,5-2 min de runner;
+#   * Un run cuesta ~4 peticiones a iShares (2 fichas x 2 variantes de la petición: la de siempre y la «fresca», sin caché; gana la fecha de NAV más reciente) + ~2 a Yahoo (los proxies de los fondos que NO están en el universo público) y ~1,5-2 min de runner;
 #     el feed público hace ~545 peticiones a Yahoo al día; este workflow ~70 con dos fondos y sus dos proxies (34 runs x 2). Con más símbolos sube en proporción (una descarga por símbolo único y run). Repo público => minutos de Actions gratuitos.
 #   * Solo laborables: la ficha no cambia en fin de semana. Ventana 05-21 UTC: cubre la mañana y la tarde europeas (verano e invierno).
 #   * Minutos «feos» (:23 y :53) a propósito: GitHub retrasa y a veces descarta los cron en :00/:30; tampoco coinciden con update-data (:17) ni con
