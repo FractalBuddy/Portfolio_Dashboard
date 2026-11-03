@@ -1,0 +1,82 @@
+name: Personal full
+
+# Datos PROPIOS del dueño, payload COMPLETO (funds + series con el histórico largo de los proxies), 4 veces al día. La lista a seguir se lee de Supabase y el resultado se
+# publica de vuelta con publish_personal_feed; NUNCA en el repo, en un artefacto ni en los logs (los de un repo público son públicos: solo contadores).
+# El NAV de iShares con más frecuencia (cada ~30 min) lo publica personal-nav.yml con la RPC publish_personal_nav; aquí el NAV se vuelve a leer igualmente, así que este
+# job funciona SOLO (también antes de que exista esa RPC) y es el que CREA el payload de un usuario nuevo (publish_personal_nav devuelve no_payload hasta entonces).
+#
+# Frecuencia: 06:38, 11:38, 15:38 y 21:38 UTC, todos los días (misma cadencia de 4 al día que el feed público v2: 06:47, 11:47, 15:47, 21:47). Motivos:
+#   * El histórico de los proxies solo cambia al cerrar cada bolsa: 4 fotos al día cubren la apertura europea (06:38, con el cierre de ayer), la tarde europea (11:38, 15:38) y el cierre
+#     de EE. UU. (21:38: Nueva York cierra a las 20:00-21:00 UTC según el horario de verano). Más runs no aportarían series nuevas y cada uno cuesta ~2 peticiones a Yahoo por proxy con `period=max`.
+#   * Todos los días (no solo laborables): un usuario nuevo recibe su payload completo en ≤ 6 h aunque lo añada en fin de semana; en fin de semana solo se repite lo del viernes.
+#   * Minuto :38, a propósito: cae a mitad de camino entre los runs de NAV (:23 y :53), a ≥ 15 min de cada uno (el run completo dura ~2 min), y no coincide con update-data (:17) ni con
+#     publish-feed-v2 (:47). GitHub retrasa y a veces descarta los cron en :00/:30. Un run descartado o retrasado no importa: el siguiente publica el estado completo.
+#
+# Relación con personal-nav.yml (NO comparten concurrencia, a propósito):
+#   * Los dos escriben el mismo payload de usuario en Supabase: este lo SUSTITUYE entero (publish_personal_feed) y el de NAV fusiona solo `funds` (publish_personal_nav). Si un run de NAV
+#     publicase justo entre la lectura de la ficha de este run y su publicación, este run reescribiría ese NAV con el que él leyó unos minutos antes; se corrige solo en el siguiente run de
+#     NAV (≤ 30 min, y la RPC de NAV no acepta un NAV con nav_date_iso más antigua que el guardado) y por el desfase de minutos de arriba es muy improbable. No se compensa serializando:
+#     con un grupo de concurrencia común GitHub guarda UN solo run pendiente y un run de NAV pendiente descartaría a este (que solo ocurre 4 veces al día y es el que crea los payloads).
+#   * Dos runs de ESTE job nunca se pisan: grupo propio `personal-full`.
+#
+# Mientras la variable de repo FEED_V2_ENABLED no valga `true` el cron NO hace nada; el lanzamiento manual (Run workflow) funciona siempre.
+# Si la lista de Supabase no tiene nada que refrescar (ningún fondo con ficha de iShares ni símbolos) el job sale justo después de leerla, sin instalar nada.
+on:
+  schedule:
+    - cron: '38 6,11,15,21 * * *'
+  workflow_dispatch:
+
+# Por defecto NADA. El único job pide solo lectura del repo.
+permissions: {}
+
+# Nunca dos runs a la vez: cada run publica el payload COMPLETO del usuario (la RPC lo sustituye), así que un run viejo que termine después de uno nuevo pisaría datos frescos con
+# datos viejos. Grupo PROPIO, distinto del de NAV (ver arriba). `cancel-in-progress: false`: un run a medias nunca se mata a mitad de publicación.
+concurrency:
+  group: personal-full
+  cancel-in-progress: false
+
+jobs:
+  personal-full:
+    if: ${{ github.event_name != 'schedule' || vars.FEED_V2_ENABLED == 'true' }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+          cache: pip
+
+      # Solo biblioteca estándar (`python3 -S`: sin site-packages, ningún paquete de terceros puede cargarse). Escribe work=true|false en $GITHUB_OUTPUT.
+      - name: Read personal watch list (token, stdlib only)
+        id: watch
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY || vars.SUPABASE_PUBLISHABLE_KEY }}
+          PERSONAL_FEED_TOKEN: ${{ secrets.PERSONAL_FEED_TOKEN }}
+        run: python3 -S scripts/personal_v2.py watch --dir "$RUNNER_TEMP/personal" --github-output
+
+      # Solo lo fijado en requirements.txt (versiones exactas + hashes). Se omite (con el resto) si no hay nada que refrescar.
+      - name: Install dependencies (hash-pinned)
+        if: ${{ steps.watch.outputs.work == 'true' }}
+        run: pip install --require-hashes --no-deps -r requirements.txt
+
+      # Código de terceros (yfinance, requests...): NO recibe el token. Imprime solo contadores de frescura (ver personal_v2.py).
+      - name: Build personal payloads (third-party code, NO token)
+        if: ${{ steps.watch.outputs.work == 'true' }}
+        run: python scripts/personal_v2.py build --dir "$RUNNER_TEMP/personal" --registry registry.json
+
+      - name: Publish personal payloads (token, stdlib only)
+        if: ${{ steps.watch.outputs.work == 'true' }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY || vars.SUPABASE_PUBLISHABLE_KEY }}
+          PERSONAL_FEED_TOKEN: ${{ secrets.PERSONAL_FEED_TOKEN }}
+        run: python3 -S scripts/personal_v2.py publish --dir "$RUNNER_TEMP/personal"

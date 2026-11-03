@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  pull_request: {}
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+
+      - name: Python syntax
+        run: python -m py_compile scripts/*.py tests/*.py
+
+      # Dependencias reales del script (los tests importan fetch_market_data) + herramientas de CI (pytest, ruff, PyYAML: lo usan los
+      # tests de los workflows), todas con versión exacta y hashes. Las herramientas viven en requirements-dev.txt (y no inline aquí)
+      # para que Dependabot las vea y proponga las subidas (BE-16).
+      - name: Install dependencies
+        run: |
+          pip install --require-hashes --no-deps -r requirements.txt
+          pip install --require-hashes --no-deps -r requirements-dev.txt
+
+      - name: Ruff (solo reglas F de pyflakes)
+        run: ruff check --select F scripts tests
+
+      - name: Tests (sanity-check del feed, scrape de iShares, FRED, noticias)
+        run: python -m pytest -q
+
+      # actionlint no viene garantizado en el runner: si no está, se avisa y se sigue (no se descarga nada de terceros).
+      - name: actionlint (si está disponible)
+        run: |
+          if command -v actionlint >/dev/null 2>&1; then
+            actionlint
+          else
+            echo "::notice::actionlint no está disponible en este runner: se omite"
+          fi
+
+      # Coherente con .gitignore: falla si hay versionado algo que .gitignore excluye (`git ls-files -ci`), y además
+      # repasa a mano los patrones peligrosos por si alguien debilita el .gitignore. .env.example sí se permite.
+      - name: No personal files committed
+        run: |
+          bad=$( { git ls-files -ci --exclude-standard
+                   git ls-files '*.html' '*backup*' '*export*' '*.env' '.env*' '*.csv' '*.xlsx' '*.zip' '*.pem' '*.key' 'data.json' 'meta.json'
+                 } | grep -v -E '(^|/)\.env\.example$' | sort -u || true)
+          if [ -n "$bad" ]; then echo "::error::Ficheros que no deberían estar en el repo público:"; echo "$bad"; exit 1; fi

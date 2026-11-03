@@ -1,0 +1,295 @@
+name: Update market data
+
+on:
+  schedule:
+    # 4x/day (UTC): 06:17, 11:17, 15:17, 21:17 (minuto «feo» a propósito: los cron en :00 son los que más retrasa GitHub).
+    # La última a las 21:17 y no a las 20:17: Wall Street cierra a las 20:00 UTC con horario de verano y a las 21:00 UTC en invierno, así que
+    # a las 20:17 la barra diaria de un día de invierno salía parcial (sesión aún abierta) (BE-20).
+    - cron: '17 6,11,15,21 * * *'
+  workflow_dispatch:   # ejecución manual desde la pestaña Actions
+    inputs:
+      allow_regression:
+        description: 'Publicar aunque el feed sea peor que el anterior (símbolos desaparecidos, histórico más corto, NAV perdido, tamaño). Úsalo tras cambiar a propósito la lista de símbolos; las reglas absolutas siguen bloqueando.'
+        type: boolean
+        default: false
+
+# Por defecto TODO solo lectura. Solo el job `publish` recibe contents: write, y solo ejecuta código de este repo
+# (scripts/sanity_check.py, solo biblioteca estándar): nunca instala ni ejecuta paquetes de terceros.
+permissions:
+  contents: read
+
+# Never let two runs overlap (a manual run during a scheduled one, or a slow run still
+# going when the next cron fires): they'd race on the same branch. `cancel-in-progress: false`
+# means a half-finished run is never killed mid-publish. Pero NO es una cola: GitHub guarda como
+# mucho UN run pendiente por grupo, y un tercero sustituye al pendiente (el pendiente se cancela).
+# Es inocuo: cada run baja datos frescos y el siguiente cron/dispatch recupera lo que falte.
+concurrency:
+  group: update-market-data
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    # Instala dependencias flotantes (yfinance...) y ejecuta código de terceros: por eso NO tiene permiso de escritura ni secretos salvo FRED.
+    # Su salida (data.json) se trata como NO fiable: la valida el job `publish` antes de publicar.
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20   # a hung Yahoo/FRED request can't burn Actions minutes forever
+    steps:
+      # Third-party actions are pinned to a full commit SHA (the tag in the comment is only
+      # for humans). Dependabot (.github/dependabot.yml) opens a PR when a new one is out.
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+          cache: pip
+
+      # Este es el job que ejecuta código de terceros con FRED_API_KEY en el entorno: se instala SOLO lo fijado en requirements.txt
+      # (versiones exactas + hashes, generado desde requirements.in) y pip rechaza cualquier archivo cuyo hash no coincida (BE-07).
+      - name: Install dependencies (hash-pinned)
+        run: pip install --require-hashes --no-deps -r requirements.txt
+
+      # Feed publicado anteriormente (repo público, sin token). Solo lo usa el script para reutilizar tipos/IPC
+      # (marcados stale) si FRED falla. Primer run / rama borrada (404): '{}'. Cualquier otro fallo: '{}' + aviso (la decisión es del job `publish`).
+      - name: Download previous feed (for FRED fallback)
+        run: |
+          # 200 = hay feed anterior (la rama `data` existe); 404 = primer run o rama borrada (único caso legítimo de «sin anterior»);
+          # cualquier otra cosa es un fallo de descarga y NO debe desactivar en silencio las reglas de regresión (BE-06).
+          code=$(curl -sS --max-time 60 --retry 3 --retry-all-errors -o prev.json -w '%{http_code}' "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/data/data.json" || true)
+          case "$code" in
+            200) echo "EXPECT_PREV=true" >> "$GITHUB_ENV" ;;
+            404) echo "::notice::sin feed anterior (HTTP 404): primer run o rama data borrada"; echo '{}' > prev.json ;;
+            *)   echo "::warning::no se pudo bajar el feed anterior (HTTP ${code:-sin respuesta}): el sanity-check lo tratará como fallo, no como primer run"
+                 echo '{}' > prev.json; echo "EXPECT_PREV=true" >> "$GITHUB_ENV" ;;
+          esac
+
+      - name: Fetch market data
+        env:
+          FRED_API_KEY: ${{ secrets.FRED_API_KEY }}
+          PREV_FEED_PATH: prev.json
+        run: python scripts/fetch_market_data.py
+
+      - name: Upload feed artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: market-data
+          path: |
+            data.json
+            meta.json
+          retention-days: 1
+          if-no-files-found: error
+
+  publish:
+    needs: fetch
+    # Único job con permiso de escritura. No hace pip install ni ejecuta código de terceros: baja el artefacto, lo VALIDA con
+    # scripts/sanity_check.py (sacado del repo, no del artefacto, para que `fetch` no pueda alterar el validador) y solo
+    # entonces publica.
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      generated_at: ${{ steps.meta.outputs.generated_at }}
+      alerts: ${{ steps.alerts.outputs.alerts }}
+    steps:
+      # Solo scripts/, sin credenciales persistentes en .git/config (el push de más abajo usa el token explícitamente).
+      - name: Check out scripts/ only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: scripts
+          persist-credentials: false
+
+      - name: Download feed artifact
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: market-data
+          path: feed
+
+      # Feed publicado anteriormente: base de las reglas de regresión del sanity-check. 404 (primer run) => '{}' => solo reglas absolutas;
+      # otro fallo => EXPECT_PREV=true => el sanity-check bloquea (o, con allow_regression, avisa con Alert) en vez de saltarse la regresión.
+      - name: Download previous feed
+        run: |
+          # 200 = hay feed anterior (la rama `data` existe); 404 = primer run o rama borrada (único caso legítimo de «sin anterior»);
+          # cualquier otra cosa es un fallo de descarga y NO debe desactivar en silencio las reglas de regresión (BE-06).
+          code=$(curl -sS --max-time 60 --retry 3 --retry-all-errors -o prev.json -w '%{http_code}' "https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/data/data.json" || true)
+          case "$code" in
+            200) echo "EXPECT_PREV=true" >> "$GITHUB_ENV" ;;
+            404) echo "::notice::sin feed anterior (HTTP 404): primer run o rama data borrada"; echo '{}' > prev.json ;;
+            *)   echo "::warning::no se pudo bajar el feed anterior (HTTP ${code:-sin respuesta}): el sanity-check lo tratará como fallo, no como primer run"
+                 echo '{}' > prev.json; echo "EXPECT_PREV=true" >> "$GITHUB_ENV" ;;
+          esac
+
+      # Nunca publicar algo que no sea un data.json sano: un run que "termina bien" pero produjo un feed vacío/parcial/degradado
+      # no debe pisar el último dato bueno. Si falla, el job falla ANTES del push y el heartbeat manda /fail.
+      - name: Sanity-check feed
+        env:
+          FRED_KEY_SET: ${{ secrets.FRED_API_KEY != '' }}
+          SANITY_ALLOW_REGRESSION: ${{ inputs.allow_regression }}
+          EXPECT_PREV: ${{ env.EXPECT_PREV }}
+        run: python3 scripts/sanity_check.py --data feed/data.json --meta feed/meta.json --prev prev.json --alerts-out "$RUNNER_TEMP/alerts.txt"
+
+      # Avisos que merecen que el dueño se entere (Yahoo degradado: precios antiguos varios días, fundamentales sin refrescar, tabla de
+      # valoración caída, NAV de iShares perdido, FRED atascado...). El feed SÍ se publica (los datos buenos siguen siendo los mejores
+      # disponibles); el heartbeat de abajo lo convierte en un /fail de Healthchecks con el texto, y se ve también en el resumen del run.
+      - name: Collect alerts
+        id: alerts
+        run: |
+          a=""
+          if [ -f "$RUNNER_TEMP/alerts.txt" ]; then a=$(tr -d '\r\n' < "$RUNNER_TEMP/alerts.txt" | cut -c1-900); fi
+          echo "alerts=$a" >> "$GITHUB_OUTPUT"
+          if [ -n "$a" ]; then
+            echo "::warning::DATOS DEGRADADOS (se publica igualmente): $a"
+            { echo "### ⚠️ Datos degradados"; echo; echo "$a" | sed 's/ | /\n- /g; s/^/- /'; } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # generated_at (ya validado: coincide en data.json y meta.json) se pasa a verify-cdn como salida del job.
+      - name: Read generated_at
+        id: meta
+        run: |
+          ga=$(python3 -c 'import json;print(json.load(open("feed/meta.json"))["generated_at"])')
+          case "$ga" in ""|*[!0-9A-Za-z:.+-]*) echo "::error::generated_at con formato inesperado"; exit 1;; esac
+          echo "generated_at=$ga" >> "$GITHUB_OUTPUT"
+
+      # The feed lives on its OWN orphan branch (`data`) that is replaced by a single fresh
+      # commit on every run, instead of adding a ~0.4MB commit to `main` 4x/day forever.
+      # Result: the repo never grows (main = code only; `data` = always exactly 1 commit),
+      # and there is nothing to `git pull --rebase` because nobody else ever pushes there
+      # (and the concurrency group above already serialises runs).
+      - name: Publish to data branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir /tmp/publish
+          cp feed/data.json feed/meta.json /tmp/publish/
+          cd /tmp/publish
+          git init -q -b data
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add data.json meta.json
+          git commit -q -m "Market data $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          # Un fallo transitorio de red no debe tirar el run: el force-push es idempotente, se reintenta 3 veces.
+          ok=0
+          for i in 1 2 3; do
+            if git push --force "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" data; then ok=1; break; fi
+            echo "::warning::git push falló (intento $i/3)"
+            if [ "$i" -lt 3 ]; then sleep 5; fi
+          done
+          if [ "$ok" -ne 1 ]; then echo "::error::no se pudo publicar la rama data tras 3 intentos"; exit 1; fi
+
+  # Purga y verificación de jsDelivr, FUERA del camino crítico: el dato ya está publicado en la rama `data` y no hay nada
+  # que hacer si el CDN va con retraso (cachea ramas hasta ~12 h). continue-on-error + no está en el `needs` del heartbeat:
+  # un CDN lento nunca marca el run como fallido ni dispara un /fail falso.
+  verify-cdn:
+    needs: publish
+    continue-on-error: true
+    permissions: {}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Purge jsDelivr CDN cache and verify
+        env:
+          WANT: ${{ needs.publish.outputs.generated_at }}
+          HC: ${{ secrets.HC_UPDATE_URL }}
+        run: |
+          # Best-effort: siempre termina con exit 0; si el CDN sigue desfasado deja un ::warning:: y un ping informativo (/log).
+          set -u
+          HC=${HC:-}
+          # Secreto de Healthchecks: se limpia (espacios, tabuladores, \r, \n, comillas o acentos graves envolventes: sobras típicas de copiar y pegar) y debe ser una
+          # URL https://hc-ping.com/...; si no lo es, aviso SIN el valor y se sigue sin llamar a curl (un secreto raro nunca se pasa a curl).
+          while :; do
+            case "$HC" in
+              [[:space:]]*|\"*|\'*|\`*) HC=${HC:1} ;;
+              *[[:space:]]|*\"|*\'|*\`) HC=${HC%?} ;;
+              *) break ;;
+            esac
+          done
+          hc_re='^https://hc-ping\.com/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*/?$'
+          if [ -n "$HC" ] && ! [[ $HC =~ $hc_re ]]; then
+            echo "::warning::HC_UPDATE_URL no tiene el formato https://hc-ping.com/<clave> (el valor no se muestra): no se envían avisos informativos a Healthchecks."
+            HC=""
+          fi
+          if [ -z "$WANT" ]; then echo "::warning::sin generated_at esperado: no se verifica el CDN"; exit 0; fi
+          for f in data.json meta.json; do
+            echo "purge $f:"
+            curl -sS --max-time 30 "https://purge.jsdelivr.net/gh/${GITHUB_REPOSITORY}@data/${f}" || echo "(purge fallido, no es crítico)"
+            echo
+          done
+          tries=6
+          got=""
+          want_bytes=""
+          have_bytes=""
+          for i in $(seq 1 "$tries"); do
+            meta=$(curl -fsS --max-time 20 "https://cdn.jsdelivr.net/gh/${GITHUB_REPOSITORY}@data/meta.json?cb=$RANDOM" 2>/dev/null || true)
+            got=$(printf '%s' "$meta" | python3 -c 'import sys,json;print(json.load(sys.stdin).get("generated_at",""))' 2>/dev/null | tr -d '\r\n' | cut -c1-64 || true)
+            want_bytes=$(printf '%s' "$meta" | python3 -c 'import sys,json;print(int(json.load(sys.stdin).get("data_bytes",0)))' 2>/dev/null | tr -d '\r\n' | cut -c1-12 || true)
+            have_bytes=""
+            if [ "$got" = "$WANT" ]; then
+              # El dashboard lee meta.json y, si cambia generated_at, descarga data.json: un borde que sirva el meta NUEVO con el data VIEJO
+              # lo engaña (BE-11). Se compara el tamaño real (descomprimido) de data.json con el data_bytes que declara el meta.
+              have_bytes=$(curl -fsS --compressed --max-time 60 "https://cdn.jsdelivr.net/gh/${GITHUB_REPOSITORY}@data/data.json?cb=$RANDOM" 2>/dev/null | wc -c | tr -d ' \r\n' || true)
+              if [ -n "$want_bytes" ] && [ "$want_bytes" != "0" ] && [ "$have_bytes" = "$want_bytes" ]; then echo "CDN sirve la versión nueva ($WANT, data.json $have_bytes bytes)"; exit 0; fi
+            fi
+            echo "intento $i/$tries: CDN sirve meta '$got' (esperado '$WANT'), data.json '${have_bytes:-sin comprobar}' bytes (esperado '${want_bytes:-?}')"
+            # sin dormir tras el último intento
+            if [ "$i" -lt "$tries" ]; then sleep $((i*20)); fi
+          done
+          msg="jsDelivr sigue sirviendo un meta.json o data.json antiguo (meta '${got:-vacío}', esperado '$WANT'; data.json '${have_bytes:-sin comprobar}' bytes, esperados '${want_bytes:-?}') tras $tries intentos"
+          echo "::warning::${msg}; la caché de rama puede tardar hasta ~12 h y el dashboard se pondrá al día solo."
+          if [ -n "${HC:-}" ]; then
+            curl -fsS -m 10 --retry 3 --retry-all-errors --data-raw "cdn-stale: ${msg}" "${HC%/}/log" >/dev/null || echo "::warning::no se pudo enviar el aviso informativo a Healthchecks (/log)"
+          fi
+          exit 0
+
+  # Latido para Healthchecks.io: avisa si el workflow FALLA, se CANCELA, agota el timeout o deja de ejecutarse del todo
+  # (cron desactivado, scheduler caído). La URL va en el secreto HC_UPDATE_URL (nunca en el repo, que es público).
+  # Solo depende de fetch y publish: el desfase del CDN (verify-cdn) no cuenta como fallo.
+  heartbeat:
+    needs: [fetch, publish]
+    if: ${{ always() }}
+    permissions: {}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Ping Healthchecks.io
+        env:
+          HC: ${{ secrets.HC_UPDATE_URL }}
+          FETCH: ${{ needs.fetch.result }}
+          PUBLISH: ${{ needs.publish.result }}
+          ALERTS: ${{ needs.publish.outputs.alerts }}
+        run: |
+          # Secreto de Healthchecks: se limpia (espacios, tabuladores, \r, \n, comillas o acentos graves envolventes: sobras típicas de copiar y pegar) y debe ser una
+          # URL https://hc-ping.com/...; si no lo es, aviso SIN el valor y se sigue sin llamar a curl (un secreto raro nunca se pasa a curl).
+          while :; do
+            case "$HC" in
+              [[:space:]]*|\"*|\'*|\`*) HC=${HC:1} ;;
+              *[[:space:]]|*\"|*\'|*\`) HC=${HC%?} ;;
+              *) break ;;
+            esac
+          done
+          hc_re='^https://hc-ping\.com/[A-Za-z0-9_-]+(/[A-Za-z0-9_-]+)*/?$'
+          if [ -z "$HC" ]; then
+            echo "::warning::HC_UPDATE_URL está vacío o no existe: no se avisa a Healthchecks y nadie se enterará si el workflow falla."
+            exit 0
+          fi
+          if ! [[ $HC =~ $hc_re ]]; then
+            echo "::warning::HC_UPDATE_URL no tiene el formato https://hc-ping.com/<clave> (el valor no se muestra): no se avisa a Healthchecks y nadie se enterará si el workflow falla."
+            exit 0
+          fi
+          HC="${HC%/}"
+          if [ "$FETCH" = "success" ] && [ "$PUBLISH" = "success" ]; then
+            if [ -n "${ALERTS:-}" ]; then
+              # Publicado, pero con datos degradados: Healthchecks lo marca como caído con el motivo (el siguiente run limpio lo recupera).
+              curl -fsS -m 10 --retry 5 --retry-all-errors --data-raw "degraded: ${ALERTS}" "$HC/fail" >/dev/null
+              exit 0
+            fi
+            url="$HC"
+          else
+            url="$HC/fail"
+          fi
+          curl -fsS -m 10 --retry 5 --retry-all-errors "$url" >/dev/null

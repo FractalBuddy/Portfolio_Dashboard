@@ -1,0 +1,126 @@
+name: Personal NAV
+
+# Job SOLO NAV de los datos PROPIOS del dueño: cada ~30 min lee la lista de Supabase (personal_watch_for_backend), visita ÚNICAMENTE las fichas de iShares de cada fondo (una petición por ficha;
+# nada de Yahoo ni de series) y publica el resultado con la RPC publish_personal_nav(p_token, p_user, p_funds) (< 1 KB por fondo; tope 64 KB). La RPC fusiona esos fondos en el payload
+# completo que ya tiene el usuario. El payload completo (con las series largas de los proxies) lo publica personal-full.yml 4 veces al día con publish_personal_feed. Detalle y contrato
+# en docs/CONTRATO_FEED_V2.md §5 y medidas en auditorias/FIXES_G2_NAV_SOLO.md. Nada del dueño va al repo, a un artefacto ni a los logs (los de un repo público son públicos): una
+# línea por run con contadores, la fecha del NAV más reciente y el resultado de la RPC.
+#
+# Frecuencia: cada 30 min, de lunes a viernes, de 05:23 a 21:53 UTC (34 runs al día). Justificación:
+#   * Un run cuesta ~1 petición a iShares por fondo (<= 2 con dos fondos) y ~30 s de runner (checkout + dependencias con caché); el feed público hace ~545 peticiones a Yahoo al día y este
+#     workflow ya no hace ninguna. Repo público => minutos de Actions gratuitos.
+#   * Solo laborables: la ficha no cambia en fin de semana. Ventana 05-21 UTC: cubre la mañana y la tarde europeas (verano e invierno).
+#   * Minutos «feos» (:23 y :53) a propósito: GitHub retrasa y a veces descarta los cron en :00/:30; tampoco coinciden con update-data (:17), publish-feed-v2 (:47) ni personal-full (:38).
+#     Un run descartado o retrasado no importa: cada run envía todos los fondos y el siguiente lo corrige.
+#
+# Compatibilidad con el SQL: mientras publish_personal_nav no exista en Supabase, el run FALLA con un error claro («RPC publish_personal_nav no existe todavía») y no publica nada; el job
+# personal-full sigue publicando por su cuenta, así que se puede mergear este cambio antes o después de aplicar el SQL. Solo si la variable de repo PERSONAL_NAV_FALLBACK_FULL vale `1`
+# (apagada por defecto), en ese caso concreto el run publica el payload COMPLETO como antes (pasos «fallback»).
+#
+# Mientras la variable de repo FEED_V2_ENABLED no valga `true` el cron NO hace nada; el lanzamiento manual (Run workflow) funciona siempre.
+# Si la lista de Supabase no tiene ningún fondo con ficha de iShares el job sale justo después de leerla, sin instalar nada.
+# Latido opcional: el secreto HEALTHCHECK_PERSONAL_NAV_URL (vacío = no hace nada), ver README.
+on:
+  schedule:
+    - cron: '23,53 5-21 * * 1-5'
+  workflow_dispatch:
+
+# Por defecto NADA. El único job pide solo lectura del repo.
+permissions: {}
+
+# Nunca dos runs de NAV a la vez (grupo PROPIO, distinto del de personal-full). La RPC ya protege del pisado (no sustituye un NAV por otro de fecha más antigua), pero no hace falta
+# provocarlo. `cancel-in-progress: false`: un run a medias nunca se mata a mitad de publicación. GitHub guarda UN run pendiente por grupo; es inocuo (cada run lee lo más reciente).
+concurrency:
+  group: personal-nav
+  cancel-in-progress: false
+
+jobs:
+  personal-nav:
+    if: ${{ github.event_name != 'schedule' || vars.FEED_V2_ENABLED == 'true' }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+          cache: pip
+
+      # Solo biblioteca estándar (`python3 -S`: sin site-packages, ningún paquete de terceros puede cargarse). Escribe work=true|false en $GITHUB_OUTPUT.
+      - name: Read personal watch list (token, stdlib only)
+        id: watch
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY || vars.SUPABASE_PUBLISHABLE_KEY }}
+          PERSONAL_FEED_TOKEN: ${{ secrets.PERSONAL_FEED_TOKEN }}
+        run: python3 -S scripts/personal_v2.py watch --nav-only --dir "$RUNNER_TEMP/personal" --github-output
+
+      # Solo lo fijado en requirements.txt (versiones exactas + hashes). Se omite (con el resto) si no hay nada que refrescar.
+      - name: Install dependencies (hash-pinned)
+        if: ${{ steps.watch.outputs.work == 'true' }}
+        run: pip install --require-hashes --no-deps -r requirements.txt
+
+      # Código de terceros (requests): NO recibe el token. Solo lee las fichas de iShares.
+      - name: Build personal NAV payloads (third-party code, NO token)
+        if: ${{ steps.watch.outputs.work == 'true' }}
+        run: python scripts/personal_v2.py build --nav-only --dir "$RUNNER_TEMP/personal"
+
+      # Imprime UNA línea de resumen. Sale con 1 si la RPC no existe (sin fallback) o rechaza el token. PERSONAL_NAV_FALLBACK_FULL=1 => fallback_full=true y salida 0.
+      - name: Publish personal NAV (token, stdlib only)
+        id: publish
+        if: ${{ steps.watch.outputs.work == 'true' }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY || vars.SUPABASE_PUBLISHABLE_KEY }}
+          PERSONAL_FEED_TOKEN: ${{ secrets.PERSONAL_FEED_TOKEN }}
+          PERSONAL_NAV_FALLBACK_FULL: ${{ vars.PERSONAL_NAV_FALLBACK_FULL }}
+        run: python3 -S scripts/personal_v2.py publish --nav-only --dir "$RUNNER_TEMP/personal"
+
+      # Solo con PERSONAL_NAV_FALLBACK_FULL=1 y RPC inexistente: el payload completo de siempre (mismos pasos que personal-full.yml). Normalmente estos dos pasos se omiten.
+      - name: Fallback - build full personal payloads (third-party code, NO token)
+        if: ${{ steps.publish.outputs.fallback_full == 'true' }}
+        run: python scripts/personal_v2.py build --dir "$RUNNER_TEMP/personal" --registry registry.json
+
+      - name: Fallback - publish full personal payloads (token, stdlib only)
+        if: ${{ steps.publish.outputs.fallback_full == 'true' }}
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY || vars.SUPABASE_PUBLISHABLE_KEY }}
+          PERSONAL_FEED_TOKEN: ${{ secrets.PERSONAL_FEED_TOKEN }}
+        run: python3 -S scripts/personal_v2.py publish --dir "$RUNNER_TEMP/personal"
+
+      # Latido OPCIONAL (para enterarte de que el cron se ha parado o de que algo falla): solo si el secreto HEALTHCHECK_PERSONAL_NAV_URL existe (sin él no hace nada).
+      # Es un SECRETO y no una variable porque las variables salen en claro en el log (cabecera `env:` del paso) y el log de un repo público es público.
+      # Corre siempre (salvo cancelación) y elige el aviso con datos fijos, nunca del dueño: ping normal si todo fue bien; `/fail` si algún paso falló (JOB_STATUS),
+      # si algún payload no se publicó (nav_state=failed) o si el NAV más reciente supera 6 días (nav_state=old). Si la URL no es https://, se avisa sin mostrarla.
+      # En Healthchecks: el cron es de lunes a viernes y GitHub lo retrasa horas, así que Period = 3 días y Grace >= 14 h (ver README).
+      - name: Heartbeat (optional)
+        if: ${{ always() && !cancelled() }}
+        env:
+          HC: ${{ secrets.HEALTHCHECK_PERSONAL_NAV_URL }}
+          JOB_STATUS: ${{ job.status }}
+          NAV_STATE: ${{ steps.publish.outputs.nav_state }}
+        run: |
+          if [ -z "${HC:-}" ]; then exit 0; fi
+          case "$HC" in
+            https://*[[:space:]]*|https://) echo "::warning::HEALTHCHECK_PERSONAL_NAV_URL no tiene formato https://... (el valor no se muestra): no se envía el latido"; exit 0;;
+            https://*) ;;
+            *) echo "::warning::HEALTHCHECK_PERSONAL_NAV_URL no tiene formato https://... (el valor no se muestra): no se envía el latido"; exit 0;;
+          esac
+          suffix=""
+          msg="ok"
+          if [ "${JOB_STATUS:-success}" != "success" ]; then
+            suffix="/fail"; msg="personal-nav: el job falló"
+          elif [ "${NAV_STATE:-ok}" = "failed" ]; then
+            suffix="/fail"; msg="personal-nav: no se publicaron todos los payloads"
+          elif [ "${NAV_STATE:-ok}" = "old" ]; then
+            suffix="/fail"; msg="personal-nav: el NAV más reciente tiene más de 6 días (o ningún fondo tiene NAV exacto)"
+          fi
+          curl -fsS -m 10 --retry 3 --retry-all-errors --data-raw "$msg" "${HC%/}${suffix}" >/dev/null || echo "::warning::no se pudo enviar el latido"

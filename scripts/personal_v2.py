@@ -1,0 +1,824 @@
+#!/usr/bin/env python3
+"""
+Datos PROPIOS del dueño del dashboard, FUERA del repo: la lista a seguir vive en Supabase; este script la lee, recoge lo que el feed público no
+cubre y lo publica de vuelta en Supabase. En el repo (público) no hay ISIN, listas ni fixtures del dueño; los tests usan ISIN y símbolos FALSOS.
+
+    python3 scripts/personal_v2.py watch   --out  $RUNNER_TEMP/personal      # lee la lista (RPC personal_watch_for_backend)   [con token; solo stdlib]
+                                          [--github-output: escribe work=true|false en $GITHUB_OUTPUT para la salida temprana del workflow]
+    python3 scripts/personal_v2.py build   --dir  $RUNNER_TEMP/personal      # NAV de iShares, facts y series (código de terceros) [SIN token]
+    python3 scripts/personal_v2.py publish --dir  $RUNNER_TEMP/personal      # publica (RPC publish_personal_feed)              [con token; solo stdlib]
+    python3 scripts/personal_v2.py all     --dir  $RUNNER_TEMP/personal      # los tres pasos en un proceso (tests y uso local)
+
+  Dos frecuencias (docs/CONTRATO_FEED_V2.md §5):
+    * COMPLETO (sin `--nav-only`; personal-full.yml, 1-4 veces al día): funds + series con el histórico largo de los proxies -> publish_personal_feed.
+    * SOLO NAV (`build|publish|watch --nav-only`; personal-nav.yml, cada ~30 min): solo las fichas de iShares (una petición por ficha, < 1 KB por fondo, sin
+      Yahoo ni series) -> publish_personal_nav(p_token, p_user, p_funds). La RPC fusiona esos fondos en el payload completo ya guardado.
+
+Contrato con Supabase (lo define el dueño en SQL; ver docs/CONTRATO_FEED_V2.md):
+  * Solo se usa la clave PUBLICABLE (`sb_publishable_...`), en la cabecera `apikey`, y un token aleatorio (secreto de Actions PERSONAL_FEED_TOKEN) en el
+    cuerpo de la RPC. NUNCA service_role ni sb_secret_: si la clave lo parece, se aborta SIN enviar nada (igual que supabase-keepalive.yml).
+  * personal_watch_for_backend(p_token)           -> lista de usuarios con lo que siguen.
+  * publish_personal_feed(p_token, p_user, p_payload) -> guarda el payload (jsonb) de ese usuario.
+
+Es OPCIONAL: si Supabase o el token no están configurados, o algo falla, se emite un `::warning::` y el run publica el feed público igualmente (salida 0).
+Solo es un error (salida 1) una configuración peligrosa: clave secreta o URL que no sea https.
+
+FRESCURA: el workflow personal-nav.yml lo ejecuta cada ~30 min en días laborables. `build` imprime solo contadores de frescura (nº de fondos, nº con NAV
+exacto, fecha de NAV más reciente y más antigua, decimales, aviso si hay NAV con más de N días) para poder comprobar desde el log público que el NAV es el de la ficha.
+
+PRIVACIDAD: los logs de Actions de un repo público son públicos. Aquí solo se escriben contadores: nunca ISIN, símbolos, nombres, URL, clave ni token. Todo
+lo que imprimen las funciones reutilizadas de fetch_market_data (que citan ISIN en sus avisos) se descarta. El payload nunca va en un artefacto.
+"""
+import argparse
+import base64
+import contextlib
+import io
+import json
+import os
+import re
+import stat
+import sys
+import unicodedata
+import urllib.error
+import urllib.parse
+import urllib.request
+from datetime import date, datetime, timedelta, timezone
+
+import feed_v2_common as c
+import sanity_check_v2 as v
+
+RPC_WATCH = "personal_watch_for_backend"
+RPC_PUBLISH = "publish_personal_feed"
+RPC_PUBLISH_NAV = "publish_personal_nav"          # contrato fijo (lo implementa el SQL de G1): (p_token text, p_user text, p_funds jsonb) -> jsonb
+MAX_NAV_BYTES = 64 * 1024                         # tope del p_funds de publish_personal_nav
+FALLBACK_FULL_ENV = "PERSONAL_NAV_FALLBACK_FULL"  # =1: si publish_personal_nav no existe, el workflow NAV publica el payload completo (desactivado por defecto)
+MAX_PAYLOAD_BYTES = 1_000_000
+MAX_USERS, MAX_FUNDS, MAX_SYMBOLS = 20, 20, 40
+SERIES_DAYS = 2 * 366                       # ≤ 2 años de cierres diarios (símbolos extra)
+PROXY_YEARS = 25                            # histórico de los proxies de fondos: todo lo disponible hasta ~25 años
+PROXY_DAYS = PROXY_YEARS * 366
+MAX_SERIES_BARS = 600                       # tope de cierres de un símbolo extra (2 años ≈ 505)
+MAX_PROXY_BARS = 6600                       # tope de cierres de un proxy (25 años ≈ 6.300)
+MAX_GAP_DAYS = 15                           # hueco máximo entre dos cierres consecutivos (el mayor real es el cierre de bolsas de 2001: 6 días)
+# fit_payload: nº de cierres que se conservan por serie, de más a menos. Primero se recortan los símbolos extra; los proxies, lo último.
+EXTRA_KEEP = (260, 60, 1)
+PROXY_KEEP = (2600, 1300, 780, 260, 60, 1)          # ~10, 5, 3, 1 año, 3 meses, último cierre
+TIMEOUT = 20
+TRIES = 2
+LOOPBACK = {"127.0.0.1", "localhost", "::1"}
+
+_ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
+_USER_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
+_URL_PATH_RE = re.compile(r"^/[A-Za-z0-9/_.\-%]{1,200}$")
+_TOKEN_RE = re.compile(r"^[\x21-\x7e]{16,200}$")
+FACTS_KEYS = frozenset({
+    "class_launch_date", "class_inception_date", "fund_launch_date", "class_aum", "fund_aum", "benchmark", "management_company",
+    "morningstar_category", "ongoing_charges_pct", "management_fee_pct", "performance_fee_pct", "initial_charge_pct", "base_currency",
+    "share_class_currency", "use_of_income", "structure", "methodology", "holdings", "domicile"})
+# NAV: un salto mayor entre dos runs no es un movimiento real de un fondo indexado: parseo erróneo o cambio de página (R4 del apéndice A).
+NAV_RATIO_LIMITS = (0.5, 2.0)
+# Aviso (solo informativo) si el NAV publicado tiene más de tantos días naturales. Calibrado con el comentario de NAV_STALE_DAYS en fetch_market_data:
+# con la ficha 1-2 días hábiles por detrás lo normal llega a 5 días (puente largo) y a 6 en algún festivo; >5 es raro y merece mirarlo.
+NAV_WARN_DAYS = 5
+# AU-07: con el NAV más reciente de más de tantos días, el latido avisa (Healthchecks /fail): ya no es un festivo (máximo normal 6 días).
+NAV_FAIL_DAYS = 6
+
+
+# Rango plausible de un NAV (el mismo que acepta el payload: v.number(0.1, 10000)); un prev_price fuera de él se ignora.
+PREV_PRICE_MIN, PREV_PRICE_MAX = 0.1, 10000.0
+
+
+def _plain(text, limit):
+    """Texto plano por defecto (si no se inyecta fetch_market_data._plain_text): sin '<', '>' ni caracteres de control, recortado."""
+    t = re.sub(r"[<>\x00-\x1f\x7f]", "", str(text or ""))
+    return "".join(ch for ch in t if unicodedata.category(ch) not in ("Cf", "Zl", "Zp")).strip()[:limit]      # AU-15: sin RLO, ancho cero ni separadores de línea
+
+
+def say(msg):
+    """Única vía de salida de texto: solo contadores y códigos, nunca datos del dueño."""
+    print(msg)
+
+
+# ------------------------------------------------------------------------------------------------------------------------------
+# Configuración y claves
+# ------------------------------------------------------------------------------------------------------------------------------
+def key_looks_secret(key):
+    """True si la clave parece una clave de servidor (sb_secret_, service_role, JWT con rol service_role)."""
+    if key.startswith("sb_secret_") or "service_role" in key:
+        return True
+    try:
+        part = key.split(".")[1]
+        role = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4))).get("role", "")
+        return role == "service_role"
+    except (IndexError, ValueError, TypeError, AttributeError):
+        return False
+
+
+def read_config(env=None):
+    """(config|None, problema|None, fatal). Falta algo => (None, texto, False); configuración peligrosa => (None, texto, True)."""
+    env = os.environ if env is None else env
+    url, key, token = (env.get(k, "").strip() for k in ("SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "PERSONAL_FEED_TOKEN"))
+    missing = [n for n, val in (("SUPABASE_URL", url), ("SUPABASE_PUBLISHABLE_KEY", key), ("PERSONAL_FEED_TOKEN", token)) if not val]
+    if missing:
+        return None, "faltan %s: no se publican datos propios" % ", ".join(missing), False
+    if key_looks_secret(key):
+        return None, "la clave configurada parece SECRETA (sb_secret_ / service_role): abortado sin enviarla; usa la publicable (sb_publishable_...)", True
+    p = urllib.parse.urlsplit(url)
+    if not (p.scheme == "https" or (p.scheme == "http" and p.hostname in LOOPBACK)) or not p.hostname or p.username or p.password or p.query or p.fragment:
+        return None, "SUPABASE_URL debe ser una URL https:// sin credenciales", True
+    if not _TOKEN_RE.match(token):
+        return None, "PERSONAL_FEED_TOKEN con formato inesperado (16-200 caracteres ASCII imprimibles, sin espacios)", True
+    return {"url": url.rstrip("/"), "key": key, "token": token}, None, False
+
+
+# ------------------------------------------------------------------------------------------------------------------------------
+# Supabase (RPC por HTTP, solo stdlib)
+# ------------------------------------------------------------------------------------------------------------------------------
+class RpcError(Exception):
+    """Fallo de una RPC; el mensaje es un código corto (nunca el cuerpo de la respuesta ni la URL). `status`: código HTTP (o None); `code`: el `code` de error de
+    PostgREST/Postgres (p. ej. PGRST202, 42501) si la respuesta lo trae con formato válido, si no None. Ningún otro dato del cuerpo se conserva."""
+    def __init__(self, msg, status=None, code=None):
+        super().__init__(msg)
+        self.status, self.code = status, code
+
+
+_ERR_CODE_RE = re.compile(r"^[A-Za-z0-9]{3,10}$")
+
+
+def _error_code(body):
+    """`code` del cuerpo de error de PostgREST ({"code":"PGRST202",...}) o None. Solo se devuelve si tiene forma de código (nunca texto libre)."""
+    try:
+        code = json.loads(body.decode("utf-8")).get("code")
+    except (ValueError, AttributeError, UnicodeError):
+        return None
+    return code if isinstance(code, str) and _ERR_CODE_RE.match(code) else None
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *a, **k):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def rpc(cfg, fn, body, limit=2_000_000, sleep=None):
+    """POST {url}/rest/v1/rpc/{fn} con SOLO la cabecera `apikey` (clave publicable). Sin Authorization, sin seguir redirecciones. Devuelve el JSON o None."""
+    import time
+    req = urllib.request.Request(
+        "%s/rest/v1/rpc/%s" % (cfg["url"], fn), data=json.dumps(body, separators=(",", ":"), allow_nan=False).encode("utf-8"), method="POST",
+        headers={"apikey": cfg["key"], "Content-Type": "application/json", "Accept": "application/json", "User-Agent": "portfolio-feed-v2-ci/1.0"})
+    last, status, code = "red", None, None
+    for i in range(TRIES):
+        try:
+            with _OPENER.open(req, timeout=TIMEOUT) as resp:
+                raw = resp.read(limit + 1)
+                if len(raw) > limit:
+                    raise RpcError("respuesta demasiado grande")
+                if not raw.strip():
+                    return None
+                try:
+                    return json.loads(raw.decode("utf-8"))
+                except ValueError:
+                    raise RpcError("respuesta no JSON")
+        except urllib.error.HTTPError as e:
+            last, status = "HTTP %d" % e.code, e.code
+            try:
+                code = _error_code(e.read(4096))
+            except OSError:
+                code = None
+            if e.code < 500 and e.code != 429:
+                break
+        except (urllib.error.URLError, TimeoutError, ConnectionError, OSError):
+            last, status, code = "red", None, None
+        if i < TRIES - 1:
+            (sleep or time.sleep)(2.0)
+    raise RpcError(last, status, code)
+
+
+# ------------------------------------------------------------------------------------------------------------------------------
+# Lo que devuelve personal_watch_for_backend
+# ------------------------------------------------------------------------------------------------------------------------------
+def ishares_url_ok(url):
+    """Solo https a *.ishares.com, sin credenciales, puerto, consulta ni fragmento (el backend NO debe poder ser dirigido a otro sitio)."""
+    try:
+        p = urllib.parse.urlsplit(url)
+        host = (p.hostname or "").lower()
+        host.encode("ascii")
+        return (p.scheme == "https" and (host == "ishares.com" or host.endswith(".ishares.com")) and not p.username and not p.password
+                and p.port is None and not p.query and not p.fragment and bool(_URL_PATH_RE.match(p.path)))
+    except (ValueError, UnicodeError, AttributeError):
+        return False
+
+
+def _clean_name(fm_text, value, limit=120):
+    return fm_text(value, limit) if isinstance(value, str) else ""
+
+
+def parse_watch(raw, plain_text):
+    """Valida la respuesta (no fiable) de personal_watch_for_backend. Devuelve (usuarios, descartados). Cada usuario:
+    {"user": id, "funds": [{isin, name, url, proxy_symbol?, prev_price?}], "symbols": [SYM, ...]}. Lo que no encaja se descarta y se cuenta."""
+    dropped = 0
+    rows = raw if isinstance(raw, list) else [raw] if isinstance(raw, dict) else []
+    dropped += max(0, len(rows) - MAX_USERS)                      # AU-08: los usuarios por encima del tope NO se procesan; antes ni se contaban
+    users = []
+    for row in rows[:MAX_USERS]:
+        if not isinstance(row, dict) or not (isinstance(row.get("user_id"), str) and _USER_RE.match(row["user_id"])):
+            dropped += 1
+            continue
+        funds, symbols = [], []
+        for f in (row.get("funds") if isinstance(row.get("funds"), list) else [])[:MAX_FUNDS]:
+            ok = (isinstance(f, dict) and set(f) <= {"isin", "name", "url", "proxy_symbol", "prev_price"} and isinstance(f.get("isin"), str)
+                  and _ISIN_RE.match(f["isin"]) and isinstance(f.get("url"), str))
+            if not ok:
+                dropped += 1
+                continue
+            item = {"isin": f["isin"], "name": _clean_name(plain_text, f.get("name")), "url": f["url"] if ishares_url_ok(f["url"]) else None}
+            if item["url"] is None:
+                dropped += 1                                        # el fondo se conserva (sin scrape), pero NUNCA se pide esa URL
+            if f.get("proxy_symbol") is not None:
+                if c.safe_symbol(f["proxy_symbol"]):
+                    item["proxy_symbol"] = f["proxy_symbol"]
+                else:
+                    dropped += 1
+            pp = f.get("prev_price")
+            if c.finite(pp) and PREV_PRICE_MIN <= pp <= PREV_PRICE_MAX:      # AU-15: 1e308 es «finito» y bloquearía en silencio todo NAV nuevo
+                item["prev_price"] = float(pp)
+            funds.append(item)
+        for s in (row.get("symbols") if isinstance(row.get("symbols"), list) else [])[:MAX_SYMBOLS]:
+            if c.safe_symbol(s):
+                symbols.append(s)
+            else:
+                dropped += 1
+        users.append({"user": row["user_id"], "funds": funds, "symbols": list(dict.fromkeys(symbols))})
+    return users, dropped
+
+
+# ------------------------------------------------------------------------------------------------------------------------------
+# Construcción y validación del payload
+# ------------------------------------------------------------------------------------------------------------------------------
+_FACT_VALUE = lambda val, ctx: None if (isinstance(val, (int, float)) and not isinstance(val, bool) and c.finite(val)) else v.text(200)(val, ctx)   # noqa: E731
+FUND_SPEC = v.obj({
+    "isin": v.text(12, _ISIN_RE), "name": v.text(120), "price": v.number(0.1, 10000, nullable=True), "currency": v.enum("EUR"), "unit": v.enum("currency"),
+    "nav_date": v.text(40), "nav_date_iso": v.day(), "nav_stale": v.boolean, "change_pct": v.number(-20, 20, nullable=True),
+    "wk52_low": v.number(0, 1e6), "wk52_high": v.number(0, 1e6), "source": v.enum("ishares_nav_scrape", "none"),
+    "proxy_symbol": v.symbol, "facts": v.mapping(re.compile("^(?:%s)$" % "|".join(sorted(FACTS_KEYS))), _FACT_VALUE, len(FACTS_KEYS))},
+    required={"isin", "name", "price", "currency", "unit", "source"})
+SERIES_SPEC = v.obj({
+    "symbol": v.symbol, "currency": v.text(4, c.CURRENCY_RE), "unit": v.enum(*c.UNITS), "price_unit_divisor": v.integer(1, 100),
+    "price": v.number(1e-9, 1e9, positive=True), "change_pct": v.number(-1000, 100000, nullable=True), "as_of": v.day(),
+    "d": v.seq(v.day(), MAX_PROXY_BARS), "c": v.seq(v.number(1e-9, 1e9, positive=True), MAX_PROXY_BARS)})
+PAYLOAD_SPEC = v.obj({
+    "schema": v.SCHEMA_V, "generated_at": v.stamp, "funds": v.seq(FUND_SPEC, MAX_FUNDS), "series": v.seq(SERIES_SPEC, MAX_SYMBOLS),
+    "public": v.seq(v.symbol, MAX_SYMBOLS + MAX_FUNDS)})
+
+
+def payload_problems(payload, today=None):
+    """Motivos por los que un payload no se envía (lista vacía = válido): esquema estricto, sin '<' ni '>', series coherentes, tope de bytes."""
+    ctx = v.Ctx([], today or datetime.now(timezone.utc).date())
+    bad = PAYLOAD_SPEC(payload, ctx)
+    if bad:
+        return [bad]
+    out = []
+    v._scan_strings(payload, "payload", ctx)
+    out += ctx.errors
+    proxies = {f["proxy_symbol"] for f in payload["funds"] if f.get("proxy_symbol")}
+    syms = [s["symbol"] for s in payload["series"]]
+    if len(set(syms)) != len(syms):
+        out.append("símbolo repetido en series")
+    if set(syms) & set(payload["public"]):
+        out.append("símbolo en series y en public a la vez")
+    for s in payload["series"]:
+        d, cl = s["d"], s["c"]
+        if not (len(d) == len(cl) and d and d[-1] == s["as_of"] and abs(cl[-1] - s["price"]) <= 1e-6 * s["price"]):
+            out.append("serie incoherente")                      # truncada, columnas de distinto largo, as_of o price que no son el último cierre
+        elif not all(a < b for a, b in zip(d, d[1:])):
+            out.append("serie con fechas no crecientes")
+        elif any((date.fromisoformat(b) - date.fromisoformat(a)).days > MAX_GAP_DAYS for a, b in zip(d, d[1:])):
+            out.append("serie con huecos de más de %d días" % MAX_GAP_DAYS)
+        if len(d) > (MAX_PROXY_BARS if s["symbol"] in proxies else MAX_SERIES_BARS):
+            out.append("serie demasiado larga para su clase")
+        if s["unit"] == "subunit" and s["currency"] not in c.SUBUNIT_FAMILIES or s["unit"] == "currency" and s["currency"] in c.SUBUNIT_FAMILIES:
+            out.append("divisa y unidad incoherentes")             # GBp como `currency` se valoraría ×100; `subunit` exige una divisa en subunidad
+        if s["price_unit_divisor"] != c.price_unit_divisor(s["currency"], s["unit"]):
+            out.append("price_unit_divisor incoherente con la unidad")
+        if s["unit"] == "points" and not s["symbol"].startswith("^") or s["unit"] == "rate" and not s["symbol"].endswith("=X"):
+            out.append("unidad incoherente con el símbolo")
+    if len(c.dumps(payload).encode("ascii")) > MAX_PAYLOAD_BYTES:
+        out.append("payload > %d bytes" % MAX_PAYLOAD_BYTES)
+    return out
+
+
+def fit_payload(payload):
+    """Recorta el payload (determinista) hasta que quepa en MAX_PAYLOAD_BYTES. Orden: los símbolos extra a 260 / 60 / 1 cierres; luego los proxies de
+    fondos (siempre todos al mismo nivel) a ~10 / 5 / 3 / 1 años / 3 meses / último cierre; luego sin series. None si ni así cabe."""
+    def size():
+        return len(c.dumps(payload).encode("ascii"))
+
+    def cut(series, keep):
+        for s in series:
+            s["d"], s["c"] = s["d"][-keep:], s["c"][-keep:]
+    if size() <= MAX_PAYLOAD_BYTES:
+        return payload
+    proxies = {f["proxy_symbol"] for f in payload["funds"] if f.get("proxy_symbol")}
+    extra = [s for s in payload["series"] if s["symbol"] not in proxies]
+    prox = [s for s in payload["series"] if s["symbol"] in proxies]
+    for series, steps in ((extra, EXTRA_KEEP), (prox, PROXY_KEEP)):
+        for keep in steps:
+            cut(series, keep)
+            if size() <= MAX_PAYLOAD_BYTES:
+                return payload
+    payload["series"] = []
+    return payload if size() <= MAX_PAYLOAD_BYTES else None
+
+
+def nav_entry(fund, scraped, facts, warn, stats=None):
+    """Entrada de un fondo: NAV de iShares (si es creíble frente al anterior) + facts. `stats` (opcional): contadores para el log de frescura."""
+    out = {"isin": fund["isin"], "name": fund["name"], "price": None, "currency": "EUR", "unit": "currency", "source": "none"}
+    if scraped and c.finite(scraped.get("price")):
+        price, prev = float(scraped["price"]), fund.get("prev_price")
+        if prev and not (NAV_RATIO_LIMITS[0] < price / prev < NAV_RATIO_LIMITS[1]):
+            warn("nav_salto")                                    # R4: NAV x10 respecto al anterior => no se publica ese NAV
+        else:
+            out.update({"price": round(price, 4), "source": "ishares_nav_scrape"})
+            if scraped.get("nav_multi"):
+                warn("nav_varios")                               # la página trae varios «NAV as of» distintos: se usó el primero (decisión previa)
+            if stats is not None and isinstance(scraped.get("nav_decimals"), int):
+                stats["decimals"][scraped["nav_decimals"]] = stats["decimals"].get(scraped["nav_decimals"], 0) + 1
+            if stats is not None:
+                if isinstance(scraped.get("nav_variant"), str) and re.fullmatch(r"[a-z_]{1,16}", scraped["nav_variant"]):
+                    stats.setdefault("variants", {})[scraped["nav_variant"]] = stats.get("variants", {}).get(scraped["nav_variant"], 0) + 1
+                if isinstance(scraped.get("nav_gain_days"), int) and scraped["nav_gain_days"] > 0:
+                    stats.setdefault("gains", []).append(scraped["nav_gain_days"])
+            for k in ("nav_date", "nav_date_iso", "nav_stale", "change_pct", "wk52_low", "wk52_high"):
+                if scraped.get(k) is not None:
+                    out[k] = scraped[k]
+    if fund.get("proxy_symbol"):
+        out["proxy_symbol"] = fund["proxy_symbol"]
+    if isinstance(facts, dict) and facts:
+        out["facts"] = {k: val for k, val in facts.items() if k in FACTS_KEYS}
+    return out
+
+
+def series_entry(sym, bars, currency, today, long=False):
+    """Serie de un símbolo: ≤ 2 años si es un símbolo extra, hasta PROXY_YEARS si `long` (proxy de un fondo). Solo cierres. Sin divisa conocida no se
+    publica (None). Si hay un hueco de más de MAX_GAP_DAYS entre dos cierres (descarga defectuosa), se conserva solo el tramo posterior al último hueco."""
+    if not (isinstance(currency, str) and c.CURRENCY_RE.match(currency)) or len(bars) < 2:
+        return None
+    cutoff = (today - timedelta(days=PROXY_DAYS if long else SERIES_DAYS)).isoformat()
+    bars = [b for b in bars if b["d"] >= cutoff]
+    for i in range(len(bars) - 1, 0, -1):
+        if (date.fromisoformat(bars[i]["d"]) - date.fromisoformat(bars[i - 1]["d"])).days > MAX_GAP_DAYS:
+            bars = bars[i:]
+            break
+    if len(bars) < 2:
+        return None
+    unit = "points" if sym.startswith("^") else "rate" if sym.endswith("=X") else "subunit" if currency in c.SUBUNIT_FAMILIES else "currency"
+    last, prev = bars[-1], bars[-2]
+    return {"symbol": sym, "currency": currency, "unit": unit, "price_unit_divisor": c.price_unit_divisor(currency, unit), "price": last["c"],
+            "change_pct": round((last["c"] / prev["c"] - 1) * 100, 2), "as_of": last["d"], "d": [b["d"] for b in bars], "c": [b["c"] for b in bars]}
+
+
+def build_payload(user, public, fetchers, now, warn, stats=None):
+    """Payload de un usuario. Los proxies de fondos van SIEMPRE en `series` y con histórico largo, estén o no en el universo público (allí solo hay
+    HISTORY_YEARS años). Del resto, los símbolos del universo público NO se incluyen (`public`: el cliente los lee del feed público)."""
+    funds = []
+    for f in user["funds"]:
+        scraped = facts = None
+        if f["url"]:
+            scraped, facts = fetchers.nav(f["url"], f["isin"]), fetchers.facts(f["url"])
+        funds.append(nav_entry(f, scraped, facts, warn, stats))
+    proxies = list(dict.fromkeys(f["proxy_symbol"] for f in user["funds"] if f.get("proxy_symbol")))
+    wanted = proxies + [s for s in dict.fromkeys(user["symbols"]) if s not in proxies]           # proxies primero: orden estable y recorte determinista
+    series, pub = [], []
+    for sym in wanted:
+        long = sym in proxies
+        if not long and sym.upper() in public:
+            pub.append(sym)
+            continue
+        try:
+            bars, cur = fetchers.series(sym, "max" if long else "2y")
+        except Exception:                                        # noqa: BLE001 - un símbolo que falla no tumba el resto
+            warn("proxy_fallo" if long else "serie_fallo")
+            continue
+        entry = series_entry(sym, bars, cur, now.date(), long)
+        if entry:
+            series.append(entry)
+        else:
+            warn("proxy_sin_divisa_o_datos" if long else "serie_sin_divisa_o_datos")
+    payload = {"schema": c.SCHEMA, "generated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "funds": funds, "series": series, "public": pub}
+    return fit_payload(payload)
+
+
+def nav_report(payloads, now, warn_days=NAV_WARN_DAYS, stats=None):
+    """Líneas de log de frescura del NAV (solo contadores y fechas públicas de NAV; nunca ISIN, nombres ni importes). Devuelve (líneas, avisos):
+    nº de fondos, nº con NAV exacto leído de la ficha, fecha de NAV más reciente y más antigua (con su edad en días), decimales con los que escribe el
+    NAV la ficha, y un aviso si algún NAV tiene más de `warn_days` días."""
+    funds = [f for p in payloads for f in p["payload"]["funds"]]
+    exact = [f for f in funds if f.get("source") == "ishares_nav_scrape"]
+    dated = sorted(f["nav_date_iso"] for f in exact if f.get("nav_date_iso"))
+    today = now.date()
+    age = lambda iso: (today - datetime.strptime(iso, "%Y-%m-%d").date()).days     # noqa: E731
+    line = "datos propios: NAV: %d fondos, %d con NAV exacto leído de la ficha" % (len(funds), len(exact))
+    if dated:
+        line += ", fecha de NAV más reciente %s (%d d), más antigua %s (%d d)" % (dated[-1], age(dated[-1]), dated[0], age(dated[0]))
+    if len(exact) > len(dated):
+        line += ", %d sin fecha legible" % (len(exact) - len(dated))
+    dec = (stats or {}).get("decimals") or {}
+    if dec:
+        line += ", decimales del NAV: " + "/".join("%d (x%d)" % (k, n) for k, n in sorted(dec.items()))
+    var = (stats or {}).get("variants") or {}
+    if set(var) - {"base"}:                      # con solo la variante base no hay nada que contar
+        line += ", variante de la petición ganadora: " + "/".join("%s x%d" % (k, n) for k, n in sorted(var.items()))
+    gains = (stats or {}).get("gains") or []
+    if gains:
+        line += ", una variante distinta de la base adelantó la fecha en %d fondos (hasta +%d d)" % (len(gains), max(gains))
+    line += " [run %s]" % now.strftime("%Y-%m-%dT%H:%MZ")
+    old = sum(1 for d in dated if age(d) > warn_days)
+    warns = []
+    if old:
+        warns.append("::warning::datos propios: %d NAV con más de %d días (la ficha de iShares puede ir retrasada, o el parseo falla)" % (old, warn_days))
+    if len(exact) < len(funds):
+        warns.append("::warning::datos propios: %d de %d fondos sin NAV exacto (se usa el proxy o el último valor)" % (len(funds) - len(exact), len(funds)))
+    return [line], warns
+
+
+class Fetchers:
+    """Las tres fuentes de datos externas, inyectables en los tests: nav(url, isin), facts(url), series(symbol, period) -> (barras, divisa).
+    `period` es "2y" (símbolos extra) o "max" (proxies de fondos: una sola petición con todo el histórico)."""
+    def __init__(self, nav, facts, series):
+        self.nav, self.facts, self.series = nav, facts, series
+
+
+def default_fetchers():
+    """Reutiliza la lógica probada de fetch_market_data (iShares, Yahoo). SOLO se importa aquí: los pasos con token no cargan código de terceros."""
+    import feed_v2 as f2
+    import fetch_market_data as fm
+
+    def series(sym, period="2y"):
+        df = fm.yf_history(sym, period=period, interval="1d", auto_adjust=False)
+        return f2.bars_from_df(df, datetime.now(timezone.utc).date()), df.attrs.get("currency")
+    return Fetchers(fm.fetch_ishares_nav_freshest, fm.fetch_ishares_fund_facts, series), fm._plain_text
+
+
+# ------------------------------------------------------------------------------------------------------------------------------
+# Pasos
+# ------------------------------------------------------------------------------------------------------------------------------
+def _write_private(path, obj):
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, stat.S_IRUSR | stat.S_IWUSR)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        json.dump(obj, f, separators=(",", ":"), allow_nan=False)
+
+
+def _read_private(path):
+    with open(path, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _set_output(env, name, value):
+    """Escribe `name=value` en el fichero $GITHUB_OUTPUT (si lo hay). Solo valores fijos (true/false): nunca datos del dueño."""
+    path = (os.environ if env is None else env).get("GITHUB_OUTPUT")
+    if path:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write("%s=%s\n" % (name, value))
+
+
+def step_watch(cfg, directory, github_output=False, env=None, nav_only=False):
+    """Lee la lista de Supabase y la guarda (sin validar: lo valida `build`). Con `github_output`, escribe work=true|false (¿hay algo que refrescar?:
+    algún fondo con ficha de iShares válida o algún símbolo) para la salida temprana del workflow. Con `nav_only`, los símbolos no cuentan: el job
+    de NAV solo visita fichas, así que sin fondos con ficha no hay nada que hacer. Devuelve 0."""
+    try:
+        raw = rpc(cfg, RPC_WATCH, {"p_token": cfg["token"]})
+    except RpcError as e:
+        say("::warning::datos propios: no se pudo leer la lista en Supabase (%s); el feed público se publica igualmente" % e)
+        if github_output:
+            _set_output(env, "work", "false")
+        return 0
+    _write_private(os.path.join(directory, "watch.json"), raw)
+    rows = raw if isinstance(raw, list) else [raw] if isinstance(raw, dict) else []
+    for row in rows:                                              # aunque algo imprima un ISIN por error, Actions lo enmascara
+        for f in (row.get("funds") if isinstance(row, dict) and isinstance(row.get("funds"), list) else []):
+            if isinstance(f, dict) and isinstance(f.get("isin"), str) and _ISIN_RE.match(f["isin"]):
+                say("::add-mask::" + f["isin"])
+    users, _dropped = parse_watch(raw, _plain)
+    n_funds = sum(1 for u in users for f in u["funds"] if f["url"])
+    n_symbols = sum(len(u["symbols"]) for u in users)
+    say("datos propios: lista leída (%d usuarios, %d fondos con ficha, %d símbolos)" % (len(rows), n_funds, n_symbols))
+    if len(rows) > MAX_USERS:
+        say("::warning::datos propios: %d usuarios recortados (MAX_USERS=%d): el resto no recibe datos hasta que se suba el tope" % (len(rows) - MAX_USERS, MAX_USERS))
+    if github_output:
+        work = bool(n_funds) if nav_only else bool(n_funds or n_symbols)
+        _set_output(env, "work", "true" if work else "false")
+        if not work:
+            say("datos propios: nada que refrescar (ningún fondo con ficha de iShares%s): se omiten build y publish" % ("" if nav_only else " ni símbolos"))
+    return 0
+
+
+def step_build(directory, registry_path, fetchers=None, plain_text=None, now=None, nav_warn_days=NAV_WARN_DAYS):
+    """Valida la lista, recoge NAV/facts/series y escribe un payload por usuario. NO usa el token. Descarta TODA la salida de las funciones
+    reutilizadas (citan ISIN y símbolos)."""
+    import time
+    t0 = time.monotonic()
+    now = now or datetime.now(timezone.utc)
+    path = os.path.join(directory, "watch.json")
+    if not os.path.isfile(path):
+        return 0
+    registry = c.load_registry(registry_path)
+    public = {e["symbol"].upper() for e in registry}
+    sink = io.StringIO()
+    warns = {}
+    stats = {"decimals": {}}
+
+    def warn(code):
+        warns[code] = warns.get(code, 0) + 1
+    if fetchers is None:
+        with contextlib.redirect_stderr(sink), contextlib.redirect_stdout(sink):
+            fetchers, plain_text = default_fetchers()
+    downloads = []                                                 # una descarga por símbolo y run, aunque lo sigan varios usuarios
+    cache = {}
+    raw_series = fetchers.series
+
+    def series(sym, period="2y"):
+        hit = cache.get(sym)
+        if hit is None or (period == "max" and hit[0] != "max"):   # una descarga "max" sirve también para "2y" (series_entry recorta)
+            downloads.append(sym)
+            try:
+                hit = cache[sym] = (period, raw_series(sym, period))
+            except Exception as e:                                 # noqa: BLE001 - el fallo también se recuerda: Yahoo no se vuelve a martillear por cada usuario
+                cache[sym] = (period, e)
+                raise
+        if isinstance(hit[1], Exception):
+            raise hit[1]
+        return hit[1]
+    fetchers = Fetchers(fetchers.nav, fetchers.facts, series)
+    with contextlib.redirect_stderr(sink), contextlib.redirect_stdout(sink):
+        users, dropped = parse_watch(_read_private(path), plain_text or _plain)
+        payloads = []
+        for u in users:
+            try:
+                p = build_payload(u, public, fetchers, now, warn, stats)
+            except Exception:                                      # noqa: BLE001
+                warn("usuario_fallo")
+                continue
+            probs = payload_problems(p, now.date()) if p else ["no cabe en %d bytes" % MAX_PAYLOAD_BYTES]
+            if probs:
+                warn("payload_invalido")
+                continue
+            payloads.append({"user": u["user"], "payload": p})
+    _write_private(os.path.join(directory, "payloads.json"), payloads)
+    say("datos propios: %d payloads (%d fondos, %d series, %d barras, %d bytes máx.), %d descargas de series, %d elementos descartados%s" % (
+        len(payloads), sum(len(p["payload"]["funds"]) for p in payloads), sum(len(p["payload"]["series"]) for p in payloads),
+        sum(len(s["d"]) for p in payloads for s in p["payload"]["series"]), max([len(c.dumps(p["payload"])) for p in payloads] or [0]), len(downloads), dropped,
+        "".join("; %s x%d" % (k, n) for k, n in sorted(warns.items()))))
+    lines, nav_warns = nav_report(payloads, now, nav_warn_days, stats)
+    size = sum(len(c.dumps(p["payload"]).encode("ascii")) for p in payloads)
+    for line in lines:
+        say(line)
+    say("datos propios: coste del run: %d series pedidas a Yahoo (únicas entre usuarios), payload %.1f KB, %.1f s" % (
+        len(downloads), size / 1024.0, time.monotonic() - t0))
+    for w in nav_warns:
+        say(w)
+    if warns or dropped:
+        say("::warning::datos propios: algunos elementos no se han podido recoger (solo contadores arriba; sin datos personales en el log)")
+    return 0
+
+
+def step_publish(cfg, directory):
+    path = os.path.join(directory, "payloads.json")
+    if not os.path.isfile(path):
+        return 0
+    sent = failed = 0
+    for item in _read_private(path):
+        if payload_problems(item["payload"]) or not _USER_RE.match(item["user"]):         # última barrera antes de enviar nada
+            failed += 1
+            continue
+        try:
+            rpc(cfg, RPC_PUBLISH, {"p_token": cfg["token"], "p_user": item["user"], "p_payload": item["payload"]})
+            sent += 1
+        except RpcError as e:
+            failed += 1
+            say("::warning::datos propios: no se pudo publicar un payload en Supabase (%s)" % e)
+    say("datos propios: %d payloads publicados, %d fallidos" % (sent, failed))
+    if failed and not sent:                                        # AU-07: si fallan TODOS, el paso falla (antes salía siempre 0 y nadie se enteraba)
+        say("::error::datos propios: no se ha publicado ningún payload (%d fallidos)" % failed)
+        return 1
+    return 0
+
+
+# ------------------------------------------------------------------------------------------------------------------------------
+# Modo SOLO NAV (publish_personal_nav): solo las fichas de iShares, sin Yahoo ni series
+# ------------------------------------------------------------------------------------------------------------------------------
+# Claves que acepta publish_personal_nav por fondo = las del fondo del payload completo, sin ninguna más (FUND_SPEC es una lista blanca estricta). Ojo: el
+# contrato de G1 las cita como «wk52»; en el payload real son DOS claves, wk52_low y wk52_high (ver auditorias/FIXES_G2_NAV_SOLO.md, punto abierto nº 1).
+NAV_FUND_KEYS = frozenset({"isin", "name", "price", "currency", "unit", "source", "nav_date", "nav_date_iso", "nav_stale", "change_pct",
+                           "wk52_low", "wk52_high", "proxy_symbol", "facts"})
+NAV_FUNDS_SPEC = v.seq(FUND_SPEC, MAX_FUNDS)
+
+
+def nav_problems(funds, today=None):
+    """Motivos por los que un `p_funds` no se envía (lista vacía = válido): ≤ 20 fondos, SOLO las claves de NAV_FUND_KEYS (nunca `series`), esquema estricto
+    del fondo (precio finito > 0 o null...), sin '<' ni '>' y ≤ MAX_NAV_BYTES."""
+    ctx = v.Ctx([], today or datetime.now(timezone.utc).date())
+    bad = NAV_FUNDS_SPEC(funds, ctx)
+    if bad:
+        return [bad]
+    if any(set(f) - NAV_FUND_KEYS for f in funds):
+        return ["claves no permitidas en un fondo"]
+    v._scan_strings(funds, "p_funds", ctx)
+    out = list(ctx.errors)
+    if len(c.dumps(funds).encode("ascii")) > MAX_NAV_BYTES:
+        out.append("p_funds > %d bytes" % MAX_NAV_BYTES)
+    return out
+
+
+def fit_nav_funds(funds):
+    """Si p_funds supera MAX_NAV_BYTES quita primero los `facts` (lo menos urgente: el NAV y su fecha son lo que importa). None si ni así cabe."""
+    def size():
+        return len(c.dumps(funds).encode("ascii"))
+    if size() <= MAX_NAV_BYTES:
+        return funds
+    for f in funds:
+        f.pop("facts", None)
+    return funds if size() <= MAX_NAV_BYTES else None
+
+
+def build_nav_funds(user, fetchers, warn, stats=None):
+    """`p_funds` de un usuario: TODOS sus fondos, con lo que se haya podido leer de la ficha (sin ficha o ilegible => source 'none', price null).
+    Reutiliza nav_entry (misma salvaguarda de salto de NAV que el payload completo). Una petición por ficha: el NAV y los facts salen de la misma página."""
+    funds = []
+    for f in user["funds"]:
+        scraped = facts = None
+        if f["url"]:
+            scraped, facts = fetchers.nav(f["url"], f["isin"]), fetchers.facts(f["url"])
+        funds.append(nav_entry(f, scraped, facts, warn, stats))
+    return fit_nav_funds(funds)
+
+
+def step_build_nav(directory, fetchers=None, plain_text=None, now=None):
+    """Modo solo NAV, paso sin token: valida la lista, lee las fichas y escribe nav_payloads.json (aparte de payloads.json, que es del modo completo). Sin
+    Yahoo, sin registro, sin series. Descarta la salida de las funciones reutilizadas (citan ISIN). Solo imprime avisos con contadores; la línea resumen
+    del run la imprime `publish --nav-only` (que ya sabe el resultado de la RPC)."""
+    now = now or datetime.now(timezone.utc)
+    path = os.path.join(directory, "watch.json")
+    if not os.path.isfile(path):
+        return 0
+    sink = io.StringIO()
+    warns = {}
+
+    def warn(code):
+        warns[code] = warns.get(code, 0) + 1
+    if fetchers is None:
+        with contextlib.redirect_stderr(sink), contextlib.redirect_stdout(sink):
+            fetchers, plain_text = default_fetchers()
+    items, dropped = [], 0
+    with contextlib.redirect_stderr(sink), contextlib.redirect_stdout(sink):
+        users, dropped = parse_watch(_read_private(path), plain_text or _plain)
+        for u in users:
+            try:
+                funds = build_nav_funds(u, fetchers, warn)
+            except Exception:                                      # noqa: BLE001
+                warn("usuario_fallo")
+                continue
+            if funds is None or nav_problems(funds, now.date()):
+                warn("payload_invalido")
+                continue
+            items.append({"user": u["user"], "funds": funds})
+    exact = [f for it in items for f in it["funds"] if f.get("source") == "ishares_nav_scrape"]
+    dated = sorted(f["nav_date_iso"] for f in exact if f.get("nav_date_iso"))
+    stats = {"funds": sum(len(it["funds"]) for it in items), "exact": len(exact), "latest": dated[-1] if dated else None,
+             "built_at": now.strftime("%Y-%m-%dT%H:%MZ")}
+    _write_private(os.path.join(directory, "nav_payloads.json"), {"stats": stats, "items": items})
+    if stats["funds"] and stats["exact"] < stats["funds"]:
+        say("::warning::datos propios: %d de %d fondos sin NAV exacto (la RPC conserva el último NAV bueno)" % (stats["funds"] - stats["exact"], stats["funds"]))
+    if warns or dropped:
+        say("::warning::datos propios: algunos elementos no se han podido recoger (%s; sin datos personales en el log)" % (
+            "; ".join("%s x%d" % kv for kv in sorted(warns.items())) + ("; descartados x%d" % dropped if dropped else "")))
+    return 0
+
+
+def _nav_age_days(latest, now):
+    """Edad en días de la fecha ISO `latest` respecto a `now`; None si no hay fecha o no se entiende."""
+    try:
+        return (now.date() - datetime.strptime(latest, "%Y-%m-%d").date()).days
+    except (TypeError, ValueError):
+        return None
+
+
+def _nav_age_text(latest, now):
+    try:
+        return "%s (%d d)" % (latest, (now.date() - datetime.strptime(latest, "%Y-%m-%d").date()).days)
+    except (TypeError, ValueError):
+        return "sin fecha"
+
+
+def _rpc_is_missing(e):
+    """La RPC no existe (todavía) en Supabase: 404 / PGRST202 (no está en la caché de esquema) / 42883 (undefined_function)."""
+    return e.status == 404 or e.code in ("PGRST202", "42883")
+
+
+def _rpc_is_forbidden(e):
+    return e.status in (401, 403) or e.code == "42501"
+
+
+def step_publish_nav(cfg, directory, env=None, now=None):
+    """Modo solo NAV, paso con token: una llamada a publish_personal_nav por usuario. Devuelve el código de salida:
+      * RPC inexistente  => 1 con un error claro y SIN publicar nada; salvo PERSONAL_NAV_FALLBACK_FULL=1 (explícito): aviso, fallback_full=true en $GITHUB_OUTPUT
+        (el workflow ejecuta entonces el build y el publish COMPLETOS) y 0.
+      * token rechazado (42501 'forbidden' / 401 / 403) => 1.
+      * {"ok":false,"reason":"no_payload"} => se anota y se sigue (el job completo creará el payload).
+      * otro fallo (red, 5xx, respuesta rara) de un usuario => aviso y se sigue con el siguiente; no tumba el run.
+    Escribe UNA línea de resumen por run (solo contadores y la fecha del NAV más reciente)."""
+    env = os.environ if env is None else env
+    now = now or datetime.now(timezone.utc)
+    path = os.path.join(directory, "nav_payloads.json")
+    if not os.path.isfile(path):
+        return 0
+    data = _read_private(path)
+    stats, items = data["stats"], data["items"]
+    res = {"ok": 0, "updated": 0, "kept": 0, "added": 0, "no_payload": 0, "failed": 0}
+    rc = 0
+    fallback = False
+    for item in items:
+        if nav_problems(item["funds"]) or not _USER_RE.match(item["user"]):                  # última barrera antes de enviar nada
+            res["failed"] += 1
+            continue
+        try:
+            out = rpc(cfg, RPC_PUBLISH_NAV, {"p_token": cfg["token"], "p_user": item["user"], "p_funds": item["funds"]})
+        except RpcError as e:
+            if _rpc_is_missing(e):
+                if env.get(FALLBACK_FULL_ENV, "").strip() == "1":
+                    say("::warning::datos propios: RPC publish_personal_nav no existe todavía; %s=1 => este run publica el payload COMPLETO como alternativa" % FALLBACK_FULL_ENV)
+                    _set_output(env, "fallback_full", "true")
+                    fallback = True
+                else:
+                    say("::error::datos propios: RPC publish_personal_nav no existe todavía (aplica la migración SQL en Supabase; HTTP/código: %s/%s). No se ha publicado nada; "
+                        "el job completo sigue publicando por su cuenta." % (e.status, e.code))
+                    rc = 1
+                res["failed"] += 1
+                break
+            if _rpc_is_forbidden(e):
+                say("::error::datos propios: publish_personal_nav rechazó el token (42501 forbidden / HTTP %s). No se ha publicado nada más." % e.status)
+                res["failed"] += 1
+                rc = 1
+                break
+            res["failed"] += 1
+            say("::warning::datos propios: no se pudo publicar el NAV de un usuario en Supabase (%s)" % e)
+            continue
+        if isinstance(out, dict) and out.get("ok") is True and all(isinstance(out.get(k), int) and not isinstance(out.get(k), bool) and out[k] >= 0
+                                                                   for k in ("updated", "kept", "added")):
+            res["ok"] += 1
+            for k in ("updated", "kept", "added"):
+                res[k] += out[k]
+        elif isinstance(out, dict) and out.get("ok") is False and out.get("reason") == "no_payload":
+            res["no_payload"] += 1                                  # aún no hay payload completo de ese usuario: lo creará el job completo
+        else:
+            res["failed"] += 1
+            say("::warning::datos propios: respuesta inesperada de publish_personal_nav (un usuario)")
+    say("datos propios: NAV: %d fondos, %d con NAV exacto, NAV más reciente %s; RPC: %d usuarios ok (actualizados %d, conservados %d, añadidos %d), %d sin payload completo, %d fallidos [run %s]" % (
+        stats["funds"], stats["exact"], _nav_age_text(stats.get("latest"), now), res["ok"], res["updated"], res["kept"], res["added"], res["no_payload"], res["failed"],
+        now.strftime("%Y-%m-%dT%H:%MZ")))
+    # AU-07: se deja un estado de valor fijo para el latido del workflow (el código de salida de este modo no cambia: un fallo de un usuario no tumba el run,
+    # pero el latido manda /fail):
+    #   failed = algún usuario no se publicó · old = el NAV más reciente supera NAV_FAIL_DAYS días, o ningún fondo tiene NAV exacto · ok = el resto.
+    state = "ok"
+    if rc != 0 or (res["failed"] and not fallback):             # con el fallback al payload completo el fallo de la RPC de NAV ya se compensa (y si el completo falla, falla el job)
+        state = "failed"
+    elif stats["funds"] and (not stats["exact"] or _nav_age_days(stats.get("latest"), now) is None or _nav_age_days(stats.get("latest"), now) > NAV_FAIL_DAYS):
+        state = "old"
+    _set_output(env, "nav_state", state)
+    return rc
+
+
+def main(argv=None, fetchers=None, plain_text=None, env=None, now=None):
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[1])
+    ap.add_argument("step", choices=("watch", "build", "publish", "all"))
+    ap.add_argument("--dir", "--out", dest="dir", required=True, help="carpeta de trabajo PRIVADA (p. ej. $RUNNER_TEMP/personal); nunca un artefacto")
+    ap.add_argument("--registry", default="registry.json")
+    ap.add_argument("--github-output", action="store_true", help="watch: escribe work=true|false en $GITHUB_OUTPUT (salida temprana del workflow)")
+    ap.add_argument("--nav-only", action="store_true", help="modo solo NAV: watch (work solo si hay fichas), build y publish de nav_payloads.json con publish_personal_nav")
+    ap.add_argument("--nav-warn-days", type=int, default=NAV_WARN_DAYS, help="build: avisa si algún NAV tiene más de tantos días (por defecto %d)" % NAV_WARN_DAYS)
+    a = ap.parse_args(argv)
+    if a.step in ("watch", "publish", "all"):
+        cfg, problem, fatal = read_config(env)
+        if cfg is None:
+            say(("::error::datos propios: " if fatal else "::warning::datos propios: ") + problem)
+            return 1 if fatal else 0
+    else:
+        cfg = None
+    if a.step in ("watch", "all"):
+        step_watch(cfg, a.dir, a.github_output, env, a.nav_only)
+    if a.step in ("build", "all"):
+        if a.nav_only:
+            step_build_nav(a.dir, fetchers, plain_text, now)
+        else:
+            step_build(a.dir, a.registry, fetchers, plain_text, now, a.nav_warn_days)
+    if a.step in ("publish", "all"):
+        if a.nav_only:
+            return step_publish_nav(cfg, a.dir, env, now)
+        return step_publish(cfg, a.dir)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
