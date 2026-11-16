@@ -646,13 +646,15 @@ def _v2_triggers():
 def test_v2_estructura_permisos_minimos_y_dependencias():
     wf = load(V2)
     jobs = wf["jobs"]
-    assert set(jobs) == {"fetch", "publish", "verify", "heartbeat"}          # `personal` vive en personal-nav.yml
+    # REQUISITO CAMBIADO (AU01-F1, pieza 1): nuevo job `gate` (puerta de frescura, sin permisos) antes de fetch, y el heartbeat también depende de él.
+    assert set(jobs) == {"gate", "fetch", "publish", "verify", "heartbeat"}  # `personal` vive en personal-nav.yml
     assert wf["permissions"] == {}                                                       # nada por defecto
-    assert jobs["fetch"]["permissions"] == {"contents": "read"}
+    assert jobs["gate"]["permissions"] == {} and "needs" not in jobs["gate"]
+    assert jobs["fetch"]["permissions"] == {"contents": "read"} and jobs["fetch"]["needs"] == "gate"
     assert jobs["publish"]["permissions"] == {"pages": "write", "id-token": "write"}      # los dos y solo esos
     assert jobs["verify"]["permissions"] == {} and jobs["heartbeat"]["permissions"] == {}
     assert jobs["publish"]["needs"] == "fetch" and jobs["verify"]["needs"] == "publish"
-    assert set(jobs["heartbeat"]["needs"]) == {"fetch", "publish"} and jobs["verify"]["continue-on-error"] is True
+    assert set(jobs["heartbeat"]["needs"]) == {"gate", "fetch", "publish"} and jobs["verify"]["continue-on-error"] is True
     assert all("verify" not in (j.get("needs") if isinstance(j.get("needs"), list) else [j.get("needs")]) for n, j in jobs.items() if n != "verify")
     assert jobs["publish"]["environment"]["name"] == "github-pages"
     assert wf["concurrency"] == {"group": "publish-feed-v2", "cancel-in-progress": False}
@@ -708,7 +710,8 @@ def test_v2_el_cron_esta_gobernado_por_la_variable_y_el_workflow_viejo_no_cambia
         assert "FEED_V2_ENABLED" in cond and "schedule" in cond
     assert "always()" in wf["jobs"]["heartbeat"]["if"]
     t = _v2_triggers()
-    assert t["schedule"] == [{"cron": "47 6,11,15,21 * * *"}] and set(t["workflow_dispatch"]["inputs"]) == {"allow_regression", "force_all"}
+    # REQUISITO CAMBIADO (AU01-F1, pieza 1): nuevo input `force` (salta la puerta de frescura).
+    assert t["schedule"] == [{"cron": "47 6,11,15,21 * * *"}] and set(t["workflow_dispatch"]["inputs"]) == {"allow_regression", "force_all", "force"}
     old = load("update-data.yml")
     old_t = old.get("on", old.get(True))
     assert old_t["schedule"] == [{"cron": "17 6,11,15,21 * * *"}]                           # el cron viejo, intacto

@@ -20,6 +20,10 @@ on:
         description: 'Refrescar TODOS los símbolos (ignora los niveles hot/warm/cold). Cuesta ~una vez y media las peticiones a Yahoo de un run normal.'
         type: boolean
         default: false
+      force:
+        description: 'Trabajar aunque el feed publicado tenga menos de 40 min (salta la puerta de frescura del job gate).'
+        type: boolean
+        default: false
 
 # Los datos PROPIOS del dueño (NAV de iShares, facts y series en Supabase) ya NO se publican desde aquí: viven en personal-nav.yml (cada 30 min, lunes a viernes,
 # concurrencia propia), que es el único escritor en Supabase.
@@ -34,8 +38,53 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  fetch:
+  # Puerta de frescura (AU01-F1): dos relojes lanzan este workflow (el disparador externo por workflow_dispatch y el cron de GitHub de respaldo). Si el
+  # manifest.json publicado tiene menos de 40 min y el run no es manual con force=true, skip=true y el resto de jobs se salta: el run termina en verde en
+  # segundos, sin pedir nada a Yahoo. FALLO CERRADO: manifest ausente, ilegible o con generated_at malformado o en el futuro => skip=false (se trabaja).
+  # Sin secretos ni permisos y solo biblioteca estándar (python3 -S): solo lee el manifest público de Pages.
+  gate:
     if: ${{ github.event_name != 'schedule' || vars.FEED_V2_ENABLED == 'true' }}
+    permissions: {}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 3
+    outputs:
+      skip: ${{ steps.gate.outputs.skip }}
+    steps:
+      - name: Check out scripts only
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            scripts
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Resolve published feed URL
+        env:
+          OVERRIDE: ${{ vars.FEED_V2_BASE_URL }}
+        run: |
+          if [ -n "$OVERRIDE" ]; then
+            base="$OVERRIDE"
+          else
+            owner=$(printf '%s' "${GITHUB_REPOSITORY%%/*}" | tr 'A-Z' 'a-z')
+            base="https://${owner}.github.io/${GITHUB_REPOSITORY#*/}/v2"
+          fi
+          case "$base" in
+            https://*) ;;
+            *) echo "::error::FEED_V2_BASE_URL debe empezar por https://"; exit 1 ;;
+          esac
+          echo "FEED_BASE=${base%/}" >> "$GITHUB_ENV"
+
+      - name: Freshness gate (stdlib only, no secrets)
+        id: gate
+        env:
+          EVENT: ${{ github.event_name }}
+          FORCE: ${{ inputs.force }}
+        run: python3 -S scripts/freshness_gate.py --base-url "$FEED_BASE" --event "$EVENT" --force "$FORCE" --github-output
+
+  fetch:
+    needs: gate
+    # !cancelled() y comparación con 'true': si el job gate fallase (sin salida), se trabaja igualmente (fallo cerrado hacia «hacer el trabajo»).
+    if: ${{ !cancelled() && needs.gate.outputs.skip != 'true' && (github.event_name != 'schedule' || vars.FEED_V2_ENABLED == 'true') }}
     # Instala dependencias de terceros (yfinance...) y ejecuta su código: solo lectura y sin acceso a Pages. Su salida (el sitio) se trata como NO
     # fiable: la valida el job `publish`, que no ejecuta nada de terceros.
     permissions:
@@ -99,6 +148,8 @@ jobs:
 
   publish:
     needs: fetch
+    # Explícito (no el success() implícito, que también mira a gate): publica si y solo si fetch terminó bien.
+    if: ${{ !cancelled() && needs.fetch.result == 'success' }}
     # Único job con permisos de publicación. NO instala ni ejecuta paquetes de terceros: baja el artefacto, lo VALIDA con scripts/sanity_check_v2.py
     # (sacado del repo, no del artefacto) contra una descarga PROPIA del sitio publicado, y solo entonces lo despliega.
     permissions:
@@ -198,6 +249,7 @@ jobs:
   # Comprobación informativa FUERA del camino crítico: Pages ya sirve el sitio nuevo. Pages cachea unos minutos; un desfase no es un fallo.
   verify:
     needs: publish
+    if: ${{ !cancelled() && needs.publish.result == 'success' }}
     continue-on-error: true
     permissions: {}
     runs-on: ubuntu-24.04
@@ -242,9 +294,11 @@ jobs:
           exit 0
 
   # Latido para Healthchecks.io: avisa si el workflow FALLA, se CANCELA, agota el timeout o deja de ejecutarse. La URL va en un secreto (el repo es
-  # público): HC_UPDATE_V2_URL si existe (check propio, recomendado) y, si no, HC_UPDATE_URL. Solo depende de fetch y publish.
+  # público): HC_UPDATE_V2_URL si existe (check propio, recomendado) y, si no, HC_UPDATE_URL. Depende de gate, fetch y publish.
+  # Salida por frescura (gate skip=true): NI ping OK NI /fail, sino un /log informativo (no cambia el estado del check ni reinicia su contador). El run
+  # que sí trabajó hace < 40 min ya mandó su OK o su /fail «degraded»; un OK aquí podría tapar ese aviso y un /fail sería falso.
   heartbeat:
-    needs: [fetch, publish]
+    needs: [gate, fetch, publish]
     if: ${{ always() && (github.event_name != 'schedule' || vars.FEED_V2_ENABLED == 'true') }}
     permissions: {}
     runs-on: ubuntu-24.04
@@ -253,6 +307,7 @@ jobs:
       - name: Ping Healthchecks.io
         env:
           HC: ${{ secrets.HC_UPDATE_V2_URL || secrets.HC_UPDATE_URL }}
+          SKIP: ${{ needs.gate.outputs.skip }}
           FETCH: ${{ needs.fetch.result }}
           PUBLISH: ${{ needs.publish.result }}
           ALERTS: ${{ needs.publish.outputs.alerts }}
@@ -276,6 +331,10 @@ jobs:
             exit 0
           fi
           HC="${HC%/}"
+          if [ "${SKIP:-}" = "true" ]; then
+            curl -fsS -m 10 --retry 3 --retry-all-errors --data-raw "fresh-skip: feed publicado hace menos de 40 min, run sin trabajo" "$HC/log" >/dev/null || echo "::warning::no se pudo enviar el /log a Healthchecks"
+            exit 0
+          fi
           if [ "$FETCH" = "success" ] && [ "$PUBLISH" = "success" ]; then
             if [ -n "${ALERTS:-}" ]; then
               # Publicado, pero con datos degradados: Healthchecks lo marca como caído con el motivo (el siguiente run limpio lo recupera).
