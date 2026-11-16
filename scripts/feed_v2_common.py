@@ -82,8 +82,10 @@ MAX_NAME_LEN = 80
 MAX_REGISTRY_SYMBOLS = 400
 _NAME_BAD_RE = re.compile(r"[<>\x00-\x1f\x7f]")
 
-# Frecuencia mínima entre dos refrescos de un símbolo según su nivel (el cron es 4 veces al día: hot = en cada run, warm = ~1 vez al día).
-TIER_MIN_INTERVAL_HOURS = {"hot": 3, "warm": 20, "cold": 6 * 24}
+# Frecuencia mínima entre dos refrescos de un símbolo según su nivel. hot = en cada run (AU01-F1: el disparador externo lanza el workflow cada ~60 min en
+# sesión; 45 min deja 15 min de margen para el desfase de arranque entre dos runs y queda 5 min por encima de la puerta de frescura de 40 min),
+# warm = ~1 vez al día, cold = ~1 vez por semana.
+TIER_MIN_INTERVAL_HOURS = {"hot": 0.75, "warm": 20, "cold": 6 * 24}
 # Un símbolo `invalid`/`delisted` se reintenta como mucho una vez a la semana; `dormant` no se pide nunca.
 RETRY_INVALID_HOURS = 7 * 24
 FAIL_STREAK_INVALID = 5
