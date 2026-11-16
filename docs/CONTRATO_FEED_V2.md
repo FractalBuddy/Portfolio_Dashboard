@@ -497,7 +497,8 @@ Supabase y lo escribe el backend con dos RPC. El árbol actual del repo no conti
         "name": "Fondo Falso A",
         "url": "https://www.ishares.com/ch/individual/en/products/000001/fake-fund-a",
         "proxy_symbol": "FAKEP",
-        "prev_price": 25.4
+        "prev_price": 25.4,
+        "prev_nav_date_iso": "2026-10-23"
       }
     ],
     "symbols": [
@@ -510,7 +511,10 @@ Supabase y lo escribe el backend con dos RPC. El árbol actual del repo no conti
 <!-- /ejemplo -->
 
   `funds[].url` debe ser `https://*.ishares.com/...` (cualquier otra URL se descarta y no se pide jamás); `prev_price` (opcional) es el último NAV publicado: un NAV nuevo fuera de
-  0,5–2× su valor se considera un error de parseo y no se publica. `symbols` y `proxy_symbol` siguen la regla de símbolo del §2. Máximos: 20 usuarios, 20 fondos y 40 símbolos por usuario.
+  0,5–2× su valor se considera un error de parseo y no se publica. `prev_nav_date_iso` (opcional, AAAA-MM-DD; AU01-F1) es la `nav_date_iso` del NAV ya guardado de ese fondo: la usa **solo**
+  la parada temprana de `personal-nav.yml` (si **todos** los fondos con ficha tienen el NAV del último día hábil esperado, no se visita iShares); si falta, no es una fecha válida o es
+  posterior a hoy, se ignora y la ficha se visita como siempre (fallo cerrado). **Orden de despliegue:** primero el backend que la acepta y después el SQL que la envía (un fondo con una
+  clave desconocida se descarta entero). `symbols` y `proxy_symbol` siguen la regla de símbolo del §2. Máximos: 20 usuarios, 20 fondos y 40 símbolos por usuario.
 * **`publish_personal_feed(p_token text, p_user text, p_payload jsonb)`** recibe, por usuario, este payload (≤ 1 MB; el backend lo recorta si hace falta, ver «Series»). Campos:
   `funds` (NAV y facts por ISIN), `series` (solo cierres diarios `d`/`c`, sin `o`/`h`/`l`/`v`) y `public` (símbolos extra que sí están en el universo público y por eso **no** se repiten).
 

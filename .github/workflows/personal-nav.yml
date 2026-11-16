@@ -54,6 +54,8 @@ jobs:
           cache: pip
 
       # Solo biblioteca estándar (`python3 -S`: sin site-packages, ningún paquete de terceros puede cargarse). Escribe work=true|false en $GITHUB_OUTPUT.
+      # PARADA TEMPRANA (AU01-F1): work=false también si TODOS los fondos con ficha tienen ya el NAV del último día hábil esperado (prev_nav_date_iso de la
+      # lista): no se pide nada a iShares. Si el campo falta o es raro, se visita la ficha como siempre (fallo cerrado). Regla en personal_v2.nav_expected_date.
       - name: Read personal watch list (token, stdlib only)
         id: watch
         env:
