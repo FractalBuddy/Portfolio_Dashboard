@@ -250,3 +250,22 @@ def test_ningun_workflow_contiene_urls_ni_valores_de_secretos(name):
 ])
 def test_control_negativo_el_detector_encuentra_cada_forma(sample, why):
     assert any(re.search(pat, sample) and why.lower() in w.lower() for pat, w in SECRET_SHAPES), sample
+
+
+# ------------------------------------------------------------------ pieza 5: documentación
+def test_el_readme_documenta_los_dos_relojes_la_puerta_force_y_la_parada_temprana():
+    root = WF.parent.parent
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    cadencia = readme[readme.index("## Cadencia real de GitHub Actions"):readme.index("## Runbook")]
+    for frag in ("dos relojes", "Disparador externo", "respaldo", "Puerta de frescura", "40 min", "**`force`**", "Parada temprana", "último día hábil esperado",
+                 "prev_nav_date_iso", "no están medidas", "fase en sombra", '{"ref":"main"}', "refs/heads/main", "45 min"):
+        assert frag in cadencia, frag
+    for name, crs in EXPECTED_CRON.items():                       # la tabla del README dice las mismas horas que los YAML
+        row = next(line for line in cadencia.splitlines() if line.startswith("| `%s`" % name))
+        for cr in crs:
+            minute, hour = cr.split()[:2]
+            for h in hour.split(","):
+                assert "%02d:%s" % (int(h), minute) in row, (name, h, minute)
+    assert "23,53 5-21" not in readme and "47 6,11,15,21" not in readme and "38 6,11,15,21" not in readme
+    doc = (root / "docs" / "CONTRATO_FEED_V2.md").read_text(encoding="utf-8")
+    assert "prev_nav_date_iso" in doc and "23,53 5-21" not in doc and "38 6,11,15,21" not in doc
