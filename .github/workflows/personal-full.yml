@@ -2,12 +2,13 @@ name: Personal full
 
 # Datos PROPIOS del dueño, payload COMPLETO (funds + series con el histórico largo de los proxies), 4 veces al día. La lista a seguir se lee de Supabase y el resultado se
 # publica de vuelta con publish_personal_feed; NUNCA en el repo, en un artefacto ni en los logs (los de un repo público son públicos: solo contadores).
-# El NAV de iShares con más frecuencia (cada ~30 min) lo publica personal-nav.yml con la RPC publish_personal_nav; aquí el NAV se vuelve a leer igualmente, así que este
+# El NAV de iShares con más frecuencia (cada ~60 min, disparador externo, con parada temprana) lo publica personal-nav.yml con la RPC publish_personal_nav; aquí el NAV se vuelve a leer igualmente, así que este
 # job funciona SOLO (también antes de que exista esa RPC) y es el que CREA el payload de un usuario nuevo (publish_personal_nav devuelve no_payload hasta entonces).
 #
-# Frecuencia: 06:38, 11:38, 15:38 y 21:38 UTC, todos los días (misma cadencia de 4 al día que el feed público v2: 06:47, 11:47, 15:47, 21:47). Motivos:
-#   * El histórico de los proxies solo cambia al cerrar cada bolsa: 4 fotos al día cubren la apertura europea (06:38, con el cierre de ayer), la tarde europea (11:38, 15:38) y el cierre
+# Frecuencia (AU01-F1): el cron es RESPALDO del disparador externo (workflow_dispatch): 06:38, 13:38 y 21:38 UTC, todos los días. Motivos:
+#   * El histórico de los proxies solo cambia al cerrar cada bolsa: 3 fotos al día cubren la apertura europea (06:38, con el cierre de ayer), la tarde europea (13:38) y el cierre
 #     de EE. UU. (21:38: Nueva York cierra a las 20:00-21:00 UTC según el horario de verano). Más runs no aportarían series nuevas y cada uno cuesta ~2 peticiones a Yahoo por proxy con `period=max`.
+#   * El job (con secretos) solo corre sobre refs/heads/main: un workflow_dispatch con otra rama no ejecuta código viejo con el token.
 #   * Todos los días (no solo laborables): un usuario nuevo recibe su payload completo en ≤ 6 h aunque lo añada en fin de semana; en fin de semana solo se repite lo del viernes.
 #   * Minuto :38, a propósito: cae a mitad de camino entre los runs de NAV (:23 y :53), a ≥ 15 min de cada uno (el run completo dura ~2 min), y no coincide con update-data (:17) ni con
 #     publish-feed-v2 (:47). GitHub retrasa y a veces descarta los cron en :00/:30. Un run descartado o retrasado no importa: el siguiente publica el estado completo.
@@ -15,15 +16,17 @@ name: Personal full
 # Relación con personal-nav.yml (NO comparten concurrencia, a propósito):
 #   * Los dos escriben el mismo payload de usuario en Supabase: este lo SUSTITUYE entero (publish_personal_feed) y el de NAV fusiona solo `funds` (publish_personal_nav). Si un run de NAV
 #     publicase justo entre la lectura de la ficha de este run y su publicación, este run reescribiría ese NAV con el que él leyó unos minutos antes; se corrige solo en el siguiente run de
-#     NAV (≤ 30 min, y la RPC de NAV no acepta un NAV con nav_date_iso más antigua que el guardado) y por el desfase de minutos de arriba es muy improbable. No se compensa serializando:
-#     con un grupo de concurrencia común GitHub guarda UN solo run pendiente y un run de NAV pendiente descartaría a este (que solo ocurre 4 veces al día y es el que crea los payloads).
+#     NAV (la RPC de NAV no acepta un NAV con nav_date_iso más antigua que el guardado) y por el desfase de minutos de arriba es muy improbable. Con la parada temprana de NAV
+#     (AU01-F1): si el NAV reescrito es anterior al último día hábil esperado, el siguiente run de NAV visita la ficha y lo corrige; si es el esperado (y el pisado era aún más
+#     nuevo), se recupera como tarde al día hábil siguiente. No se compensa serializando:
+#     con un grupo de concurrencia común GitHub guarda UN solo run pendiente y un run de NAV pendiente descartaría a este (que es el que crea los payloads).
 #   * Dos runs de ESTE job nunca se pisan: grupo propio `personal-full`.
 #
 # Mientras la variable de repo FEED_V2_ENABLED no valga `true` el cron NO hace nada; el lanzamiento manual (Run workflow) funciona siempre.
 # Si la lista de Supabase no tiene nada que refrescar (ningún fondo con ficha de iShares ni símbolos) el job sale justo después de leerla, sin instalar nada.
 on:
   schedule:
-    - cron: '38 6,11,15,21 * * *'
+    - cron: '38 6,13,21 * * *'
   workflow_dispatch:
 
 # Por defecto NADA. El único job pide solo lectura del repo.
@@ -37,7 +40,7 @@ concurrency:
 
 jobs:
   personal-full:
-    if: ${{ github.event_name != 'schedule' || vars.FEED_V2_ENABLED == 'true' }}
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name != 'schedule' || vars.FEED_V2_ENABLED == 'true') }}
     permissions:
       contents: read
     runs-on: ubuntu-24.04

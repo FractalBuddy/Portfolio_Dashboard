@@ -5,11 +5,17 @@ name: Publish feed v2
 #
 # Activación (a mano, una vez): Settings -> Pages -> Source: GitHub Actions. Mientras no esté activada y la variable de repo FEED_V2_ENABLED no
 # valga `true`, el cron NO hace nada (los jobs se omiten); el lanzamiento manual (Run workflow) funciona siempre.
+#
+# Dos relojes (AU01-F1): el principal es un disparador EXTERNO que lanza workflow_dispatch cada ~60 min en horario de mercado; el cron de abajo es solo
+# RESPALDO (GitHub lo retrasa horas y se salta franjas). La puerta de frescura (job gate) evita repetir el trabajo si los dos coinciden.
+# Los jobs con secretos (y el despliegue) solo corren sobre refs/heads/main: un workflow_dispatch lanzado con otra rama no ejecuta código viejo con secretos.
 on:
   schedule:
-    # 4 veces al día (UTC), media hora después que update-data.yml (:17) para no coincidir en la misma IP de runner con Yahoo:
-    # 06:47, 11:47, 15:47, 21:47. Minuto «feo» a propósito (los cron en :00 son los que más retrasa GitHub).
-    - cron: '47 6,11,15,21 * * *'
+    # Respaldo (UTC), minuto «feo» :47 (los cron en :00/:30 son los que más retrasa GitHub; update-data.yml va a :17):
+    #   L-V: 07:47 (mañana europea, con el cierre de ayer), 13:47 (tarde europea / apertura de EE. UU.) y 21:47 (tras el cierre de EE. UU.).
+    #   Sábado y domingo: 09:47 y 18:47 (cripto, noticias; las bolsas están cerradas).
+    - cron: '47 7,13,21 * * 1-5'
+    - cron: '47 9,18 * * 0,6'
   workflow_dispatch:
     inputs:
       allow_regression:
@@ -25,7 +31,7 @@ on:
         type: boolean
         default: false
 
-# Los datos PROPIOS del dueño (NAV de iShares, facts y series en Supabase) ya NO se publican desde aquí: viven en personal-nav.yml (cada 30 min, lunes a viernes,
+# Los datos PROPIOS del dueño (NAV de iShares, facts y series en Supabase) ya NO se publican desde aquí: viven en personal-nav.yml (cada ~60 min, lunes a viernes,
 # concurrencia propia), que es el único escritor en Supabase.
 #
 # Por defecto NADA. Cada job pide solo lo que usa: `fetch` (código de terceros) lee el repo; `publish` (sin código de terceros) escribe en Pages.
@@ -84,7 +90,7 @@ jobs:
   fetch:
     needs: gate
     # !cancelled() y comparación con 'true': si el job gate fallase (sin salida), se trabaja igualmente (fallo cerrado hacia «hacer el trabajo»).
-    if: ${{ !cancelled() && needs.gate.outputs.skip != 'true' && (github.event_name != 'schedule' || vars.FEED_V2_ENABLED == 'true') }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.gate.outputs.skip != 'true' && (github.event_name != 'schedule' || vars.FEED_V2_ENABLED == 'true') }}
     # Instala dependencias de terceros (yfinance...) y ejecuta su código: solo lectura y sin acceso a Pages. Su salida (el sitio) se trata como NO
     # fiable: la valida el job `publish`, que no ejecuta nada de terceros.
     permissions:
@@ -149,7 +155,7 @@ jobs:
   publish:
     needs: fetch
     # Explícito (no el success() implícito, que también mira a gate): publica si y solo si fetch terminó bien.
-    if: ${{ !cancelled() && needs.fetch.result == 'success' }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.fetch.result == 'success' }}
     # Único job con permisos de publicación. NO instala ni ejecuta paquetes de terceros: baja el artefacto, lo VALIDA con scripts/sanity_check_v2.py
     # (sacado del repo, no del artefacto) contra una descarga PROPIA del sitio publicado, y solo entonces lo despliega.
     permissions:
@@ -249,7 +255,7 @@ jobs:
   # Comprobación informativa FUERA del camino crítico: Pages ya sirve el sitio nuevo. Pages cachea unos minutos; un desfase no es un fallo.
   verify:
     needs: publish
-    if: ${{ !cancelled() && needs.publish.result == 'success' }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/main' && needs.publish.result == 'success' }}
     continue-on-error: true
     permissions: {}
     runs-on: ubuntu-24.04
@@ -299,7 +305,7 @@ jobs:
   # que sí trabajó hace < 40 min ya mandó su OK o su /fail «degraded»; un OK aquí podría tapar ese aviso y un /fail sería falso.
   heartbeat:
     needs: [gate, fetch, publish]
-    if: ${{ always() && (github.event_name != 'schedule' || vars.FEED_V2_ENABLED == 'true') }}
+    if: ${{ always() && github.ref == 'refs/heads/main' && (github.event_name != 'schedule' || vars.FEED_V2_ENABLED == 'true') }}
     permissions: {}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
