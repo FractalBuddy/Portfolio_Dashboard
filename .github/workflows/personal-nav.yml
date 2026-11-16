@@ -1,17 +1,19 @@
 name: Personal NAV
 
-# Job SOLO NAV de los datos PROPIOS del dueño: cada ~30 min lee la lista de Supabase (personal_watch_for_backend), visita ÚNICAMENTE las fichas de iShares de cada fondo (una petición por ficha;
+# Job SOLO NAV de los datos PROPIOS del dueño: cada ~60 min (disparador externo; cron de respaldo) lee la lista de Supabase (personal_watch_for_backend), visita ÚNICAMENTE las fichas de iShares de cada fondo (una petición por ficha;
 # nada de Yahoo ni de series) y publica el resultado con la RPC publish_personal_nav(p_token, p_user, p_funds) (< 1 KB por fondo; tope 64 KB). La RPC fusiona esos fondos en el payload
 # completo que ya tiene el usuario. El payload completo (con las series largas de los proxies) lo publica personal-full.yml 4 veces al día con publish_personal_feed. Detalle y contrato
 # en docs/CONTRATO_FEED_V2.md §5 y medidas en auditorias/FIXES_G2_NAV_SOLO.md. Nada del dueño va al repo, a un artefacto ni a los logs (los de un repo público son públicos): una
 # línea por run con contadores, la fecha del NAV más reciente y el resultado de la RPC.
 #
-# Frecuencia: cada 30 min, de lunes a viernes, de 05:23 a 21:53 UTC (34 runs al día). Justificación:
-#   * Un run cuesta ~1 petición a iShares por fondo (<= 2 con dos fondos) y ~30 s de runner (checkout + dependencias con caché); el feed público hace ~545 peticiones a Yahoo al día y este
-#     workflow ya no hace ninguna. Repo público => minutos de Actions gratuitos.
-#   * Solo laborables: la ficha no cambia en fin de semana. Ventana 05-21 UTC: cubre la mañana y la tarde europeas (verano e invierno).
-#   * Minutos «feos» (:23 y :53) a propósito: GitHub retrasa y a veces descarta los cron en :00/:30; tampoco coinciden con update-data (:17), publish-feed-v2 (:47) ni personal-full (:38).
+# Frecuencia (AU01-F1): el reloj principal es un disparador EXTERNO que lanza workflow_dispatch cada ~60 min en horario de mercado; el cron de abajo es solo
+# RESPALDO, 3 franjas de lunes a viernes (07:23, 11:23 y 16:23 UTC). Justificación:
+#   * PARADA TEMPRANA: si todos los fondos ya tienen el NAV del último día hábil esperado, el run sale en el paso watch sin pedir nada a iShares; así un fondo
+#     recibe pocas visitas al día (hasta que aparece el NAV nuevo) en vez de ~34.
+#   * Solo laborables: la ficha no cambia en fin de semana. Mañana y tarde europeas (verano e invierno).
+#   * Minuto «feo» (:23) a propósito: GitHub retrasa y a veces descarta los cron en :00/:30; tampoco coincide con update-data (:17), publish-feed-v2 (:47) ni personal-full (:38).
 #     Un run descartado o retrasado no importa: cada run envía todos los fondos y el siguiente lo corrige.
+#   * El job (con secretos) solo corre sobre refs/heads/main: un workflow_dispatch con otra rama no ejecuta código viejo con el token.
 #
 # Compatibilidad con el SQL: mientras publish_personal_nav no exista en Supabase, el run FALLA con un error claro («RPC publish_personal_nav no existe todavía») y no publica nada; el job
 # personal-full sigue publicando por su cuenta, así que se puede mergear este cambio antes o después de aplicar el SQL. Solo si la variable de repo PERSONAL_NAV_FALLBACK_FULL vale `1`
@@ -22,7 +24,7 @@ name: Personal NAV
 # Latido opcional: el secreto HEALTHCHECK_PERSONAL_NAV_URL (vacío = no hace nada), ver README.
 on:
   schedule:
-    - cron: '23,53 5-21 * * 1-5'
+    - cron: '23 7,11,16 * * 1-5'
   workflow_dispatch:
 
 # Por defecto NADA. El único job pide solo lectura del repo.
@@ -36,7 +38,7 @@ concurrency:
 
 jobs:
   personal-nav:
-    if: ${{ github.event_name != 'schedule' || vars.FEED_V2_ENABLED == 'true' }}
+    if: ${{ github.ref == 'refs/heads/main' && (github.event_name != 'schedule' || vars.FEED_V2_ENABLED == 'true') }}
     permissions:
       contents: read
     runs-on: ubuntu-24.04
@@ -54,6 +56,8 @@ jobs:
           cache: pip
 
       # Solo biblioteca estándar (`python3 -S`: sin site-packages, ningún paquete de terceros puede cargarse). Escribe work=true|false en $GITHUB_OUTPUT.
+      # PARADA TEMPRANA (AU01-F1): work=false también si TODOS los fondos con ficha tienen ya el NAV del último día hábil esperado (prev_nav_date_iso de la
+      # lista): no se pide nada a iShares. Si el campo falta o es raro, se visita la ficha como siempre (fallo cerrado). Regla en personal_v2.nav_expected_date.
       - name: Read personal watch list (token, stdlib only)
         id: watch
         env:

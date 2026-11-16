@@ -28,10 +28,11 @@ Con dominio propio, la URL base es la variable de repo `FEED_V2_BASE_URL`. Pages
 desde aquí, así que el cliente decide cada cuánto mira `index.json` o `manifest.json` (cuyo `generated_at` dice si hay algo nuevo) y no debe tratar un
 desfase de unos minutos como un fallo.
 
-**Frescura real (no prometas más de lo que hay).** Los `cron` de GitHub Actions no son un reloj: GitHub los retrasa horas y se salta alguno. Lo programado es «4 veces al día» para el feed y «cada 30 min» para el NAV, pero lo
+**Frescura real (no prometas más de lo que hay).** Los `cron` de GitHub Actions no son un reloj: GitHub los retrasa horas y se salta alguno. Hasta AU01-F1 lo programado era «4 veces al día» para el feed y «cada 30 min» para el NAV, pero lo
 observado (auditoría del 2-nov-2026, una semana de muestra) fue ~3 runs al día del feed, con un retraso mediano de ~3 h 20 min y huecos de hasta 13 h 20 min entre dos runs, y unas pocas pasadas al día del NAV. **Un cliente no debe
-considerar «viejo» el feed antes de unas 14 horas** sin que cambie `generated_at`, ni anunciar un NAV «cada 30 min». Todos los workflows se pueden lanzar a mano (`workflow_dispatch`). Detalle y receta de disparador externo (no implementado)
-en el README, «Cadencia real de GitHub Actions».
+considerar «viejo» el feed antes de unas 14 horas** sin que cambie `generated_at`, ni anunciar un NAV «cada 30 min». Todos los workflows se pueden lanzar a mano (`workflow_dispatch`). Desde AU01-F1 el reloj principal es un disparador externo (fuera de este repo) que lanza
+`workflow_dispatch` cada ~60 min en sesión, con el cron de GitHub como respaldo (2-4 franjas al día), una puerta de frescura de 40 min en el feed y parada temprana en el NAV; su puntualidad real **no está medida**
+todavía, así que el umbral de ~14 h sigue vigente. Detalle en el README, «Cadencia real de GitHub Actions».
 
 ## 2. Convenciones
 
@@ -497,7 +498,8 @@ Supabase y lo escribe el backend con dos RPC. El árbol actual del repo no conti
         "name": "Fondo Falso A",
         "url": "https://www.ishares.com/ch/individual/en/products/000001/fake-fund-a",
         "proxy_symbol": "FAKEP",
-        "prev_price": 25.4
+        "prev_price": 25.4,
+        "prev_nav_date_iso": "2026-10-23"
       }
     ],
     "symbols": [
@@ -510,7 +512,10 @@ Supabase y lo escribe el backend con dos RPC. El árbol actual del repo no conti
 <!-- /ejemplo -->
 
   `funds[].url` debe ser `https://*.ishares.com/...` (cualquier otra URL se descarta y no se pide jamás); `prev_price` (opcional) es el último NAV publicado: un NAV nuevo fuera de
-  0,5–2× su valor se considera un error de parseo y no se publica. `symbols` y `proxy_symbol` siguen la regla de símbolo del §2. Máximos: 20 usuarios, 20 fondos y 40 símbolos por usuario.
+  0,5–2× su valor se considera un error de parseo y no se publica. `prev_nav_date_iso` (opcional, AAAA-MM-DD; AU01-F1) es la `nav_date_iso` del NAV ya guardado de ese fondo: la usa **solo**
+  la parada temprana de `personal-nav.yml` (si **todos** los fondos con ficha tienen el NAV del último día hábil esperado, no se visita iShares); si falta, no es una fecha válida o es
+  posterior a hoy, se ignora y la ficha se visita como siempre (fallo cerrado). **Orden de despliegue:** primero el backend que la acepta y después el SQL que la envía (un fondo con una
+  clave desconocida se descarta entero). `symbols` y `proxy_symbol` siguen la regla de símbolo del §2. Máximos: 20 usuarios, 20 fondos y 40 símbolos por usuario.
 * **`publish_personal_feed(p_token text, p_user text, p_payload jsonb)`** recibe, por usuario, este payload (≤ 1 MB; el backend lo recorta si hace falta, ver «Series»). Campos:
   `funds` (NAV y facts por ISIN), `series` (solo cierres diarios `d`/`c`, sin `o`/`h`/`l`/`v`) y `public` (símbolos extra que sí están en el universo público y por eso **no** se repiten).
 
@@ -606,9 +611,10 @@ Supabase y lo escribe el backend con dos RPC. El árbol actual del repo no conti
 
 * **Es opcional**: si Supabase o el token faltan, o algo falla, el run solo emite un `::warning::` (el feed público no depende de esto).
 * **Quién publica y con qué cadencia**: dos workflows, dos modos (ninguno es `publish-feed-v2.yml`), cada uno con su propia concurrencia (sin cancelar a medias):
-  * **Completo** (`personal-full.yml`, grupo `personal-full`): 06:38, 11:38, 15:38 y 21:38 UTC (`38 6,11,15,21 * * *`). Llama a `publish_personal_feed`, que **sustituye** el payload del usuario (no hay lectura del
+  * **Completo** (`personal-full.yml`, grupo `personal-full`): cron de respaldo 06:38, 13:38 y 21:38 UTC (`38 6,13,21 * * *`), más lo que lance el disparador externo. Llama a `publish_personal_feed`, que **sustituye** el payload del usuario (no hay lectura del
     anterior ni fusión): cada run envía `funds` **y** `series` (si una serie de Yahoo falla en un run, ese run publica sin ella hasta el siguiente). Es el único que **crea** el payload de un usuario nuevo.
-  * **Solo NAV** (`personal-nav.yml`, grupo `personal-nav`): programado cada 30 min, de lunes a viernes, 05:23-21:53 UTC (`23,53 5-21 * * 1-5`); GitHub lo retrasa y se salta pasadas, así que en la práctica son unas pocas al día. Solo visita las fichas de iShares (una petición por ficha, sin Yahoo, sin series) y llama a
+  * **Solo NAV** (`personal-nav.yml`, grupo `personal-nav`): disparador externo cada ~60 min en sesión y cron de respaldo L-V 07:23, 11:23 y 16:23 UTC (`23 7,11,16 * * 1-5`), con **parada temprana** si todos los fondos ya tienen el NAV del
+    último día hábil esperado (`prev_nav_date_iso` de la lista; ver arriba). Solo visita las fichas de iShares (una petición por ficha, sin Yahoo, sin series) y llama a
     `publish_personal_nav`. Ver «Modo solo NAV» abajo.
   Un cliente debe tratar `generated_at` como «último intento correcto», no como «NAV de hoy».
 * **Modo solo NAV — `publish_personal_nav(p_token text, p_user text, p_funds jsonb) returns jsonb`** (contrato fijo; la implementa el SQL, el backend solo lo llama). `personal_v2.py watch|build|publish|all --nav-only`.
@@ -622,9 +628,10 @@ Supabase y lo escribe el backend con dos RPC. El árbol actual del repo no conti
     `PERSONAL_NAV_FALLBACK_FULL` valga `1` (apagada por defecto): entonces ese run construye y publica el payload completo con `publish_personal_feed`.
   * Log (público): **una línea por run**, solo contadores y la fecha del NAV más reciente, p. ej.
     `datos propios: NAV: 2 fondos, 2 con NAV exacto, NAV más reciente 2026-10-27 (1 d); RPC: 1 usuarios ok (actualizados 2, conservados 0, añadidos 0), 0 sin payload completo, 0 fallidos [run 2026-10-28T10:23Z]`. Nunca ISIN, URL, nombres ni importes.
-  * **Por qué los dos workflows no comparten concurrencia**: GitHub guarda un único run pendiente por grupo; con un grupo común un run de NAV pendiente descartaría al completo (solo 4 al día y es el que crea los payloads).
+  * **Por qué los dos workflows no comparten concurrencia**: GitHub guarda un único run pendiente por grupo; con un grupo común un run de NAV pendiente descartaría al completo (es el que crea los payloads).
     El daño posible de un cruce es acotado: si un run de NAV publicara entre la lectura de la ficha del run completo y su publicación, el completo reescribiría ese NAV con el que leyó unos minutos antes, y el siguiente run
-    de NAV (≤ 30 min) lo corrige (la RPC no admite un NAV más antiguo que el guardado). El minuto :38 deja ≥ 15 min a cada run de NAV, y un run completo dura ~2 min.
+    de NAV lo corrige (la RPC no admite un NAV más antiguo que el guardado; con la parada temprana, si el NAV reescrito es anterior al último día hábil esperado se vuelve a visitar la ficha, y si es
+    el esperado, el más nuevo se recupera como tarde al día hábil siguiente). El minuto :38 deja ≥ 15 min a cada run de NAV, y un run completo dura ~2 min.
   * **Latido opcional**: secreto `HEALTHCHECK_PERSONAL_NAV_URL` (vacío o inexistente = no hace nada); si existe y es `https://`, el job NAV lo pinga al terminar bien.
 * **Petición a la ficha**: una sola por ficha y run (la variante `base`); el desfase de fecha que se vio en el dashboard venía de un dato guardado en la app. El diagnóstico manual `nav-probe.yml` existe por si vuelve a pasar.
 * **Frescura del NAV**: `funds[].nav_date_iso` es la fecha del NAV tal como la escribe la ficha de iShares (normalmente 1-2 días hábiles por detrás; `nav_stale` si supera 6 días). La ficha da el NAV con **2 decimales**

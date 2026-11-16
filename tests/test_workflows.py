@@ -646,13 +646,15 @@ def _v2_triggers():
 def test_v2_estructura_permisos_minimos_y_dependencias():
     wf = load(V2)
     jobs = wf["jobs"]
-    assert set(jobs) == {"fetch", "publish", "verify", "heartbeat"}          # `personal` vive en personal-nav.yml
+    # REQUISITO CAMBIADO (AU01-F1, pieza 1): nuevo job `gate` (puerta de frescura, sin permisos) antes de fetch, y el heartbeat también depende de él.
+    assert set(jobs) == {"gate", "fetch", "publish", "verify", "heartbeat"}  # `personal` vive en personal-nav.yml
     assert wf["permissions"] == {}                                                       # nada por defecto
-    assert jobs["fetch"]["permissions"] == {"contents": "read"}
+    assert jobs["gate"]["permissions"] == {} and "needs" not in jobs["gate"]
+    assert jobs["fetch"]["permissions"] == {"contents": "read"} and jobs["fetch"]["needs"] == "gate"
     assert jobs["publish"]["permissions"] == {"pages": "write", "id-token": "write"}      # los dos y solo esos
     assert jobs["verify"]["permissions"] == {} and jobs["heartbeat"]["permissions"] == {}
     assert jobs["publish"]["needs"] == "fetch" and jobs["verify"]["needs"] == "publish"
-    assert set(jobs["heartbeat"]["needs"]) == {"fetch", "publish"} and jobs["verify"]["continue-on-error"] is True
+    assert set(jobs["heartbeat"]["needs"]) == {"gate", "fetch", "publish"} and jobs["verify"]["continue-on-error"] is True
     assert all("verify" not in (j.get("needs") if isinstance(j.get("needs"), list) else [j.get("needs")]) for n, j in jobs.items() if n != "verify")
     assert jobs["publish"]["environment"]["name"] == "github-pages"
     assert wf["concurrency"] == {"group": "publish-feed-v2", "cancel-in-progress": False}
@@ -708,7 +710,9 @@ def test_v2_el_cron_esta_gobernado_por_la_variable_y_el_workflow_viejo_no_cambia
         assert "FEED_V2_ENABLED" in cond and "schedule" in cond
     assert "always()" in wf["jobs"]["heartbeat"]["if"]
     t = _v2_triggers()
-    assert t["schedule"] == [{"cron": "47 6,11,15,21 * * *"}] and set(t["workflow_dispatch"]["inputs"]) == {"allow_regression", "force_all"}
+    # REQUISITO CAMBIADO (AU01-F1, pieza 1): nuevo input `force` (salta la puerta de frescura).
+    # REQUISITO CAMBIADO (AU01-F1, pieza 4): el cron pasa a ser respaldo del disparador externo (L-V 3 franjas, fin de semana 2), siempre en :47.
+    assert t["schedule"] == [{"cron": "47 7,13,21 * * 1-5"}, {"cron": "47 9,18 * * 0,6"}] and set(t["workflow_dispatch"]["inputs"]) == {"allow_regression", "force_all", "force"}
     old = load("update-data.yml")
     old_t = old.get("on", old.get(True))
     assert old_t["schedule"] == [{"cron": "17 6,11,15,21 * * *"}]                           # el cron viejo, intacto
@@ -881,9 +885,12 @@ def test_personal_nav_cron_frecuente_en_minutos_feos_solo_laborables_y_con_dispa
     minute, hour, dom, month, dow = entry["cron"].split()
     assert (dom, month, dow) == ("*", "*", "1-5")                                  # solo lunes a viernes
     minutes = [int(m) for m in minute.split(",")]
-    assert len(minutes) == 2 and all(m not in (0, 15, 30, 45, 17, 47, 38) for m in minutes)         # ni a en punto ni a los minutos de los otros workflows
-    lo, hi = (int(x) for x in hour.split("-"))
-    assert 0 <= lo < hi <= 23 and (hi - lo + 1) * len(minutes) <= 40                  # tope razonable de runs al día (carga sobre iShares)
+    # REQUISITO CAMBIADO (AU01-F1, pieza 4): el cron es respaldo del disparador externo: 1 minuto y una lista de horas (antes 2 minutos y un rango de horas).
+    assert len(minutes) == 1 and all(m not in (0, 15, 30, 45, 17, 47, 38) for m in minutes)         # ni a en punto ni a los minutos de los otros workflows
+    hours = [int(x) for x in hour.split(",")]
+    lo, hi = min(hours), max(hours)
+    assert 0 <= lo < hi <= 23 and len(hours) * len(minutes) <= 40                      # tope razonable de runs al día (carga sobre iShares)
+    assert 2 <= len(hours) * len(minutes) <= 4 and lo < 12 <= hi                      # respaldo: 2-4 franjas, mañana y tarde
     assert load("update-data.yml").get("on", load("update-data.yml").get(True))["schedule"] == [{"cron": "17 6,11,15,21 * * *"}]
 
 

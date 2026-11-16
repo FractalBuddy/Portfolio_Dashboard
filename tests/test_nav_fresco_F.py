@@ -334,7 +334,7 @@ def test_readme_documenta_el_workflow_nuevo_su_cron_y_la_salida_temprana():
     root = pathlib.Path(__file__).resolve().parent.parent
     readme = (root / "README.md").read_text(encoding="utf-8")
     doc = (root / "docs" / "CONTRATO_FEED_V2.md").read_text(encoding="utf-8")
-    cron = "23,53 5-21 * * 1-5"
+    cron = "23 7,11,16 * * 1-5"          # REQUISITO CAMBIADO (AU01-F1, pieza 4): antes "23,53 5-21 * * 1-5"; ahora cron de respaldo del disparador externo
     assert cron in (root / ".github" / "workflows" / "personal-nav.yml").read_text(encoding="utf-8")
     for frag in ("personal-nav.yml", cron, "work=true|false", "2 decimales", "FEED_V2_ENABLED", "PERSONAL_FEED_TOKEN", "propia concurrencia", "personal-full.yml", "nunca ISIN"):
         assert frag in readme, frag

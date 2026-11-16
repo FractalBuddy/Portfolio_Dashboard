@@ -80,20 +80,22 @@ Qué cambia respecto al feed actual (auditoría 08, BE-01..BE-09):
 
 Contrato para el cliente (campos, ejemplos JSON reales, algoritmo de lectura, equivalencias con v1): **[`docs/CONTRATO_FEED_V2.md`](docs/CONTRATO_FEED_V2.md)**.
 
-### Cómo funciona `publish-feed-v2.yml` (4 jobs)
+### Cómo funciona `publish-feed-v2.yml` (5 jobs)
 
 | Job | Permisos | Qué hace |
 |---|---|---|
+| `gate` | ninguno | **puerta de frescura** (AU01-F1; `scripts/freshness_gate.py`, solo stdlib, sin secretos): lee el `manifest.json` publicado y, si tiene **menos de 40 min** y el run no es manual con `force`, deja `skip=true` y el resto de jobs se salta (el run termina en verde en segundos). Manifest ausente, ilegible o con `generated_at` malformado o en el futuro => se trabaja (fallo cerrado). Ver «Cadencia real» |
 | `fetch` | `contents: read` | instala con `--require-hashes`, baja el sitio publicado **completo** (hay que volver a incluir los años cerrados en el artefacto de Pages), ejecuta `scripts/feed_v2.py` y sube el sitio como artefacto. Ejecuta código de terceros: su salida se trata como no fiable |
 | `publish` | solo `pages: write` + `id-token: write` | **no ejecuta código de terceros**. Hace su propia descarga del sitio anterior (modo `validate`), valida con `scripts/sanity_check_v2.py` (solo stdlib, sacado del repo) y solo entonces sube el artefacto de Pages y despliega |
 | `verify` | ninguno | informativo (`continue-on-error`): comprueba que Pages ya sirve el `manifest.json` nuevo |
-| `heartbeat` | ninguno | Healthchecks.io: ping normal, `/fail` si falla `fetch`, `publish` o el validador, y `/fail` con el motivo (`degraded: ...`) solo si se publicó con **más del 10 % de los símbolos activos sin publicar** o con **caída global de Yahoo** (429 sostenido o fallo de la mayoría a la vez). Un símbolo suelto sin publicar (`unit_mismatch`, `failed`, `suspect`...) es solo un `::warning::` en el log y el detalle queda en `health.json`. El secreto se limpia (espacios, tabuladores, `\r`, `\n`, comillas o acentos graves envolventes) y debe ser `https://hc-ping.com/...`; si no, `::warning::` sin el valor y no se llama a `curl` |
+| `heartbeat` | ninguno | Healthchecks.io: ping normal, `/fail` si falla `fetch`, `publish` o el validador, y `/fail` con el motivo (`degraded: ...`) solo si se publicó con **más del 10 % de los símbolos activos sin publicar** o con **caída global de Yahoo** (429 sostenido o fallo de la mayoría a la vez). Un símbolo suelto sin publicar (`unit_mismatch`, `failed`, `suspect`...) es solo un `::warning::` en el log y el detalle queda en `health.json`. El secreto se limpia (espacios, tabuladores, `\r`, `\n`, comillas o acentos graves envolventes) y debe ser `https://hc-ping.com/...`; si no, `::warning::` sin el valor y no se llama a `curl`. Si el run sale por la puerta de frescura manda un **`/log`** informativo (`fresh-skip: ...`): ni OK ni `/fail`, no cambia el estado del check (el run que sí trabajó hace < 40 min ya mandó el suyo) |
 
-`concurrency` serializa los runs, todos los jobs tienen `timeout-minutes`, las acciones van fijadas por SHA y el cron es `47 6,11,15,21 * * *` (media hora después del
-del feed actual para no coincidir en la IP del runner). **El cron del workflow viejo no se ha tocado.** Los datos propios (NAV de iShares en Supabase) ya **no** se publican desde aquí: viven en `personal-nav.yml` (ver «Datos propios»).
+`concurrency` serializa los runs, todos los jobs tienen `timeout-minutes` y las acciones van fijadas por SHA. El reloj principal es un **disparador externo** (`workflow_dispatch` cada ~60 min en sesión) y el cron
+de GitHub es solo **respaldo**: `47 7,13,21 * * 1-5` y `47 9,18 * * 0,6` (minuto :47, media hora después del feed actual para no coincidir en la IP del runner; ver «Cadencia real»). Los jobs con secretos (y el
+despliegue) solo corren sobre `refs/heads/main`. **El cron del workflow viejo no se ha tocado.** Los datos propios (NAV de iShares en Supabase) ya **no** se publican desde aquí: viven en `personal-nav.yml` (ver «Datos propios»).
 
 `scripts/feed_v2.py` reutiliza la lógica probada de `fetch_market_data.py` (ritmo y 429 de Yahoo con pausa y jitter, interruptor de racha de fallos, presupuesto de tiempo
-global de BE-12, FRED, CNN, alternative.me, CoinGecko, RSS) y añade: histórico incremental, niveles `hot` (en cada run, con intradía de 5 min) / `warm` (~1 vez al día) /
+global de BE-12, FRED, CNN, alternative.me, CoinGecko, RSS) y añade: histórico incremental, niveles `hot` (en cada run: intervalo mínimo de **45 min**, pensado para runs cada ~60 min; con intradía de 5 min) / `warm` (~1 vez al día) /
 `cold` (~1 vez por semana), cupo de 80 descargas largas por run para repartir el alta de símbolos nuevos, detección de splits (si el pasado guardado difiere >2 % del que da
 Yahoo ahora se baja la serie entera una vez), y estado por símbolo en `health.json`. Todo símbolo se valida con `^[A-Za-z0-9.^=\-]{1,15}$` (más: sin punto inicial ni `..`) y se
 codifica en URL siempre.
@@ -108,10 +110,10 @@ resumen del run). Detalle en `docs/CONTRATO_FEED_V2.md` y `auditorias/FIXES_FEED
 
 | Run | Llamadas a Yahoo | Tamaño total |
 |---|---|---|
-| Alta (3 runs seguidos por el cupo de 80 descargas largas) | 129 + 80 + 64 | 13 → 26 → 37 MB |
-| Run normal solo hot (3 de los 4 del día) | 98 (49 diarias de 1 mes + 49 intradía) | sin cambios (+~30 KB) |
-| Run con warm (1 de los 4; normalmente el de las 21:47, el primero tras ≥20 h) | 251 (202 diarias + 49 intradía) | sin cambios |
-| **Por día** (3 × 98 + 251) | **~545** (el feed actual: ~277 × 4 ≈ 1100 para 58 símbolos) | |
+| Alta (3 runs seguidos, a 1 h, por el cupo de 80 descargas largas) | 129 + 178 + 162 (desde AU01-F1 los hot también se refrescan en los runs 2 y 3; antes 129 + 80 + 64) | 13 → 26 → 37 MB |
+| Run normal solo hot | 98 (49 diarias de 1 mes + 49 intradía) | sin cambios (+~30 KB) |
+| Run con warm (el primero tras ≥ 20 h) | 251 (202 diarias + 49 intradía) | sin cambios |
+| **Por día** con N runs que pasan la puerta | **(N − 1) × 98 + 251**: con el cron de antes (~4 runs) ~545; con un run cada hora en sesión (p. ej. 14 runs, `tests/test_nivel_hot_F1.py`, `V2_MEASURE=1`) **~1.525**, unas 2,8 veces más. Por run no cambia (el feed actual: ~277 × 4 ≈ 1100 para 58 símbolos) | |
 | Sitio completo en estado estable | | 37 MB sin comprimir en 2518 ficheros (~14,5 MB con zlib -6; la serie sintética lleva 6 decimales en todos los precios, así que los reales pesarán menos); `manifest.json` 285 KB |
 
 Además, en cada run: 1 llamada a CoinGecko (250 monedas), ~5 a FRED (con clave), 3 a CNN/alternative.me, ~30 RSS. El run de `fetch` baja del sitio anterior ~2500 ficheros
@@ -145,8 +147,8 @@ El árbol actual del repo **no** lleva ISIN, ids de ficha, fondos clase S ni lis
 
 | Workflow | Qué publica | RPC | Cuándo |
 |---|---|---|---|
-| **`personal-nav.yml`** (solo NAV) | únicamente el NAV, su fecha, `change_pct`, `wk52_*` y *facts* de cada fondo, leídos de **su ficha de iShares** (1 petición por ficha, sin Yahoo ni series; < 1 KB por fondo, tope 64 KB) | `publish_personal_nav(p_token, p_user, p_funds)` | programado cada 30 min, L-V (`23,53 5-21 * * 1-5`); **en la práctica GitHub lo lanza unas pocas veces al día** (ver «Cadencia real») |
-| **`personal-full.yml`** (completo) | el payload completo de siempre: `funds` + `series` (proxies con histórico largo) | `publish_personal_feed(p_token, p_user, p_payload)` | programado 06:38, 11:38, 15:38 y 21:38 UTC, todos los días (`38 6,11,15,21 * * *`); en la práctica, con horas de retraso o alguna pasada menos |
+| **`personal-nav.yml`** (solo NAV) | únicamente el NAV, su fecha, `change_pct`, `wk52_*` y *facts* de cada fondo, leídos de **su ficha de iShares** (1 petición por ficha, sin Yahoo ni series; < 1 KB por fondo, tope 64 KB) | `publish_personal_nav(p_token, p_user, p_funds)` | disparador externo cada ~60 min en sesión; cron de **respaldo** L-V 07:23, 11:23 y 16:23 UTC (`23 7,11,16 * * 1-5`). **Parada temprana**: si todos los fondos ya tienen el NAV del último día hábil esperado, no visita iShares (ver «Cadencia real») |
+| **`personal-full.yml`** (completo) | el payload completo de siempre: `funds` + `series` (proxies con histórico largo) | `publish_personal_feed(p_token, p_user, p_payload)` | cron de **respaldo** 06:38, 13:38 y 21:38 UTC, todos los días (`38 6,13,21 * * *`), más lo que lance el disparador externo; en la práctica, con horas de retraso o alguna pasada menos |
 
 **Lanzarlos a mano** (*Actions → «Personal NAV» / «Personal full» → Run workflow*, rama `main`; sin parámetros; funciona aunque `FEED_V2_ENABLED` no sea `true`). En local, con las tres variables de entorno
 (`SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `PERSONAL_FEED_TOKEN`): `python scripts/personal_v2.py all --nav-only --dir /ruta/privada` (NAV) o `python scripts/personal_v2.py all --dir /ruta/privada` (completo).
@@ -168,12 +170,15 @@ Lo que sigue describe sobre todo el job completo (`personal-nav.yml` lo era ante
 * el payload (≤ 1 MB) lleva el NAV por ISIN (scraping de iShares), los *facts* y las series de cierres diarios: los **proxies de los fondos** con todo el histórico disponible (hasta ~25 años,
   esté o no el proxy en el universo público, que solo guarda 10 años) y el resto de símbolos extra con ≤ 2 años, y estos últimos solo si **no** están en el universo público; si el
   payload pasa de 1 MB se recortan primero los extra y después los proxies (ver el contrato); un NAV con un salto fuera de 0,5–2× respecto al anterior no se publica;
-* **frecuencia y concurrencia**: el NAV de iShares sale entre medias de los runs del feed, y el payload completo con series largas (~165 KB) no hace falta repetirlo cada 30 min: por eso NAV programado cada 30 min (minutos :23 y :53,
-  «feos» a propósito) y completo 4 al día (minuto :38, a ≥ 15 min de cada run de NAV; ninguno coincide con `update-data.yml` (:17) ni `publish-feed-v2.yml` (:47)). Cada workflow tiene su **propia concurrencia**
+* **frecuencia y concurrencia**: el NAV de iShares sale entre medias de los runs del feed, y el payload completo con series largas (~165 KB) no hace falta repetirlo cada hora: por eso NAV cada ~60 min con parada temprana
+  (cron de respaldo en el minuto :23, «feo» a propósito) y completo 3 al día de respaldo (minuto :38, a ≥ 15 min de cada run de NAV; ninguno coincide con `update-data.yml` (:17) ni `publish-feed-v2.yml` (:47)). Cada workflow tiene su **propia concurrencia**
   (`personal-nav` y `personal-full`, sin cancelar a medias): dos runs del mismo job nunca se pisan. Entre los dos jobs no se serializa (un grupo común perdería runs pendientes): la RPC de NAV no sustituye un NAV
   por otro de fecha más antigua y el siguiente run de NAV corrige cualquier cruce (razonamiento en `personal-full.yml` y en el contrato). Un cron retrasado o descartado por GitHub no importa;
-* **salida temprana**: `watch` escribe `work=true|false` en `$GITHUB_OUTPUT`; si la lista no tiene ningún fondo con ficha de iShares ni símbolos, el job no instala dependencias ni construye ni publica;
-* **gating**: igual que el resto, el cron solo corre con la variable de repo `FEED_V2_ENABLED = true` (el lanzamiento manual, *Run workflow*, funciona siempre);
+* **salida temprana**: `watch` escribe `work=true|false` en `$GITHUB_OUTPUT`; si la lista no tiene ningún fondo con ficha de iShares ni símbolos, el job no instala dependencias ni construye ni publica.
+  **Parada temprana** (solo `personal-nav.yml`, AU01-F1): también `work=false` si **todos** los fondos con ficha traen en la lista un `prev_nav_date_iso` (fecha del NAV ya guardado) igual o posterior al
+  **último día hábil esperado** (el último día de lunes a viernes anterior a la fecha UTC del run: el lunes, el viernes; festivos desconocidos => se sigue visitando la ficha, nunca se da por «al día» por error).
+  Sin ese campo, con una fecha inválida o futura, se visita la ficha (fallo cerrado). **Necesita que el SQL de `personal_watch_for_backend` devuelva `prev_nav_date_iso`** (ver el contrato §5); hasta entonces todo sigue como antes;
+* **gating**: igual que el resto, el cron solo corre con la variable de repo `FEED_V2_ENABLED = true` (el lanzamiento manual, *Run workflow*, funciona siempre), y el job solo corre sobre `refs/heads/main`;
 * **variables y secretos que usa**: `SUPABASE_URL` y `SUPABASE_PUBLISHABLE_KEY` se leen con `secrets.X || vars.X` (secreto si existe, variable si no; **recomendado: secretos**, que GitHub enmascara en el log público);
   variables `FEED_V2_ENABLED` y (opcional, solo NAV) `PERSONAL_NAV_FALLBACK_FULL`; secretos `PERSONAL_FEED_TOKEN` y (opcional, solo NAV)
   `HEALTHCHECK_PERSONAL_NAV_URL`. El token va solo en los pasos `watch` y `publish`, que ejecutan únicamente biblioteca
@@ -194,8 +199,8 @@ Lo que sigue describe sobre todo el job completo (`personal-nav.yml` lo era ante
   el token solo está en los pasos de biblioteca estándar (`python3 -S`), no en el paso que ejecuta código de terceros;
 * **coste** (medidas simuladas y estimaciones en `auditorias/FIXES_FEED_V2_F.md`): por run, **una** petición a iShares por ficha y una a Yahoo por símbolo **único** (una descarga `max` sirve también para 2 años): los proxies de los
   fondos con `period="max"` (histórico largo) y los símbolos extra con 2 años; los que siguen varios usuarios se bajan una sola vez. Con dos fondos y sus dos proxies: 2 peticiones a Yahoo por run
-  (68 al día, frente a ~545 del feed público), pero con el histórico largo cada una baja ~3.000–6.000 barras (≈ 7.000 entre las dos) y el payload ronda **165 KB** (≈ 5,6 MB/día escritos en Supabase con 34 runs).
-  ~1,5–2 min de runner por run (casi todo es `pip install`). Si algún día el repo pasara a **privado**, 34 runs × ~2 min × ~22 días son ~1.500 min/mes: casi todo el cupo gratuito.
+  (68 al día, frente a ~545 del feed público), pero con el histórico largo cada una baja ~3.000–6.000 barras (≈ 7.000 entre las dos) y el payload ronda **165 KB** (cifras de cuando el NAV corría 34 veces al día; desde AU01-F1, con la parada temprana, un run «al día» sale en el paso `watch` sin instalar nada ni escribir en Supabase).
+  ~1,5–2 min de runner por run que trabaja (casi todo es `pip install`); ~30 s uno que para pronto. Si algún día el repo pasara a **privado**, el consumo dependería de la frecuencia del disparador externo.
 
 #### Desfase de fecha del NAV (navegador 28/Oct, scraper 27/Oct): resuelto, y diagnóstico manual opcional
 
@@ -215,7 +220,7 @@ añadir `"fresh"` a esa tupla); si solo `alt:*` o `xhr*` dan la fecha nueva → 
 * **Términos de uso de Yahoo Finance e iShares.** Hacerse pasar por un navegador (User-Agent) para esquivar protecciones anti-bots podría chocar con sus términos: por eso solo está en el diagnóstico manual, no en el scraper (que pide una sola vez cada ficha). `yfinance` se documenta como herramienta de uso personal, y leer automáticamente ishares.com puede chocar con sus términos. Redistribuir sus
   datos por Pages **a un círculo reducido** (el dueño y amigos) es un riesgo asumible y acotado; **no escala a un servicio abierto**: para eso haría falta una fuente con licencia de redistribución
   (Stooq, Twelve Data, Alpha Vantage, EOD...). Revisarlo es una decisión del dueño; aquí no se ha podido contrastar con los términos vigentes.
-* **Cuota de Yahoo**: sin SLA ni límite publicado, se limita por IP. El diseño incremental baja las peticiones a ~545 al día; aun así un 429 sostenido abandona Yahoo en ese run (los símbolos
+* **Cuota de Yahoo**: sin SLA ni límite publicado, se limita por IP. El diseño incremental baja las peticiones a ~545 al día con 4 runs (~1.525 con un run cada hora en sesión, AU01-F1; por run no cambia); aun así un 429 sostenido abandona Yahoo en ese run (los símbolos
   pendientes conservan sus datos anteriores) y no penaliza a nadie.
 * **Pages**: límite blando de ancho de banda (orden de 100 GB/mes, a contrastar con la documentación vigente) y de tamaño del sitio (1 GB; aquí ~37 MB). Cada run de `fetch` descarga el sitio anterior completo: ~60 MB al día por la red (comprimido), unos 2 GB al mes.
 * **Rutas con `^` y `=`** (`s/^GSPC/...`, `s/EURUSD=X/...`): son válidas y los clientes las codifican, pero no se han comprobado contra Pages real; si alguna fallara, es un cambio de nombre de ruta.
@@ -248,46 +253,66 @@ Quitar símbolos hace saltar las reglas de regresión: lanza el workflow una vez
 ## Cadencia real de GitHub Actions (y qué umbral usar)
 
 **Los cron de GitHub Actions no son un reloj.** GitHub programa las ejecuciones `schedule` «cuando puede»: las retrasa (a veces horas), las agrupa y puede omitir alguna, sobre todo en los minutos con más carga,
-y no avisa. Lo que dicen los `cron:` de los YAML es la **intención**, no una promesa:
+y no avisa. Lo que dicen los `cron:` de los YAML es la **intención**, no una promesa. Por eso, desde AU01-F1 (fase F1), **hay dos relojes**:
 
-| Workflow | Programado | Observado (auditoría del 2-nov-2026, API de Actions; una muestra de una semana, no una garantía) |
-|---|---|---|
-| `update-data.yml` | 4 al día (06:17, 11:17, 15:17, 21:17 UTC) | ~2,9 al día; retraso mediano ~3 h 20 min (de 1 h a 5 h 14 min); el hueco de las 06:xx no se ejecutó nunca; el mayor hueco entre dos runs fue de 13 h 20 min |
-| `publish-feed-v2.yml` | 4 al día (06:47, 11:47, 15:47, 21:47 UTC) | ~3 al día; retraso mediano ~3 h 15 min (de 1 h 18 min a 4 h 21 min) |
-| `personal-nav.yml` | cada 30 min, L-V, 05:23-21:53 UTC (34 pasadas) | el viernes 30-oct se ejecutaron **4** de 34 |
-| `personal-full.yml` | 4 al día (06:38, 11:38, 15:38, 21:38 UTC) | sin medir (mismo mecanismo) |
+1. **Disparador externo (principal)**: un planificador fuera de GitHub (un Cloudflare Worker en un repo privado aparte, ver más abajo) lanza `workflow_dispatch` de `publish-feed-v2.yml` y `personal-nav.yml`
+   (y, si el dueño lo decide, `personal-full.yml`) por horario de mercado: el feed y el NAV **cada ~60 min en sesión**. Siempre con `{"ref":"main"}`: los jobs con secretos solo corren sobre `refs/heads/main`.
+2. **Cron de GitHub (respaldo)**: 2-4 franjas al día por workflow, en minutos «feos» (nunca :00 ni :30), por si el disparador externo falla. `update-data.yml` (feed v1) **no cambia**.
+
+| Workflow | Cron de respaldo (UTC) | Antes de AU01-F1 | Observado antes (auditoría del 2-nov-2026, API de Actions; una muestra de una semana, no una garantía) |
+|---|---|---|---|
+| `update-data.yml` (v1, sin cambios) | 06:17, 11:17, 15:17, 21:17, todos los días | igual | ~2,9 al día; retraso mediano ~3 h 20 min (de 1 h a 5 h 14 min); el hueco de las 06:xx no se ejecutó nunca; el mayor hueco entre dos runs fue de 13 h 20 min |
+| `publish-feed-v2.yml` | L-V 07:47, 13:47, 21:47; sábado y domingo 09:47, 18:47 | 06:47, 11:47, 15:47, 21:47, todos los días | ~3 al día; retraso mediano ~3 h 15 min (de 1 h 18 min a 4 h 21 min) |
+| `personal-nav.yml` | L-V 07:23, 11:23, 16:23 | cada 30 min, L-V, 05:23-21:53 (34 pasadas) | el viernes 30-oct se ejecutaron **4** de 34 |
+| `personal-full.yml` | 06:38, 13:38, 21:38, todos los días | 06:38, 11:38, 15:38, 21:38, todos los días | sin medir (mismo mecanismo) |
+
+**Sin trabajo duplicado ni carga de más:**
+
+* **Puerta de frescura** (`publish-feed-v2.yml`, job `gate`, `scripts/freshness_gate.py`): si el `manifest.json` publicado tiene **menos de 40 min**, el run termina en verde en segundos sin pedir nada a Yahoo
+  (así, si el respaldo y el disparador externo coinciden, solo trabaja uno). Manifest ausente, ilegible, con `generated_at` malformado o en el futuro => se trabaja (fallo cerrado). El latido de Healthchecks
+  manda entonces un `/log` (`fresh-skip`), ni OK ni `/fail`. **`force`** (input booleano de *Run workflow*, por defecto `false`): trabaja aunque el feed sea fresco; solo cuenta en un lanzamiento manual.
+* **Nivel `hot` cada 45 min** (antes 3 h): con runs cada ~60 min, cada run refresca los 49 hot (98 peticiones a Yahoo por run; el ritmo, la pausa por ráfaga, el abandono por 429 y el presupuesto de tiempo
+  de cada run no cambian). Margen: un run que arranque hasta ~15 min «antes de tiempo» respecto al anterior sigue refrescándolos.
+* **Parada temprana de `personal-nav.yml`**: si **todos** los fondos con ficha ya tienen el NAV del **último día hábil esperado** (lunes => viernes; festivos desconocidos => se sigue intentando), el run sale en
+  el paso `watch` sin visitar iShares. Así, cada fondo recibe pocas visitas al día (hasta que aparece el NAV nuevo) en vez de ~34. Requiere que la RPC `personal_watch_for_backend` devuelva `prev_nav_date_iso`
+  (contrato §5); sin ese campo se visita siempre, como antes.
 
 Consecuencias, para no prometer lo que no existe:
 
-* **No hay «NAV fresco cada 30 min»** ni una garantía de dato posterior al cierre de EE. UU. Con este mecanismo, el NAV de los fondos y el feed público se refrescan **unas pocas veces al día**, a horas que no controla este repo.
+* **No hay «NAV fresco cada 30 min»** ni una garantía de dato posterior al cierre de EE. UU. La puntualidad y la latencia reales del disparador externo (`workflow_dispatch` también puede quedar en cola) **no están medidas**
+  hasta la fase en sombra; hasta entonces, el NAV de los fondos y el feed público se refrescan **al menos unas pocas veces al día** (el respaldo), a horas que no controla del todo este repo.
   `generated_at` es «último intento correcto», no «ahora».
-* **El cliente no debe marcar el feed como viejo antes de ~14 horas** sin cambios (`index.json.generated_at` / `manifest.json.generated_at`); un umbral de 1-2 h daría falsas alarmas varias veces al día. Para el NAV de los fondos
-  (`funds[].nav_date_iso`) manda la fecha de la ficha de iShares (normalmente 1-2 días hábiles por detrás), no la hora del run.
+* **El cliente no debe marcar el feed como viejo antes de ~14 horas** sin cambios (`index.json.generated_at` / `manifest.json.generated_at`) mientras no se mida la cadencia real con el disparador externo; un umbral de 1-2 h
+  daría falsas alarmas. Para el NAV de los fondos (`funds[].nav_date_iso`) manda la fecha de la ficha de iShares (normalmente 1-2 días hábiles por detrás), no la hora del run.
 * Los símbolos de nivel `cold` se refrescan ~1 vez por semana: mira `as_of`, no solo `generated_at`.
-* Los avisos de Healthchecks se configuran con esa realidad: Period = 1 día y Grace Time = 12 horas para el feed (alerta tras 36 h sin ping) y Period = 3 días y Grace ≥ 14 h para `personal-nav` (solo corre L-V).
+* Los avisos de Healthchecks se configuran con esa realidad: Period = 1 día y Grace Time = 12 horas para el feed (alerta tras 36 h sin ping) y Period = 3 días y Grace ≥ 14 h para `personal-nav` (solo corre L-V; un run
+  que sale por la parada temprana termina bien y manda un ping normal).
 * **Todos los workflows tienen `workflow_dispatch`** (un test lo comprueba): *Actions → el workflow → Run workflow* lanza una pasada cuando haga falta, desde la web, con `gh workflow run <archivo>` o por API.
-* Un repo público tiene minutos de Actions ilimitados; si pasara a privado, el consumo teórico (34 pasadas/día de NAV) pasaría a importar y el real sería menor.
+* Un repo público tiene minutos de Actions ilimitados; si pasara a privado, el consumo dependería de la frecuencia del disparador externo (un run que sale por la puerta o por la parada temprana dura segundos).
 
-### Disparador externo (receta, NO implementada: decisión pendiente del dueño)
+### Disparador externo (pieza externa, NO implementada en este repo)
 
-Si algún día hace falta frescura de verdad, la opción es **no confiar en `schedule`**: un cron **fuera de GitHub** (un `crontab` en un servidor propio, un cron de Cloudflare Workers, cron-job.org...) que llame a la
-API de GitHub para lanzar el `workflow_dispatch` que ya existe. **Esto no está implementado ni activado en este repo**; es una receta para decidir:
+El planificador **no vive en este repo**: es un Cloudflare Worker en un repo privado aparte (otra sesión de trabajo). Este repo solo está preparado para recibirlo (puerta de frescura, `force`, parada temprana,
+cron de respaldo y condición de `main`). Lo que hace, en esencia, es llamar a la API de GitHub para lanzar el `workflow_dispatch` que ya existe:
 
 ```bash
-# cada 30 min en el planificador externo (ejemplo; <usuario>/<repo> y el token son placeholders)
+# en el planificador externo (ejemplo; <usuario>/<repo> y el token son placeholders)
 curl -fsS -X POST \
   -H "Accept: application/vnd.github+json" \
   -H "Authorization: Bearer $GITHUB_DISPATCH_TOKEN" \
   -H "X-GitHub-Api-Version: 2022-11-28" \
-  https://api.github.com/repos/<usuario>/<repo>/actions/workflows/personal-nav.yml/dispatches \
-  -d '{"ref":"main"}'          # responde 204 sin cuerpo
+  https://api.github.com/repos/<usuario>/<repo>/actions/workflows/publish-feed-v2.yml/dispatches \
+  -d '{"ref":"main"}'          # responde 204 sin cuerpo; para forzar: '{"ref":"main","inputs":{"force":"true"}}'
 ```
 
 * **Token de permisos mínimos**: un *fine-grained personal access token* limitado a **este único repositorio**, con solo el permiso de repositorio **Actions: Read and write** (y ninguno más), con caducidad corta
   (p. ej. 90 días) y guardado **solo en el planificador externo** (nunca en este repo). Contrasta los nombres exactos de permisos con la documentación vigente de GitHub antes de crearlo.
+* **`ref` siempre `main`**: con otra rama los jobs con secretos se saltan (a propósito: un dispatch con una rama vieja no ejecuta código viejo con secretos).
 * El `workflow_dispatch` salta la condición `FEED_V2_ENABLED` (solo gobierna el cron) y respeta los grupos de `concurrency` (si hay una pasada en curso, GitHub deja una pendiente y descarta el resto).
-* Coste y riesgos: una dependencia más fuera del repo (su propio fallo y su propia caducidad de token), y más pasadas de NAV contra iShares (el README ya avisa del riesgo de términos de uso y de bloqueo por IP compartida).
-  Si el token se filtra, el daño se limita a lanzar workflows de este repo; rótalo (runbook).
+  Con una pasada pendiente, la puerta de frescura la convierte en «sin trabajo» si la anterior acaba de publicar.
+* Coste y riesgos: una dependencia más fuera del repo (su propio fallo y su propia caducidad de token; para eso queda el cron de respaldo), más pasadas contra Yahoo (por run igual; por día ~2,8 veces más con
+  runs horarios) y contra iShares (acotadas por la parada temprana); el README ya avisa del riesgo de términos de uso y de bloqueo por IP compartida. Si el token se filtra, el daño se limita a lanzar workflows de
+  este repo; rótalo (runbook).
 * `repository_dispatch` no está habilitado en ningún workflow; haría falta añadirlo si se prefiere ese evento.
 
 ## Runbook: qué hacer cuando algo falla

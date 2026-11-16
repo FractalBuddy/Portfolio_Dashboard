@@ -61,7 +61,7 @@ def examples(world, tmp_path, monkeypatch):
     payload = pv.build_payload(user, {"AAPL"}, fetchers, NOW, lambda code: None)
     watch = [{"user_id": "usuario-1", "funds": [{"isin": "IE0FAKE00001", "name": "Fondo Falso A",
                                                  "url": "https://www.ishares.com/ch/individual/en/products/000001/fake-fund-a",
-                                                 "proxy_symbol": "FAKEP", "prev_price": 25.4}], "symbols": ["AAPL", "FAKE1"]}]
+                                                 "proxy_symbol": "FAKEP", "prev_price": 25.4, "prev_nav_date_iso": "2026-10-23"}], "symbols": ["AAPL", "FAKE1"]}]
     mf = jl(site, "manifest.json")
     health = jl(site, "health.json")
     latest = jl(site, "s/SWDA.L/latest.json")

@@ -68,6 +68,7 @@ TRIES = 2
 LOOPBACK = {"127.0.0.1", "localhost", "::1"}
 
 _ISIN_RE = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
+_DAY_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 _USER_RE = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
 _URL_PATH_RE = re.compile(r"^/[A-Za-z0-9/_.\-%]{1,200}$")
 _TOKEN_RE = re.compile(r"^[\x21-\x7e]{16,200}$")
@@ -217,7 +218,9 @@ def _clean_name(fm_text, value, limit=120):
 
 def parse_watch(raw, plain_text):
     """Valida la respuesta (no fiable) de personal_watch_for_backend. Devuelve (usuarios, descartados). Cada usuario:
-    {"user": id, "funds": [{isin, name, url, proxy_symbol?, prev_price?}], "symbols": [SYM, ...]}. Lo que no encaja se descarta y se cuenta."""
+    {"user": id, "funds": [{isin, name, url, proxy_symbol?, prev_price?, prev_nav_date_iso?}], "symbols": [SYM, ...]}. Lo que no encaja se descarta y se cuenta.
+    `prev_nav_date_iso` (opcional, AU01-F1) es la fecha del NAV ya guardado: solo la usa la parada temprana del modo NAV; si falta o no es una fecha
+    válida se ignora (el fondo se conserva y la parada temprana NO se aplica: se visita la ficha)."""
     dropped = 0
     rows = raw if isinstance(raw, list) else [raw] if isinstance(raw, dict) else []
     dropped += max(0, len(rows) - MAX_USERS)                      # AU-08: los usuarios por encima del tope NO se procesan; antes ni se contaban
@@ -228,7 +231,7 @@ def parse_watch(raw, plain_text):
             continue
         funds, symbols = [], []
         for f in (row.get("funds") if isinstance(row.get("funds"), list) else [])[:MAX_FUNDS]:
-            ok = (isinstance(f, dict) and set(f) <= {"isin", "name", "url", "proxy_symbol", "prev_price"} and isinstance(f.get("isin"), str)
+            ok = (isinstance(f, dict) and set(f) <= {"isin", "name", "url", "proxy_symbol", "prev_price", "prev_nav_date_iso"} and isinstance(f.get("isin"), str)
                   and _ISIN_RE.match(f["isin"]) and isinstance(f.get("url"), str))
             if not ok:
                 dropped += 1
@@ -244,6 +247,9 @@ def parse_watch(raw, plain_text):
             pp = f.get("prev_price")
             if c.finite(pp) and PREV_PRICE_MIN <= pp <= PREV_PRICE_MAX:      # AU-15: 1e308 es «finito» y bloquearía en silencio todo NAV nuevo
                 item["prev_price"] = float(pp)
+            pd_ = _iso_day(f.get("prev_nav_date_iso"))
+            if pd_ is not None:
+                item["prev_nav_date_iso"] = pd_.isoformat()
             funds.append(item)
         for s in (row.get("symbols") if isinstance(row.get("symbols"), list) else [])[:MAX_SYMBOLS]:
             if c.safe_symbol(s):
@@ -476,6 +482,40 @@ def _read_private(path):
         return json.load(f)
 
 
+def _iso_day(value):
+    """date de un texto AAAA-MM-DD estricto, o None (cualquier otra cosa: tipo, formato o fecha imposible)."""
+    if not isinstance(value, str) or not _DAY_RE.match(value):
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def nav_expected_date(today):
+    """Último día hábil esperado del NAV (AU01-F1): el último día de lunes a viernes ESTRICTAMENTE anterior a `today` (fecha UTC del run).
+    Lunes -> viernes anterior; martes -> lunes; sábado y domingo -> viernes. Los festivos no se conocen: en un festivo la ficha no trae NAV de ese día, el
+    NAV guardado queda por detrás de lo esperado y se sigue visitando la ficha (nunca se da por «al día» por error; solo se pierden visitas)."""
+    d = today - timedelta(days=1)
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d
+
+
+def nav_all_current(users, today):
+    """¿Tienen TODOS los fondos con ficha de iShares el NAV del último día hábil esperado (o posterior, pero nunca futuro)? Devuelve (bool, esperado).
+    FALLO CERRADO hacia «visitar»: sin fondos con ficha, sin `prev_nav_date_iso`, con una fecha inválida o posterior a hoy => False."""
+    expected = nav_expected_date(today)
+    funds = [f for u in users for f in u["funds"] if f.get("url")]
+    if not funds:
+        return False, expected
+    for f in funds:
+        d = _iso_day(f.get("prev_nav_date_iso"))
+        if d is None or d > today or d < expected:
+            return False, expected
+    return True, expected
+
+
 def _set_output(env, name, value):
     """Escribe `name=value` en el fichero $GITHUB_OUTPUT (si lo hay). Solo valores fijos (true/false): nunca datos del dueño."""
     path = (os.environ if env is None else env).get("GITHUB_OUTPUT")
@@ -484,10 +524,11 @@ def _set_output(env, name, value):
             f.write("%s=%s\n" % (name, value))
 
 
-def step_watch(cfg, directory, github_output=False, env=None, nav_only=False):
+def step_watch(cfg, directory, github_output=False, env=None, nav_only=False, now=None):
     """Lee la lista de Supabase y la guarda (sin validar: lo valida `build`). Con `github_output`, escribe work=true|false (¿hay algo que refrescar?:
     algún fondo con ficha de iShares válida o algún símbolo) para la salida temprana del workflow. Con `nav_only`, los símbolos no cuentan: el job
-    de NAV solo visita fichas, así que sin fondos con ficha no hay nada que hacer. Devuelve 0."""
+    de NAV solo visita fichas, así que sin fondos con ficha no hay nada que hacer. Con `nav_only`, además, PARADA TEMPRANA (AU01-F1): si todos los
+    fondos con ficha tienen ya el NAV del último día hábil esperado (nav_all_current), work=false y no se pide nada a iShares. Devuelve 0."""
     try:
         raw = rpc(cfg, RPC_WATCH, {"p_token": cfg["token"]})
     except RpcError as e:
@@ -509,8 +550,15 @@ def step_watch(cfg, directory, github_output=False, env=None, nav_only=False):
         say("::warning::datos propios: %d usuarios recortados (MAX_USERS=%d): el resto no recibe datos hasta que se suba el tope" % (len(rows) - MAX_USERS, MAX_USERS))
     if github_output:
         work = bool(n_funds) if nav_only else bool(n_funds or n_symbols)
+        current = False
+        if work and nav_only:
+            current, expected = nav_all_current(users, (now or datetime.now(timezone.utc)).date())
+            work = not current
         _set_output(env, "work", "true" if work else "false")
-        if not work:
+        if current:
+            say("datos propios: NAV al día (los %d fondos con ficha tienen el NAV del último día hábil esperado, %s): no se visita iShares; se omiten build y publish"
+                % (n_funds, expected.isoformat()))
+        elif not work:
             say("datos propios: nada que refrescar (ningún fondo con ficha de iShares%s): se omiten build y publish" % ("" if nav_only else " ni símbolos"))
     return 0
 
@@ -807,7 +855,7 @@ def main(argv=None, fetchers=None, plain_text=None, env=None, now=None):
     else:
         cfg = None
     if a.step in ("watch", "all"):
-        step_watch(cfg, a.dir, a.github_output, env, a.nav_only)
+        step_watch(cfg, a.dir, a.github_output, env, a.nav_only, now)
     if a.step in ("build", "all"):
         if a.nav_only:
             step_build_nav(a.dir, fetchers, plain_text, now)
