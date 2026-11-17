@@ -10,16 +10,20 @@ Se ejecuta SOLO desde GitHub Actions (.github/workflows/fund-probe.yml, workflow
 
 El repo es PÚBLICO: cada línea que imprime este script es pública.
 """
+import argparse
 import contextlib
 import io
 import json
 import logging
 import math
+import os
 import re
+import sys
 import time
+import traceback
 import unicodedata
 import warnings
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 
 from yfinance import exceptions as yf_exceptions
 
@@ -299,9 +303,11 @@ def probe_alternatives(results, client, gate, today, errors):
         _currencies(r)
 
 
-def run_names(entries, client, gate, today, errors, with_alternatives=True):
+def run_names(entries, client, gate, today, errors, with_alternatives=True, progress=None):
     results = []
-    for e in entries:
+    for i, e in enumerate(entries, 1):
+        if results and progress:
+            progress(i - 1, len(entries), results[-1])
         r = _base_result(e)
         results.append(r)
         if gate.stopped:
@@ -334,6 +340,8 @@ def run_names(entries, client, gate, today, errors, with_alternatives=True):
         else:
             r.update(status="no_probado" if gate.stopped else "sin_serie", error=m)
         _currencies(r)
+    if results and progress:
+        progress(len(entries), len(entries), results[-1])
     if with_alternatives:
         probe_alternatives(results, client, gate, today, errors)
     return results
@@ -477,3 +485,121 @@ def run_isin_section(raw, client, gate, today, emit=print):
                 done.add(variant)
                 emit(f"::add-mask::{variant}")
     return aggregate_isins(run_isins(valid, client, gate, today), invalid)
+
+
+# ------------------------------------------------------------------------------------------------------------------------------
+# Salida: resumen (GITHUB_STEP_SUMMARY) y JSON (solo NOMBRES)
+# ------------------------------------------------------------------------------------------------------------------------------
+def say(msg):
+    print(msg)
+    sys.stdout.flush()
+
+
+def _cell(v):
+    return "—" if v is None or v == "" else str(v).replace("|", "/")
+
+
+def render_summary(meta, results, per_manager, errors, isin_agg):
+    L = ["## Sonda de cobertura de fondos europeos en Yahoo Finance", "",
+         f"Fecha: {meta['generated']} · yfinance {meta['yfinance']} · peticiones: {meta['requests_total']}/{meta['request_cap']} · «reciente» = última barra a ≤ {RECENT_DAYS} días",
+         ""]
+    if meta["stopped"]:
+        L += [f"**Sonda parada limpiamente: {meta['stopped']}.** Los nombres no probados quedan marcados «no_probado»; no se ha reintentado.", ""]
+    L += ["### Por gestora (sección NOMBRES)", "",
+          "| Gestora | Buscados | Encontrados | Reciente | Retraso mayor | Ambiguos | Sin serie | Errores | Sin probar |", "|---|---|---|---|---|---|---|---|---|"]
+    keys = ("searched", "found", "recent", "delayed", "ambiguous", "no_series", "errors", "not_probed")
+    for m in per_manager:
+        L.append(f"| {_cell(m['manager'])} | " + " | ".join(str(m[k]) for k in keys) + " |")
+    L.append("| Total | " + " | ".join(str(sum(m[k] for m in per_manager)) for k in keys) + " |")
+    L += ["", "### Detalle por nombre", "", "| Gestora | Nombre buscado | Estado | Ticker | Bolsa | Divisa | Última barra | Retraso (d) | Barras | Ambiguo |", "|---|---|---|---|---|---|---|---|---|---|"]
+    for r in results:
+        amb = "no" if not r["ambiguous"] else ("sí (" + "/".join(r["currencies"]) + ")" if r["multi_currency"] else "sí")
+        L.append("| " + " | ".join(_cell(x) for x in (r["manager"], r["name"], r["status"], r["ticker"], r["exchange"], r["currency"], r["last_date"], r["lag_days"], r["bars"], amb)) + " |")
+    L += ["", "### Errores de la sección NOMBRES (clases cerradas)", "", "| Clase | Nº |", "|---|---|"] + [f"| {c} | {errors[c]} |" for c in ERROR_CLASSES]
+    L += ["", "### Sección ISIN (solo agregados)", ""]
+    if isin_agg["status"] == "omitida":
+        L.append("Sección ISIN: omitida (no hay secreto PROBE_ISINS).")
+    elif isin_agg.get("small"):
+        extra = (f" · {isin_agg['not_probed']} sin probar por parada" if isin_agg.get("not_probed") else "") + (f" · {isin_agg['invalid']} no válidos" if isin_agg.get("invalid") else "")
+        L.append(f"ISIN: {isin_agg['tested']} probados / {isin_agg['resolved']} resueltos{extra} (con menos de {MIN_ISIN_AGGREGATE} no se publica más detalle).")
+    else:
+        a = isin_agg
+        L += [f"- ISIN: {a['tested']} probados / {a['resolved']} resueltos · con dato reciente (≤ {RECENT_DAYS} d): {a['recent']} · ambiguos: {a['ambiguous']} · sin probar por parada: {a['not_probed']} · no válidos: {a['invalid']}",
+              "- Retraso de la última barra por tramos (días): " + ", ".join(f"{k}: {v}" for k, v in a["lag_buckets"].items()),
+              "- Divisas: " + (", ".join(f"{k} {v}" for k, v in a["currencies"].items()) or "—"),
+              "- Errores: " + ", ".join(f"{k} {v}" for k, v in a["errors"].items())]
+    return "\n".join(L) + "\n"
+
+
+def build_json(meta, results, per_manager, errors):
+    """SOLO la sección NOMBRES: no recibe nada de la sección ISIN."""
+    return {"generated": meta["generated"], "yfinance": meta["yfinance"], "recent_days": RECENT_DAYS, "request_cap": meta["request_cap"],
+            "requests_names": meta["requests_names"], "stopped": meta["stopped"], "errors": dict(errors), "per_manager": per_manager, "names": results}
+
+
+def _yf_version():
+    try:
+        from importlib import metadata
+        return metadata.version("yfinance")
+    except Exception:                                # noqa: BLE001
+        return "desconocida"
+
+
+def _run(args, env, names, client, today, clock, sleep):
+    raw = env.get("PROBE_ISINS") or ""
+    _valid, _invalid, tokens = parse_isins(raw)
+    for tok in dict.fromkeys(v for t in tokens for v in (t, t.upper())):      # TODAS las máscaras, antes de cualquier otra cosa (ni un ISIN se usa sin enmascarar)
+        say(f"::add-mask::{tok}")
+    gate = Gate(max_requests=args.max_requests, clock=clock, sleep=sleep)
+    client = client or YahooClient()
+    errors = new_error_counter()
+
+    def progress(i, n, r):
+        say(f"[{i}/{n}] {r['manager']}: {r['status']}" + (f" (retraso {r['lag_days']} d)" if r["lag_days"] is not None else ""))
+    results = run_names(names, client, gate, today, errors, with_alternatives=False, progress=progress)
+    used_names = gate.used
+    isin_agg = run_isin_section(raw, client, gate, today, emit=lambda s: None)         # las máscaras ya se emitieron arriba
+    used_isin = gate.used - used_names
+    probe_alternatives(results, client, gate, today, errors)
+    meta = {"generated": today.isoformat(), "yfinance": _yf_version(), "request_cap": gate.max_requests, "requests_total": gate.used,
+            "requests_names": gate.used - used_isin, "stopped": gate.stopped}
+    per_manager = summarize_by_manager(results)
+    with open(args.json_out, "w", encoding="utf-8") as f:
+        json.dump(build_json(meta, results, per_manager, errors), f, ensure_ascii=False, indent=1)
+        f.write("\n")
+    md = render_summary(meta, results, per_manager, errors, isin_agg)
+    target = env.get("GITHUB_STEP_SUMMARY")
+    if target:
+        with open(target, "a", encoding="utf-8") as f:
+            f.write(md)
+    else:
+        say(md)
+    if gate.stopped:
+        say(f"::warning::Sonda parada limpiamente ({gate.stopped}): resultados parciales, sin reintentos.")
+    say(f"Sonda terminada: {gate.used}/{gate.max_requests} peticiones.")
+    return 0
+
+
+def main(argv=None, env=None, client=None, today=None, clock=None, sleep=None):
+    env = os.environ if env is None else env
+    ap = argparse.ArgumentParser(description="Sonda de cobertura de fondos europeos en Yahoo Finance (diagnóstico manual, solo lectura).")
+    ap.add_argument("--names", default="config/fund_probe_names.json")
+    ap.add_argument("--json-out", default="fund_probe_names.json")
+    ap.add_argument("--max-requests", type=int, default=HARD_MAX_REQUESTS)
+    args = ap.parse_args(argv)
+    try:
+        names = load_names(args.names)
+    except ValueError:
+        say("::error::La lista de nombres no es válida.")
+        return 2
+    today = today or datetime.now(timezone.utc).date()
+    try:
+        return _run(args, env, names, client, today, clock, sleep)
+    except Exception as exc:                          # noqa: BLE001 - nunca un traceback con valores: solo la clase y el sitio
+        tb = traceback.extract_tb(exc.__traceback__)[-1]
+        say(f"::error::Fallo inesperado: {type(exc).__name__} en {os.path.basename(tb.filename)}:{tb.lineno}")
+        return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
