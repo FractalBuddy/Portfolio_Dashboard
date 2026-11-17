@@ -374,6 +374,46 @@ def summarize_by_manager(results):
 
 
 # ------------------------------------------------------------------------------------------------------------------------------
+# Sección GENÉRICOS (config/fund_probe_isins_generic.json): ISIN PÚBLICOS de fondos conocidos, no de nadie. SÍ salen con detalle (resumen y JSON).
+# No tiene nada que ver con PROBE_ISINS: no comparte datos, ni registros, ni salida con esa sección (ver más abajo).
+# ------------------------------------------------------------------------------------------------------------------------------
+def isin_check_digit(base11):
+    """Dígito de control ISO 6166 de los 11 primeros caracteres: letras -> números (A=10..Z=35), Luhn sobre la cadena de dígitos resultante."""
+    digits = "".join(str(int(c, 36)) for c in base11)
+    total = 0
+    for i, ch in enumerate(reversed(digits)):
+        n = int(ch) * (2 if i % 2 == 0 else 1)
+        total += n - 9 if n > 9 else n
+    return (10 - total % 10) % 10
+
+
+def load_generic(path):
+    """Lista [{"isin", "name", "check_ok"}] del repo. ValueError si la estructura no es válida, o si hay ISIN de formato inválido o duplicados (se LISTAN en el mensaje:
+    el fichero es público). Un dígito de control malo NO se descarta: queda marcado check_ok=False, se sonda igualmente y el resumen lo lista."""
+    try:
+        data = json.loads(open(path, encoding="utf-8").read())
+    except (OSError, ValueError) as exc:
+        raise ValueError("lista de ISIN genéricos ilegible") from exc
+    if not isinstance(data, list) or not data:
+        raise ValueError("la lista de ISIN genéricos debe ser una lista no vacía")
+    out, bad, seen = [], [], set()
+    for e in data:
+        if not isinstance(e, dict) or set(e) != {"isin", "name"} or not all(isinstance(e[k], str) and e[k].strip() for k in e):
+            raise ValueError("entrada de la lista de ISIN genéricos no válida")
+        isin = e["isin"].strip()
+        if not _ISIN_STRICT.match(isin):
+            bad.append(f"{isin[:20]} (formato)")
+        elif isin in seen:
+            bad.append(f"{isin} (duplicado)")
+        else:
+            seen.add(isin)
+            out.append({"isin": isin, "name": e["name"].strip(), "check_ok": isin_check_digit(isin[:11]) == int(isin[11])})
+    if bad:
+        raise ValueError("ISIN genéricos con formato inválido o duplicados: " + ", ".join(bad))
+    return out
+
+
+# ------------------------------------------------------------------------------------------------------------------------------
 # Sección ISIN (secreto PROBE_ISINS). REGLAS DE PRIVACIDAD: el run es público.
 #   * Cada ISIN se enmascara (::add-mask::) ANTES de usarlo (también los no válidos: pueden ser un ISIN mal escrito).
 #   * Ningún identificador (ISIN, ticker, nombre) se guarda tras la llamada: los registros solo llevan números y la clase de error.
