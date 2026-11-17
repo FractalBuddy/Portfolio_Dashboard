@@ -1,0 +1,61 @@
+name: Fund probe (cobertura de fondos en Yahoo)
+
+# DIAGNÓSTICO MANUAL: ¿qué fondos europeos (UCITS indexados y de gestión activa, no solo ETFs cotizados) sirve Yahoo Finance vía yfinance, con qué divisa y cuántos días de retraso?
+# Solo workflow_dispatch (nunca se programa). NO escribe en ningún sitio: sin despliegue, sin Supabase, sin commits; permisos de solo lectura del repo.
+# Solo corre sobre refs/heads/main: un workflow_dispatch lanzado con otra rama no ejecuta código sin revisar con el secreto.
+# Pausa >= 1 s entre peticiones a Yahoo, tope total de peticiones (250) y parada limpia (sin reintentos) ante un 429 o una caída de red.
+#
+# SECCIÓN NOMBRES: lista genérica de fondos populares (config/fund_probe_names.json) -> resumen completo y artefacto JSON.
+# SECCIÓN ISIN (opcional): solo si existe el secreto PROBE_ISINS (ISIN separados por comas). El repo es PÚBLICO: de esta sección solo salen AGREGADOS (nunca un ISIN,
+# un ticker resuelto ni un nombre); cada ISIN se enmascara (::add-mask::) antes de usarlo y el artefacto NO contiene nada de ella.
+# El secreto solo está en el paso que ejecuta la sonda (dependencias con hashes); no hay más secretos ni permisos de escritura en el job.
+on:
+  workflow_dispatch:
+    inputs:
+      max_requests:
+        description: 'Tope de peticiones a Yahoo en todo el run (máximo 250; cada histórico cuenta como 2).'
+        type: string
+        default: '250'
+
+permissions: {}
+
+concurrency:
+  group: fund-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+          cache: pip
+
+      - name: Install dependencies (hash-pinned)
+        run: pip install --require-hashes --no-deps -r requirements.txt
+
+      # Único paso con el secreto. Lee Yahoo (solo lectura); resumen en $GITHUB_STEP_SUMMARY; JSON de NOMBRES en $RUNNER_TEMP.
+      - name: Run probe
+        env:
+          PROBE_ISINS: ${{ secrets.PROBE_ISINS }}
+          MAX_REQUESTS: ${{ inputs.max_requests }}
+        run: python scripts/fund_probe.py --json-out "$RUNNER_TEMP/fund_probe_names.json" --max-requests "$MAX_REQUESTS"
+
+      - name: Upload names JSON (no ISIN data)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fund-probe-names
+          path: ${{ runner.temp }}/fund_probe_names.json
+          retention-days: 14
+          if-no-files-found: error
