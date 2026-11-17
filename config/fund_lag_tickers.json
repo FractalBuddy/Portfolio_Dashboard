@@ -1,0 +1,12 @@
+[
+ {"ticker": "0P00000WLG.F", "kind": "fondo"},
+ {"ticker": "0P00012PP6.F", "kind": "fondo"},
+ {"ticker": "0P0001CLDK.F", "kind": "fondo"},
+ {"ticker": "0P0001CLDM.F", "kind": "fondo"},
+ {"ticker": "0P00016YQ5.F", "kind": "fondo"},
+ {"ticker": "0P0001DFE8.F", "kind": "fondo"},
+ {"ticker": "0P000168OI.F", "kind": "fondo"},
+ {"ticker": "IWDA.L", "kind": "control_etf"},
+ {"ticker": "VWCE.DE", "kind": "control_etf"},
+ {"ticker": "SPXS.L", "kind": "control_etf"}
+]
