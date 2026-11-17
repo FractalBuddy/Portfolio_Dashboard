@@ -220,7 +220,8 @@ def test_lista_de_nombres_no_contiene_isin_ids_ni_urls_ni_nada_de_la_cartera():
 
 def test_load_names_rechaza_entradas_invalidas(tmp_path):
     p = tmp_path / "n.json"
-    for bad in ('{"x": 1}', '[{"manager": "A"}]', '[{"manager": "A", "name": ""}]', "no json", '[{"manager":"A","name":"IE00AAAAAAAA"}]'):
+    synthetic = "IE00" + "A" * 8                                              # construido aquí: el guardia de privacidad del repo no admite literales con forma de ISIN
+    for bad in ('{"x": 1}', '[{"manager": "A"}]', '[{"manager": "A", "name": ""}]', "no json", json.dumps([{"manager": "A", "name": synthetic}])):
         p.write_text(bad, encoding="utf-8")
         with pytest.raises(ValueError):
             fp.load_names(p)

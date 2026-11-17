@@ -167,11 +167,11 @@ def test_429_en_nombres_para_limpio_informa_y_sale_con_cero(tmp_path, capfd):
 # ------------------------------------------------------------------ config inválida y errores inesperados
 def test_lista_invalida_sale_con_2_sin_citar_su_contenido(tmp_path, capfd):
     bad = tmp_path / "bad.json"
-    bad.write_text('[{"manager": "A", "name": "IE00SYNTH001"}]', encoding="utf-8")
+    bad.write_text(json.dumps([{"manager": "A", "name": ISINS[0]}]), encoding="utf-8")
     t = FakeTime()
     rc = fp.main(["--names", str(bad), "--json-out", str(tmp_path / "o.json")], env={}, client=World(), today=TODAY, clock=t.clock, sleep=t.sleep)
     cap = capfd.readouterr()
-    assert rc == 2 and "IE00SYNTH001" not in cap.out + cap.err and not (tmp_path / "o.json").exists()
+    assert rc == 2 and ISINS[0] not in cap.out + cap.err and not (tmp_path / "o.json").exists()
 
 
 def test_un_fallo_inesperado_solo_imprime_la_clase_nunca_el_mensaje(tmp_path, capfd, monkeypatch):
