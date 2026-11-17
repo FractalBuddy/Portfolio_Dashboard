@@ -45,6 +45,7 @@ class FakeClient:
     def __init__(self, searches=None, histories=None, default_history=None):
         self.searches, self.histories, self.default_history = searches or {}, histories or {}, default_history
         self.calls = []
+        self.periods = []                      # periodo pedido en cada history() (None = el de por defecto de la sonda)
 
     def _get(self, table, key, default):
         v = table.get(key, default)
@@ -56,6 +57,7 @@ class FakeClient:
         self.calls.append(("search", query))
         return self._get(self.searches, query, [])
 
-    def history(self, symbol):
+    def history(self, symbol, period=None):
         self.calls.append(("history", symbol))
+        self.periods.append(period)
         return self._get(self.histories, symbol, self.default_history)

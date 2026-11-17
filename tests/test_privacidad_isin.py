@@ -13,6 +13,9 @@ from privacy_guard import (ISIN_PERMITIDOS, SINTETICOS_VALIDOS, isin_check_digit
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 _SKIP_DIRS = {".git", "__pycache__", ".pytest_cache", ".ruff_cache", "node_modules", ".venv"}
+# ÚNICA excepción: la lista de ISIN PÚBLICOS (fondos conocidos, no de nadie) que usa la sección GENÉRICOS de la sonda de fondos. Se exime solo de la regla de ISIN
+# y solo en esa ruta exacta (no por nombre de fichero); los ids de ficha siguen vigilados también ahí. tests/test_fund_probe_generic_list.py lo prueba.
+ISIN_EXENTO = "config/fund_probe_isins_generic.json"
 
 
 def _ficheros():
@@ -32,7 +35,8 @@ def _barrido(isin=isin_leaks, ids=product_id_leaks):
             text = p.read_text(encoding="utf-8")
         except (UnicodeDecodeError, OSError):
             continue
-        n_isin, n_id = isin(text), ids(text)
+        n_isin = 0 if p.relative_to(ROOT).as_posix() == ISIN_EXENTO else isin(text)
+        n_id = ids(text)
         if n_isin or n_id:
             malos.append("%s: %d ISIN y %d ids de ficha no permitidos" % (p.relative_to(ROOT), n_isin, n_id))
     return malos

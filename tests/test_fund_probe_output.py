@@ -65,7 +65,7 @@ def run_main(tmp_path, env=None, client=None, extra=(), capsys=None):
     summ, js = tmp_path / "summary.md", tmp_path / "out.json"
     full_env = {"GITHUB_STEP_SUMMARY": str(summ)}
     full_env.update(env or {})
-    rc = fp.main(["--names", str(names_file(tmp_path)), "--json-out", str(js), *extra], env=full_env, client=client or World(), today=TODAY, clock=t.clock, sleep=t.sleep)
+    rc = fp.main(["--names", str(names_file(tmp_path)), "--json-out", str(js), "--generic-json-out", str(tmp_path / "g.json"), "--sections", "names", *extra], env=full_env, client=client or World(), today=TODAY, clock=t.clock, sleep=t.sleep)
     return rc, (summ.read_text(encoding="utf-8") if summ.exists() else ""), (js.read_text(encoding="utf-8") if js.exists() else ""), t
 
 
@@ -137,18 +137,18 @@ def test_el_ritmo_de_un_segundo_se_cumple_de_extremo_a_extremo(tmp_path):
         def history(self, s):
             stamps.append(t.clock())
             return super().history(s)
-    fp.main(["--names", str(names_file(tmp_path)), "--json-out", str(tmp_path / "o.json")], env={"PROBE_ISINS": ",".join(ISINS[:5])}, client=C(isin_specs=ISINS),
+    fp.main(["--names", str(names_file(tmp_path)), "--json-out", str(tmp_path / "o.json"), "--generic-json-out", str(tmp_path / "g.json"), "--sections", "names"], env={"PROBE_ISINS": ",".join(ISINS[:5])}, client=C(isin_specs=ISINS),
             today=TODAY, clock=t.clock, sleep=t.sleep)
     assert len(stamps) > 10 and all(b - a >= 1.0 for a, b in zip(stamps, stamps[1:]))
 
 
-def test_max_requests_se_recorta_a_250_y_se_respeta(tmp_path):
+def test_max_requests_se_recorta_a_400_y_se_respeta(tmp_path):
     rc, md, js, _ = run_main(tmp_path, extra=["--max-requests", "4"])
     d = json.loads(js)
     assert rc == 0 and d["request_cap"] == 4 and d["stopped"] == "presupuesto" and d["requests_names"] <= 4
     assert any(x["status"] == "no_probado" for x in d["names"])
     rc, md, js, _ = run_main(tmp_path, extra=["--max-requests", "9999"])
-    assert json.loads(js)["request_cap"] == 250
+    assert json.loads(js)["request_cap"] == 400
 
 
 # ------------------------------------------------------------------ 429: parada limpia e informada
@@ -169,7 +169,7 @@ def test_lista_invalida_sale_con_2_sin_citar_su_contenido(tmp_path, capfd):
     bad = tmp_path / "bad.json"
     bad.write_text(json.dumps([{"manager": "A", "name": ISINS[0]}]), encoding="utf-8")
     t = FakeTime()
-    rc = fp.main(["--names", str(bad), "--json-out", str(tmp_path / "o.json")], env={}, client=World(), today=TODAY, clock=t.clock, sleep=t.sleep)
+    rc = fp.main(["--names", str(bad), "--json-out", str(tmp_path / "o.json"), "--generic-json-out", str(tmp_path / "g.json"), "--sections", "names"], env={}, client=World(), today=TODAY, clock=t.clock, sleep=t.sleep)
     cap = capfd.readouterr()
     assert rc == 2 and ISINS[0] not in cap.out + cap.err and not (tmp_path / "o.json").exists()
 
@@ -236,5 +236,5 @@ def test_secreto_ausente_dice_omitida_y_no_toca_yahoo_para_isin(tmp_path):
 
 def test_sin_variable_de_resumen_se_escribe_en_stdout(tmp_path, capfd):
     t = FakeTime()
-    rc = fp.main(["--names", str(names_file(tmp_path)), "--json-out", str(tmp_path / "o.json")], env={}, client=World(), today=TODAY, clock=t.clock, sleep=t.sleep)
+    rc = fp.main(["--names", str(names_file(tmp_path)), "--json-out", str(tmp_path / "o.json"), "--generic-json-out", str(tmp_path / "g.json"), "--sections", "names"], env={}, client=World(), today=TODAY, clock=t.clock, sleep=t.sleep)
     assert rc == 0 and "| Gestora |" in capfd.readouterr().out
