@@ -225,3 +225,23 @@ def test_load_names_rechaza_entradas_invalidas(tmp_path):
         p.write_text(bad, encoding="utf-8")
         with pytest.raises(ValueError):
             fp.load_names(p)
+
+
+# ------------------------------------------------------------------ diagnóstico de la búsqueda (para interpretar el primer run real)
+def test_search_hits_cuenta_los_tipos_que_devolvio_yahoo_y_cuantos_pasaron_el_filtro():
+    qs = [quote("E1", "Alpha World Fund", "EQUITY"), quote("E2", "Alpha World Fund", "EQUITY"), quote("F1", "Alpha World Fund"), quote("X", "Otra cosa", "ETF")]
+    r, _ = run_one(FakeClient({"Alpha World Fund": qs}, {"F1": H()}))
+    assert r["search_hits"] == {"total": 4, "types": {"EQUITY": 2, "MUTUALFUND": 1, "ETF": 1}, "matching": 1}
+
+
+def test_search_hits_tambien_en_no_encontrado_y_none_si_no_se_busco():
+    r, _ = run_one(FakeClient({"Alpha World Fund": [quote("E1", "Alpha World Fund", "EQUITY")]}))
+    assert r["status"] == "no_encontrado" and r["search_hits"] == {"total": 1, "types": {"EQUITY": 1}, "matching": 0}
+    c = FakeClient({"A One": fp.yf_exceptions.YFRateLimitError()})
+    res = fp.run_names([entry("A One"), entry("B Two")], c, mk(), TODAY, fp.new_error_counter())
+    assert [x["search_hits"] for x in res] == [None, None]
+
+
+def test_search_hits_ignora_elementos_raros_sin_romper():
+    r, _ = run_one(FakeClient({"Alpha World Fund": [None, "x", {"symbol": "Z"}, quote("F1", "Alpha World Fund")]}, {"F1": H()}))
+    assert r["search_hits"]["total"] == 4 and r["search_hits"]["types"] == {"MUTUALFUND": 1, "desconocido": 1} and r["status"] == "reciente"

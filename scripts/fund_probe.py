@@ -281,7 +281,7 @@ def _currencies(r):
 def _base_result(e):
     return {"manager": e["manager"], "name": e["name"], "status": "no_probado", "ticker": None, "exchange": None, "quote_type": None, "shortname": None,
             "currency": None, "last_date": None, "lag_days": None, "bars": None, "flags": [], "error": None, "candidates": 0, "ambiguous": False,
-            "multi_currency": False, "currencies": [], "alternatives": []}
+            "multi_currency": False, "currencies": [], "alternatives": [], "search_hits": None}
 
 
 def probe_alternatives(results, client, gate, today, errors):
@@ -321,7 +321,14 @@ def run_names(entries, client, gate, today, errors, with_alternatives=True, prog
             r["error"] = pe.cls
             r["status"] = "no_probado" if gate.stopped else "error"
             continue
-        strong = strong_candidates(fund_candidates(e["name"], quotes))
+        cands = fund_candidates(e["name"], quotes)
+        types = {}
+        for q in quotes or []:
+            if isinstance(q, dict):
+                t = q.get("quoteType") if isinstance(q.get("quoteType"), str) else "desconocido"
+                types[t] = types.get(t, 0) + 1
+        r["search_hits"] = {"total": len(quotes or []), "types": types, "matching": len(cands)}     # para interpretar un «no_encontrado»: ¿Yahoo no lo tiene o lo filtro yo?
+        strong = strong_candidates(cands)
         if not strong:
             errors["vacio"] += 1
             r["status"] = "no_encontrado"
