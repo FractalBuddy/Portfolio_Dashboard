@@ -10,11 +10,15 @@ Se ejecuta SOLO desde GitHub Actions (.github/workflows/fund-probe.yml, workflow
 
 El repo es PÚBLICO: cada línea que imprime este script es pública.
 """
+import contextlib
+import io
 import json
+import logging
 import math
 import re
 import time
 import unicodedata
+import warnings
 from datetime import date, datetime
 
 from yfinance import exceptions as yf_exceptions
@@ -36,6 +40,9 @@ STRONG_DELTA = 0.1               # «candidato fuerte»: cobertura a menos de 0.
 MAX_ALTS = 3                     # como mucho 3 candidatos fuertes (el mejor + 2 alternativas) se miden por nombre
 FUND_TYPES = frozenset({"MUTUALFUND", "ETF"})
 STOPWORDS = frozenset({"fund", "funds", "ucits", "the", "of", "and"})
+_ISIN_STRICT = re.compile(r"^[A-Z]{2}[A-Z0-9]{9}[0-9]$")
+MIN_ISIN_AGGREGATE = 5           # con menos de 5 ISIN probados solo se publica «n probados / n resueltos»
+LAG_BUCKETS = (("0-3", 0, 3), ("4-7", 4, 7), ("8-30", 8, 30), (">30", 31, 10**9))
 _ISIN_SHAPE = re.compile(r"\b[A-Z]{2}(?=[A-Z0-9]*\d)[A-Z0-9]{10}\b")      # forma de ISIN, sin exigir el dígito de control: más estricta = más privada
 
 
@@ -349,3 +356,124 @@ def summarize_by_manager(results):
         s["errors"] += st == "error"
         s["ambiguous"] += bool(r.get("ambiguous"))
     return list(out.values())
+
+
+# ------------------------------------------------------------------------------------------------------------------------------
+# Sección ISIN (secreto PROBE_ISINS). REGLAS DE PRIVACIDAD: el run es público.
+#   * Cada ISIN se enmascara (::add-mask::) ANTES de usarlo (también los no válidos: pueden ser un ISIN mal escrito).
+#   * Ningún identificador (ISIN, ticker, nombre) se guarda tras la llamada: los registros solo llevan números y la clase de error.
+#   * Las llamadas a Yahoo corren en silencio (stdout/stderr, logging y avisos descartados: yfinance cita el ticker en sus mensajes).
+#   * Solo salen agregados; con < MIN_ISIN_AGGREGATE probados, solo «n probados / n resueltos».
+# ------------------------------------------------------------------------------------------------------------------------------
+def parse_isins(raw):
+    """-> (isin_validos_sin_duplicados, n_no_validos, tokens_a_enmascarar). Separa por comas; quita espacios y comillas; normaliza a mayúsculas."""
+    valid, tokens, invalid, seen = [], [], 0, set()
+    for tok in (raw or "").split(","):
+        tok = tok.strip().strip("\"'").strip()
+        if not tok:
+            continue
+        tokens.append(tok)
+        up = tok.upper()
+        if up in seen:
+            continue
+        seen.add(up)
+        if _ISIN_STRICT.match(up):
+            valid.append(up)
+        else:
+            invalid += 1
+    return valid, invalid, tokens
+
+
+@contextlib.contextmanager
+def _quiet():
+    """Descarta stdout/stderr, logging y avisos: yfinance y las excepciones citan el símbolo o la consulta."""
+    prev = logging.root.manager.disable
+    logging.disable(logging.CRITICAL)
+    try:
+        with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            warnings.simplefilter("ignore")
+            yield
+    finally:
+        logging.disable(prev)
+
+
+def _isin_candidates(quotes):
+    out, seen = [], set()
+    for qt in quotes or []:
+        if isinstance(qt, dict) and qt.get("quoteType") in FUND_TYPES and isinstance(qt.get("symbol"), str) and qt["symbol"] not in seen:
+            seen.add(qt["symbol"])
+            out.append(qt["symbol"])
+    return out
+
+
+def run_isins(isins, client, gate, today):
+    """Un registro ANÓNIMO por ISIN: {"probed", "resolved", "lag", "currency", "ambiguous", "error"}."""
+    recs = []
+    for isin in isins:
+        rec = {"probed": False, "resolved": False, "lag": None, "currency": None, "ambiguous": False, "error": None}
+        recs.append(rec)
+        if gate.stopped:
+            continue
+        try:
+            with _quiet():
+                quotes = gate.call(lambda i=isin: client.search(i), SEARCH_COST)
+                cands = _isin_candidates(quotes)
+                rec["probed"] = True
+                if not cands:
+                    rec["error"] = "vacio"
+                    continue
+                rec.update(resolved=True, ambiguous=len(cands) >= 2)
+                h = gate.call(lambda s=cands[0]: client.history(s), HISTORY_COST)
+                m = measure(h, today)
+            rec.update(lag=m["lag_days"], currency=m["currency"], flags=m["flags"])
+        except Stopped:
+            continue
+        except ProbeError as pe:
+            rec["probed"] = rec["probed"] or not gate.stopped
+            rec["error"] = pe.cls
+        except Exception:                          # noqa: BLE001 - cualquier otra cosa: clase «parseo», sin texto
+            rec["probed"], rec["error"] = True, "parseo"
+    return recs
+
+
+def aggregate_isins(recs, invalid=0):
+    probed = [r for r in recs if r["probed"]]
+    not_probed = len(recs) - len(probed)
+    agg = {"status": "ok", "tested": len(probed), "resolved": sum(r["resolved"] for r in probed)}
+    if len(probed) < MIN_ISIN_AGGREGATE:
+        agg["small"] = True
+        if not_probed:
+            agg["not_probed"] = not_probed
+        if invalid:
+            agg["invalid"] = invalid
+        return agg
+    lags = [r["lag"] for r in probed if r["lag"] is not None]
+    cur = {}
+    for r in probed:
+        if r["currency"]:
+            cur[r["currency"]] = cur.get(r["currency"], 0) + 1
+    shown = {c: n for c, n in cur.items() if n >= 2}
+    if len(shown) != len(cur):
+        shown["otras"] = sum(n for n in cur.values() if n < 2)       # una divisa suelta (n=1) ayudaría a deducir qué fondo es
+    errors = new_error_counter()
+    for r in probed:
+        if r["error"]:
+            errors[r["error"]] += 1
+        if "divisa_rara" in r.get("flags", ()):
+            errors["divisa_rara"] += 1
+    agg.update(recent=sum(lag <= RECENT_DAYS for lag in lags), lag_buckets={n: sum(lo <= lag <= hi for lag in lags) for n, lo, hi in LAG_BUCKETS},
+               currencies=shown, ambiguous=sum(r["ambiguous"] for r in probed), errors=errors, not_probed=not_probed, invalid=invalid)
+    return agg
+
+
+def run_isin_section(raw, client, gate, today, emit=print):
+    valid, invalid, tokens = parse_isins(raw)
+    if not tokens:
+        return {"status": "omitida"}
+    done = set()
+    for tok in tokens:                             # TODAS las máscaras antes de la primera petición
+        for variant in (tok, tok.upper()):
+            if variant not in done:
+                done.add(variant)
+                emit(f"::add-mask::{variant}")
+    return aggregate_isins(run_isins(valid, client, gate, today), invalid)
