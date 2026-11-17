@@ -330,3 +330,7 @@ P8 (pasar `emit=say` en vez de silenciar el segundo enmascarado) es una mutació
 4. **Lanzar:** Actions → *Fund probe (cobertura de fondos en Yahoo)* → *Run workflow* → rama `main` → `max_requests` 250 (por defecto) → *Run workflow*. Duración estimada (sin medir): unos 5-10 min, con pausa de 1 s por petición y 15 min de tope del job.
 5. **Leer el resultado:** en la página del run → pestaña *Summary* (tabla por gestora, detalle por nombre, clases de error, agregados de ISIN). El JSON completo de NOMBRES (con `search_hits`) está en el artefacto `fund-probe-names` (14 días); no contiene nada de la sección ISIN.
 6. **Interpretar:** si «Sonda parada: 429» aparece pronto, Yahoo limita al runner: relanza más tarde. Si casi todo es `no_encontrado`, mira `search_hits` en el JSON: tipos devueltos y cuántos pasan el filtro.
+
+## 7. Apunte: D44 actualizado (paso 0 de la sección 6 resuelto)
+- `test_D44_secretos_usados_solo_los_esperados_y_ninguno_en_run` incluye ahora `PROBE_ISINS` (lista de ISIN de la sonda; solo en `fund-probe.yml`, solo como `env` desde `secrets`). Es el único cambio en tests existentes.
+- Comprobado: ningún otro workflow lo menciona, no aparece en ningún `run:` y no hay valores en el repo; `ruff check --select F scripts tests` limpio y suite completa en verde (1818 passed, Python 3.13).
