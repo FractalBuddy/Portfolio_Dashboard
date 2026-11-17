@@ -132,6 +132,7 @@ def test_reglas_alternativas_cambian_la_eleccion_donde_deben():
 def test_tipo_de_ticker_0P_etf_otras():
     assert fp.ticker_type(cand("0P0001.F", qtype="MUTUALFUND")) == "0P" and fp.ticker_type(cand("0p0001.f", qtype="ETF")) == "0P"
     assert fp.ticker_type(cand("EUNL.DE", qtype="ETF")) == "etf" and fp.ticker_type(cand("ABC.MC", qtype="MUTUALFUND")) == "otras"
+    assert fp.ticker_type(cand("X0P1.F", qtype="MUTUALFUND")) == "otras" and fp.ticker_type(cand("A0P.DE", qtype="ETF")) == "etf"       # «0P» solo cuenta al principio del símbolo
 
 
 # ------------------------------------------------------------------ medida por ISIN
