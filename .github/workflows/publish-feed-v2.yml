@@ -163,13 +163,13 @@ jobs:
       id-token: write
     environment:
       name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
+      url: ${{ steps.deployment.outputs.page_url || steps.deployment_retry.outputs.page_url }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
       generated_at: ${{ steps.meta.outputs.generated_at }}
       alerts: ${{ steps.alerts.outputs.alerts }}
-      page_url: ${{ steps.deployment.outputs.page_url }}
+      page_url: ${{ steps.deployment.outputs.page_url || steps.deployment_retry.outputs.page_url }}
     steps:
       # Solo scripts/ y el registro, sin credenciales persistentes (el repo es público: no hace falta permiso de contents).
       - name: Check out scripts and registry only
@@ -248,8 +248,51 @@ jobs:
         with:
           path: site
 
+      # Reintento ÚNICO del despliegue (incidente 12-11: deploy-pages falló con «Fetching artifact metadata failed», error de la API de GitHub, y el run
+      # mandó /fail; «Re-run failed jobs» no sirve porque sube un 2.º artefacto `github-pages`). Se reintenta DENTRO del job, con el MISMO artefacto:
+      #   - la validación (Sanity-check) va antes y sin continue-on-error: si falla, el job para y nunca se llega a desplegar ni a reintentar;
+      #   - el 1.er deploy lleva continue-on-error; si falla, «Decide deploy retry» decide: fallo LENTO (> 120 s: el deploy llegó a crear y sondear un
+      #     despliegue, no es el fallo de metadatos/API) => se rinde y el job falla; Pages YA sirve este generated_at => no se vuelve a publicar;
+      #     si no, espera 30 s y pide UN reintento. El reintento es el último paso y sin continue-on-error: si falla, el job falla y el heartbeat manda /fail.
+      # Actions no deja leer el mensaje de error de un paso anterior: «solo ante el error de metadatos/API» se aproxima por posición (tras validar y
+      # subir) y por tiempo (fallo rápido). Ver auditorias/FIXES_FEED_REINTENTO_ESCALA.md.
+      - name: Mark deploy start
+        run: echo "DEPLOY_T0=$(date +%s)" >> "$GITHUB_ENV"
+
       - name: Deploy to GitHub Pages
         id: deployment
+        continue-on-error: true
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+      - name: Decide deploy retry
+        id: retry_gate
+        if: ${{ steps.deployment.outcome == 'failure' }}
+        env:
+          WANT: ${{ steps.meta.outputs.generated_at }}
+        run: |
+          t0=${DEPLOY_T0:-}
+          case "$t0" in
+            ''|*[!0-9]*) echo "::error::sin marca de inicio del despliegue: no se reintenta"; echo "decision=give-up" >> "$GITHUB_OUTPUT"; exit 1 ;;
+          esac
+          elapsed=$(( $(date +%s) - t0 ))
+          if [ "$elapsed" -gt 120 ]; then
+            echo "::error::el despliegue falló a los ${elapsed} s (> 120 s): no es el fallo rápido de metadatos del artefacto/API; no se reintenta"
+            echo "decision=give-up" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+          echo "::warning::el despliegue falló a los ${elapsed} s (fallo rápido, como «Fetching artifact metadata failed»): espera de 30 s y UN reintento con el mismo artefacto"
+          sleep 30
+          got=$(curl -fsS --max-time 20 "${FEED_BASE}/manifest.json?cb=$RANDOM" 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("generated_at",""))' 2>/dev/null | tr -d '\r\n' | cut -c1-64 || true)
+          if [ -n "$WANT" ] && [ "$got" = "$WANT" ]; then
+            echo "::warning::Pages ya sirve este sitio ($WANT): el primer intento sí se publicó; no se vuelve a publicar"
+            echo "decision=served" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "decision=retry" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy to GitHub Pages (retry)
+        id: deployment_retry
+        if: ${{ steps.retry_gate.outputs.decision == 'retry' }}
         uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
 
   # Comprobación informativa FUERA del camino crítico: Pages ya sirve el sitio nuevo. Pages cachea unos minutos; un desfase no es un fallo.
