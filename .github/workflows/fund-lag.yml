@@ -1,0 +1,106 @@
+name: Fund lag (retraso de los fondos 0P en Yahoo)
+
+# EXPERIMENTO ACOTADO: mide, 6 veces al día, el retraso real de los fondos «0P» (Morningstar) de Yahoo Finance frente a unos ETF cotizados de control, para decidir si
+# Yahoo puede ser la primera fuente de NAV. Lista FIJA y pública de 10 tickers (config/fund_lag_tickers.json); histórico de 5 días con yfinance; una línea JSON por ticker
+# y ejecución (scripts/fund_lag.py documenta la regla de días hábiles). Pausa >= 1 s entre peticiones, tope de 30 peticiones y parada limpia (sin reintentos) ante un 429.
+#
+# AUTOLÍMITE: si la primera línea del registro (lag/fund_lag.jsonl en la rama `probe-data`) tiene más de 7 días, la ejecución sale en verde sin medir ni escribir nada.
+# No hay que desactivar el workflow a mano.
+#
+# DOS JOBS:
+#   measure  (contents: read)   instala yfinance (con hashes) y mide. No escribe en ningún sitio. Deja las líneas nuevas en un artefacto.
+#   publish  (contents: write)  ÚNICA escritura de todo el workflow. No instala nada de terceros (solo valida el fichero con la biblioteca estándar) y solo empuja,
+#                               sin --force, a la rama HUÉRFANA `probe-data` (ni main ni la rama `data` del feed). Si el push falla, el job no falla: avisa
+#                               (los datos siguen en el artefacto 14 días) y la medición, que es otro job, no se ve afectada.
+# Sin secretos: el único token es el efímero del propio job. Solo corre sobre refs/heads/main (el cron siempre corre en la rama por defecto; un workflow_dispatch desde
+# otra rama no ejecuta nada).
+on:
+  schedule:
+    - cron: '17 6,9,12,15,18,21 * * *'
+  workflow_dispatch: {}
+
+permissions: {}
+
+concurrency:
+  group: fund-lag
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      append: ${{ steps.measure.outputs.append }}
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+          cache: pip
+
+      - name: Install dependencies (hash-pinned)
+        run: pip install --require-hashes --no-deps -r requirements.txt
+
+      # Solo lee la primera línea del registro (lectura anónima de la rama pública). state = found | missing | error.
+      - name: Read registry head (read-only)
+        id: head
+        run: bash scripts/fund_lag_git.sh head "$RUNNER_TEMP/lag_head.jsonl"
+
+      - name: Measure lag
+        id: measure
+        env:
+          HEAD_STATE: ${{ steps.head.outputs.state }}
+        run: python scripts/fund_lag.py --out "$RUNNER_TEMP/fund_lag_new.jsonl" --registry-head "$RUNNER_TEMP/lag_head.jsonl" --head-state "$HEAD_STATE"
+
+      - name: Upload new lines (hand-off to the write job and backup)
+        if: ${{ steps.measure.outputs.append == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fund-lag-new
+          path: ${{ runner.temp }}/fund_lag_new.jsonl
+          retention-days: 14
+          if-no-files-found: error
+
+  publish:
+    needs: measure
+    if: ${{ github.ref == 'refs/heads/main' && needs.measure.outputs.append == 'true' }}
+    permissions:
+      contents: write
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out repo (scripts only, no credentials kept)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Download new lines
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: fund-lag-new
+          path: ${{ runner.temp }}/new
+
+      # El fichero viene de un job que ejecuta código de terceros (yfinance): aquí se trata como DATO y se valida antes de publicar (claves, tipos, tickers de la lista).
+      - name: Validate lines
+        run: python3 scripts/fund_lag_common.py validate "$RUNNER_TEMP/new/fund_lag_new.jsonl"
+
+      - name: Append and push to probe-data
+        id: push
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/fund_lag_git.sh publish "$RUNNER_TEMP/new/fund_lag_new.jsonl"
+
+      - name: Warn if the push failed
+        if: ${{ steps.push.outcome == 'failure' }}
+        run: |
+          echo "::warning::No se pudo empujar a la rama probe-data: las líneas de esta ejecución solo están en el artefacto fund-lag-new (14 días). La medición no se ve afectada."
+          echo "Push a probe-data FALLIDO en esta ejecución: las líneas siguen en el artefacto fund-lag-new." >> "$GITHUB_STEP_SUMMARY"

@@ -519,7 +519,8 @@ def test_D45_permisos_y_timeouts_de_todos_los_jobs():
             assert re.fullmatch(r"ubuntu-24\.04", job["runs-on"]), (f.name, jn)
             perms = job.get("permissions", wf["permissions"])
             if perms.get("contents") == "write":
-                assert (f.name, jn) in {("update-data.yml", "publish"), ("keepalive.yml", "keepalive")}
+                assert (f.name, jn) in {("update-data.yml", "publish"), ("keepalive.yml", "keepalive"),
+                                        ("fund-lag.yml", "publish")}       # fund-lag: único job con escritura del experimento del retraso; solo empuja a la rama huérfana probe-data (tests/test_fund_lag_workflow.py lo acota)
 
 
 def test_D46_cron_no_cae_en_hora_en_punto_y_hay_ruta_manual():
