@@ -6,6 +6,8 @@ SONDA DE COBERTURA DE FONDOS EUROPEOS EN YAHOO FINANCE (diagnóstico manual, sol
 Se ejecuta SOLO desde GitHub Actions (.github/workflows/fund-probe.yml, workflow_dispatch). No escribe en ningún sitio ni toca la cartera del dueño.
 
   * Sección NOMBRES: lista genérica de fondos populares (config/fund_probe_names.json) -> resultados completos (resumen y JSON).
+  * Sección GENÉRICOS: ISIN PÚBLICOS de fondos conocidos (config/fund_probe_isins_generic.json), no de nadie -> cobertura de Yahoo POR ISIN, con detalle por fila (resumen y
+    un segundo JSON). No comparte nada con la sección ISIN: corre ANTES de ella (el presupuesto compartido no puede alterar su resultado) y su salida es la misma con o sin secreto.
   * Sección ISIN (opcional, secreto PROBE_ISINS): SOLO salen agregados; jamás un ISIN, ticker, nombre ni nada que permita deducir cuál es cuál.
 
 El repo es PÚBLICO: cada línea que imprime este script es pública.
@@ -31,13 +33,16 @@ from yfinance import exceptions as yf_exceptions
 # Constantes (la regla de cada una está explicada en auditorias/FIXES_SONDA_FONDOS.md)
 # ------------------------------------------------------------------------------------------------------------------------------
 MIN_PAUSE = 1.0                  # segundos mínimos entre llamadas a Yahoo; no se puede bajar
-HARD_MAX_REQUESTS = 250          # tope duro de peticiones por run
+HARD_MAX_REQUESTS = 400          # tope duro de peticiones por run (era 250 antes de la sección GENÉRICOS)
 SEARCH_COST = 1                  # una búsqueda = 1 petición
 HISTORY_COST = 2                 # un histórico = hasta 2: yfinance pide primero la zona horaria del ticker y luego la serie (peor caso)
 MAX_NET_STREAK = 3               # fallos de red seguidos que paran la sonda
 ERROR_CLASSES = ("sin_red", "429", "vacio", "parseo", "divisa_rara")
 KNOWN_CURRENCIES = frozenset({"EUR", "USD", "GBP", "GBp", "CHF", "SEK", "NOK", "DKK", "PLN", "CZK", "HUF", "JPY", "CAD", "AUD", "NZD", "HKD", "SGD", "CNY", "ZAR"})
 HISTORY_PERIOD = "1mo"
+YEAR_PERIOD = "1y"               # histórico de la sección GENÉRICOS
+MIN_YEAR_BARS = 250              # «serie completa»: al menos 250 barras diarias en 1 año
+SECTIONS = ("names", "generic", "both")
 RECENT_DAYS = 3                  # «dato reciente»: la última barra tiene como mucho 3 días (cubre viernes -> lunes)
 MIN_COVERAGE = 0.6               # un candidato solo vale si contiene >= 60 % de las palabras significativas del nombre buscado
 STRONG_DELTA = 0.1               # «candidato fuerte»: cobertura a menos de 0.1 de la del mejor
@@ -184,9 +189,9 @@ class YahooClient:
         s = self.yf.Search(query, max_results=8, news_count=0, lists_count=0, include_cb=False)
         return list(s.quotes)
 
-    def history(self, symbol):
+    def history(self, symbol, period=HISTORY_PERIOD):
         t = self.yf.Ticker(symbol)
-        df = t.history(period=HISTORY_PERIOD, interval="1d", actions=False)
+        df = t.history(period=period, interval="1d", actions=False)
         try:
             meta = t.history_metadata
         except Exception:                               # noqa: BLE001 - sin metadatos: divisa desconocida (se marca divisa_rara), la serie sigue valiendo
@@ -259,10 +264,10 @@ def _status(lag):
     return "reciente" if lag <= RECENT_DAYS else "retrasado"
 
 
-def _measure_symbol(client, gate, symbol, today, errors):
-    """-> ("ok", medida) | ("error", clase). Lanza Stopped si la sonda ya no puede seguir."""
+def _measure_symbol(client, gate, symbol, today, errors, period=None):
+    """-> ("ok", medida) | ("error", clase). Lanza Stopped si la sonda ya no puede seguir. `period` None = el de por defecto del cliente (1 mes)."""
     try:
-        h = gate.call(lambda: client.history(symbol), HISTORY_COST)
+        h = gate.call((lambda: client.history(symbol)) if period is None else (lambda: client.history(symbol, period=period)), HISTORY_COST)
         m = measure(h, today)
     except ProbeError as pe:
         errors[pe.cls] += 1
@@ -413,6 +418,171 @@ def load_generic(path):
     return out
 
 
+CURRENCY_CODES = frozenset(c.upper() for c in KNOWN_CURRENCIES)
+LIQUIDITY_TIERS = (("GER", "LSE"), ("EBS", "AMS", "PAR", "MIL"))     # SUPUESTO a verificar con la propia salida (bolsas de cada candidata): Xetra y Londres, luego SIX, Euronext y Milán
+RULES = {"principal": ("0p", "divisa", "liquidez"), "liquidez_primero": ("liquidez", "divisa", "0p"), "orden_yahoo": ()}
+ALT_RULES = ("liquidez_primero", "orden_yahoo")
+TICKER_TYPES = ("0P", "etf", "otras")
+GENERIC_STATUSES = ("reciente", "retrasado", "sin_serie", "no_encontrado", "error", "no_probado")
+GENERIC_RULES_TEXT = (
+    "Similitud de nombres = Jaccard de palabras significativas (minúsculas, sin acentos ni puntuación, sin fund/funds/ucits/the/of/and): "
+    "|comunes| / |unión| entre el nombre esperado y el nombre largo (o, si no hay, el corto) que devuelve Yahoo; 0 si alguno queda vacío. "
+    "Elección de cotización entre las candidatas (MUTUALFUND/ETF, sin duplicados): 1) las que empiezan por 0P (Morningstar); 2) las que dicen en su nombre la divisa del nombre esperado "
+    "(solo si el nombre esperado trae exactamente una divisa y alguna candidata la trae; la búsqueda de Yahoo no da la divisa real); 3) la bolsa más líquida conocida "
+    "(Xetra y Londres, luego SIX, Euronext y Milán; las demás no se ordenan). Cada paso solo filtra si queda al menos una candidata. "
+    "Si tras los tres pasos quedan varias, no hay criterio: se emiten todas y, solo para poder medir, se mide la primera que puso Yahoo (tie=true).")
+
+
+def name_similarity(expected, found):
+    """Jaccard de palabras significativas (norm_tokens) entre dos nombres. 0.0 si alguno queda sin palabras."""
+    a, b = norm_tokens(expected), norm_tokens(found)
+    return round(len(a & b) / len(a | b), 3) if a and b else 0.0
+
+
+def _currencies_in(*texts):
+    return {w for t in texts for w in re.findall(r"[A-Z]+", str(t or "").upper()) if w in CURRENCY_CODES}
+
+
+def expected_currency(name):
+    """Divisa del nombre esperado si trae EXACTAMENTE una (palabra completa); si trae 0 o 2+, None (no hay criterio)."""
+    cur = _currencies_in(name)
+    return next(iter(cur)) if len(cur) == 1 else None
+
+
+def ticker_type(c):
+    """«0P» (Morningstar, símbolo que empieza por 0P) | «etf» (ETF cotizado) | «otras»."""
+    if str(c["symbol"]).upper().startswith("0P"):
+        return "0P"
+    return "etf" if c["quote_type"] == "ETF" else "otras"
+
+
+def liquidity_tier(c):
+    ex = str(c.get("exchange") or "").upper()
+    for i, tier in enumerate(LIQUIDITY_TIERS):
+        if ex in tier:
+            return i
+    return len(LIQUIDITY_TIERS)
+
+
+def generic_candidates(quotes):
+    """Resultados de búsqueda por ISIN -> candidatas MUTUALFUND/ETF sin duplicar símbolo, con su orden de Yahoo (rank)."""
+    out, seen = [], set()
+    for rank, qt in enumerate(quotes or []):
+        if not isinstance(qt, dict) or qt.get("quoteType") not in FUND_TYPES or not isinstance(qt.get("symbol"), str) or qt["symbol"] in seen:
+            continue
+        seen.add(qt["symbol"])
+        names = tuple(n for n in (qt.get("longname"), qt.get("shortname")) if isinstance(n, str) and n)
+        out.append({"symbol": qt["symbol"], "exchange": qt.get("exchange") or qt.get("exchDisp"), "quote_type": qt["quoteType"], "name": names[0] if names else None,
+                    "names": names, "rank": rank})
+    return out
+
+
+def choose_candidate(cands, expected_name, order=RULES["principal"]):
+    """REGLA DE ELECCIÓN DE COTIZACIÓN (determinista; ver GENERIC_RULES_TEXT). -> {"pick", "tied", "decided_by", "tie"}.
+    `tied` = las que quedan empatadas tras los criterios (por orden de Yahoo); `pick` = la primera de ellas (solo para poder medirla); tie=True si quedan varias."""
+    pool = sorted(cands, key=lambda c: c["rank"])
+    if not pool:
+        return {"pick": None, "tied": [], "decided_by": None, "tie": False}
+    if len(pool) == 1:
+        return {"pick": pool[0], "tied": pool, "decided_by": "unica", "tie": False}
+    exp = expected_currency(expected_name)
+    decided = None
+    for step in order:
+        if step == "0p":
+            sub = [c for c in pool if ticker_type(c) == "0P"]
+        elif step == "divisa":
+            sub = [c for c in pool if exp and _currencies_in(*c["names"]) == {exp}]
+        elif step == "liquidez":
+            best = min(liquidity_tier(c) for c in pool)
+            sub = [c for c in pool if liquidity_tier(c) == best]
+        else:
+            raise ValueError(step)
+        if sub:
+            pool = sub
+        if len(pool) == 1:
+            decided = step
+            break
+    return {"pick": pool[0], "tied": pool, "decided_by": decided or "sin_criterio", "tie": len(pool) > 1}
+
+
+def _generic_base(e):
+    return {"isin": e["isin"], "expected_name": e["name"], "check_ok": e["check_ok"], "status": "no_probado", "ticker": None, "ticker_type": None, "exchange": None,
+            "quote_type": None, "currency": None, "expected_currency": expected_currency(e["name"]), "currency_match": None, "yahoo_name": None, "name_similarity": None,
+            "candidates": 0, "quotes_total": None, "search_types": {}, "bars_1y": None, "last_date": None, "lag_days": None, "decided_by": None, "tie": False,
+            "all_candidates": [], "alt_picks": {}, "flags": [], "error": None}
+
+
+def _probe_generic(r, client, gate, today, errors):
+    """Rellena `r` (un ISIN público). Lanza Stopped si la sonda ya no puede seguir (r queda «no_probado», con lo que se haya sabido hasta entonces)."""
+    try:
+        quotes = gate.call(lambda q=r["isin"]: client.search(q), SEARCH_COST)
+    except ProbeError as pe:
+        errors[pe.cls] += 1
+        r["error"] = pe.cls
+        r["status"] = "no_probado" if gate.stopped else "error"
+        return
+    r["quotes_total"] = len(quotes or [])
+    for q in quotes or []:
+        t = q.get("quoteType") if isinstance(q, dict) and isinstance(q.get("quoteType"), str) else "desconocido"
+        r["search_types"][t] = r["search_types"].get(t, 0) + 1
+    cands = generic_candidates(quotes)
+    r["candidates"] = len(cands)
+    if not cands:
+        errors["vacio"] += 1
+        r["status"] = "no_encontrado"
+        return
+    name = r["expected_name"]
+    choice = choose_candidate(cands, name)
+    pick = choice["pick"]
+    r.update(ticker=pick["symbol"], ticker_type=ticker_type(pick), exchange=pick["exchange"], quote_type=pick["quote_type"], yahoo_name=pick["name"],
+             name_similarity=name_similarity(name, pick["name"]), decided_by=choice["decided_by"], tie=choice["tie"],
+             alt_picks={k: choose_candidate(cands, name, RULES[k])["pick"]["symbol"] for k in ALT_RULES})
+    if len(cands) >= 2:
+        r["all_candidates"] = [{"ticker": c["symbol"], "exchange": c["exchange"], "quote_type": c["quote_type"], "yahoo_name": c["name"], "ticker_type": ticker_type(c),
+                                "tied": c in choice["tied"]} for c in sorted(cands, key=lambda c: c["rank"])]
+    kind, m = _measure_symbol(client, gate, pick["symbol"], today, errors, period=YEAR_PERIOD)
+    if kind == "ok":
+        r.update(status=_status(m["lag_days"]), currency=m["currency"], last_date=m["last_date"], lag_days=m["lag_days"], bars_1y=m["bars"], flags=m["flags"],
+                 currency_match=(r["expected_currency"] == m["currency"].upper()) if r["expected_currency"] and m["currency"] else None)
+    else:
+        r.update(status="no_probado" if gate.stopped else "sin_serie", error=m)
+
+
+def run_generic(entries, client, gate, today, progress=None):
+    """Por cada ISIN público: búsqueda por ISIN y, si resuelve, histórico de 1 año de la cotización elegida. -> (resultados, contador de errores). No hay nada privado aquí."""
+    results, errors = [], new_error_counter()
+    for i, e in enumerate(entries, 1):
+        r = _generic_base(e)
+        results.append(r)
+        if not gate.stopped:
+            try:
+                _probe_generic(r, client, gate, today, errors)
+            except Stopped:
+                pass
+        if progress:
+            progress(i, len(entries), r)
+    return results, errors
+
+
+def aggregate_generic(results):
+    """Agregados de la sección GENÉRICOS (todo son datos públicos)."""
+    probed = [r for r in results if r["status"] != "no_probado"]
+    resolved = [r for r in results if r["ticker"]]
+    by_ex = {}
+    for r in resolved:
+        k = r["exchange"] or "desconocida"
+        by_ex[k] = by_ex.get(k, 0) + 1
+    several = [r for r in results if r["candidates"] >= 2]
+    return {"total": len(results), "probed": len(probed), "resolved": len(resolved),
+            "with_250_bars": sum(1 for r in results if (r["bars_1y"] or 0) >= MIN_YEAR_BARS), "recent": sum(r["status"] == "reciente" for r in results),
+            "by_status": {k: sum(r["status"] == k for r in results) for k in GENERIC_STATUSES},
+            "by_ticker_type": {k: sum(r["ticker_type"] == k for r in resolved) for k in TICKER_TYPES},
+            "by_exchange": dict(sorted(by_ex.items(), key=lambda kv: (-kv[1], kv[0]))),
+            "with_several_candidates": len(several), "ties": sum(bool(r["tie"]) for r in several), "tie_isins": [r["isin"] for r in several if r["tie"]],
+            "rule_changes": {k: sum(r["alt_picks"].get(k) != r["ticker"] for r in several) for k in ALT_RULES},
+            "check_digit_failures": [r["isin"] for r in results if not r["check_ok"]]}
+
+
 # ------------------------------------------------------------------------------------------------------------------------------
 # Sección ISIN (secreto PROBE_ISINS). REGLAS DE PRIVACIDAD: el run es público.
 #   * Cada ISIN se enmascara (::add-mask::) ANTES de usarlo (también los no válidos: pueden ser un ISIN mal escrito).
@@ -546,14 +716,9 @@ def _cell(v):
     return "—" if v is None or v == "" else str(v).replace("|", "/")
 
 
-def render_summary(meta, results, per_manager, errors, isin_agg):
-    L = ["## Sonda de cobertura de fondos europeos en Yahoo Finance", "",
-         f"Fecha: {meta['generated']} · yfinance {meta['yfinance']} · peticiones: {meta['requests_total']}/{meta['request_cap']} · «reciente» = última barra a ≤ {RECENT_DAYS} días",
-         ""]
-    if meta["stopped"]:
-        L += [f"**Sonda parada limpiamente: {meta['stopped']}.** Los nombres no probados quedan marcados «no_probado»; no se ha reintentado.", ""]
-    L += ["### Por gestora (sección NOMBRES)", "",
-          "| Gestora | Buscados | Encontrados | Reciente | Retraso mayor | Ambiguos | Sin serie | Errores | Sin probar |", "|---|---|---|---|---|---|---|---|---|"]
+def _render_names(results, per_manager, errors):
+    L = ["### Por gestora (sección NOMBRES)", "",
+         "| Gestora | Buscados | Encontrados | Reciente | Retraso mayor | Ambiguos | Sin serie | Errores | Sin probar |", "|---|---|---|---|---|---|---|---|---|"]
     keys = ("searched", "found", "recent", "delayed", "ambiguous", "no_series", "errors", "not_probed")
     for m in per_manager:
         L.append(f"| {_cell(m['manager'])} | " + " | ".join(str(m[k]) for k in keys) + " |")
@@ -562,8 +727,53 @@ def render_summary(meta, results, per_manager, errors, isin_agg):
     for r in results:
         amb = "no" if not r["ambiguous"] else ("sí (" + "/".join(r["currencies"]) + ")" if r["multi_currency"] else "sí")
         L.append("| " + " | ".join(_cell(x) for x in (r["manager"], r["name"], r["status"], r["ticker"], r["exchange"], r["currency"], r["last_date"], r["lag_days"], r["bars"], amb)) + " |")
-    L += ["", "### Errores de la sección NOMBRES (clases cerradas)", "", "| Clase | Nº |", "|---|---|"] + [f"| {c} | {errors[c]} |" for c in ERROR_CLASSES]
-    L += ["", "### Sección ISIN (solo agregados)", ""]
+    return L + ["", "### Errores de la sección NOMBRES (clases cerradas)", "", "| Clase | Nº |", "|---|---|"] + [f"| {c} | {errors[c]} |" for c in ERROR_CLASSES]
+
+
+def render_generic(gmeta, results, agg, errors):
+    """Bloque GENÉRICOS del resumen (datos públicos: ISIN, tickers y nombres salen con detalle). Termina antes de la sección ISIN privada."""
+    L = ["### Sección GENÉRICOS (ISIN públicos, cobertura de Yahoo por ISIN)", ""]
+    if gmeta["section"] == "omitida":
+        return ["### Sección GENÉRICOS: omitida (--sections names).", ""]
+    if gmeta["stopped"]:
+        L += [f"**Parada limpiamente en esta sección: {gmeta['stopped']}.** Los ISIN no probados quedan «no_probado»; no se ha reintentado.", ""]
+    L += ["| ISIN | Nombre esperado | Estado | Ticker | Tipo | Bolsa | Divisa | Nombre en Yahoo | Similitud | Candidatos | Barras 1 a | Última barra | Retraso (d) |",
+          "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for r in results:
+        L.append("| " + " | ".join(_cell(x) for x in (r["isin"], r["expected_name"], r["status"], r["ticker"], r["ticker_type"], r["exchange"], r["currency"], r["yahoo_name"],
+                                                     r["name_similarity"], r["candidates"], r["bars_1y"], r["last_date"], r["lag_days"])) + " |")
+    a = agg
+    L += ["", f"- Resueltos: {a['resolved']} / {a['total']} · con ≥ {MIN_YEAR_BARS} barras: {a['with_250_bars']} · recientes (≤ {RECENT_DAYS} d): {a['recent']} · sin probar: {a['by_status']['no_probado']} · peticiones de esta sección: {gmeta['requests']}",
+          "- Estado: " + ", ".join(f"{k} {v}" for k, v in a["by_status"].items()),
+          "- Por tipo de ticker (resueltos): " + ", ".join(f"{k} {v}" for k, v in a["by_ticker_type"].items()),
+          "- Por bolsa (resueltos): " + (", ".join(f"{k} {v}" for k, v in a["by_exchange"].items()) or "—"),
+          f"- Regla de elección: {a['with_several_candidates']} ISIN con varias candidatas · {a['ties']} sin criterio (empate) · habrían cambiado de ticker con otra regla: "
+          f"liquidez primero {a['rule_changes']['liquidez_primero']}, solo orden de Yahoo {a['rule_changes']['orden_yahoo']}",
+          "- Dígito de control no válido: " + (", ".join(a["check_digit_failures"]) or "ninguno"),
+          "- Errores: " + ", ".join(f"{c} {errors[c]}" for c in ERROR_CLASSES)]
+    ties = [r for r in results if r["tie"]]
+    if ties:
+        L += ["", "**Candidatas sin criterio (empate; se midió la primera de Yahoo, marcada con *):**", ""]
+        for r in ties:
+            tied = [c for c in r["all_candidates"] if c["tied"]]
+            L.append(f"- {r['isin']}: " + ", ".join(f"{c['ticker']} ({_cell(c['exchange'])})" + ("*" if c["ticker"] == r["ticker"] else "") for c in tied))
+    L += ["", "Reglas: " + GENERIC_RULES_TEXT, ""]
+    return L
+
+
+def render_summary(meta, results, per_manager, errors, isin_agg, generic=None, sections="both"):
+    L = ["## Sonda de cobertura de fondos europeos en Yahoo Finance", "",
+         f"Fecha: {meta['generated']} · yfinance {meta['yfinance']} · peticiones: {meta['requests_total']}/{meta['request_cap']} · «reciente» = última barra a ≤ {RECENT_DAYS} días",
+         ""]
+    if meta["stopped"]:
+        L += [f"**Sonda parada limpiamente: {meta['stopped']}.** Los nombres no probados quedan marcados «no_probado»; no se ha reintentado.", ""]
+    if sections == "generic":
+        L += ["### Sección NOMBRES: omitida (--sections generic).", ""]
+    else:
+        L += _render_names(results, per_manager, errors)
+    if generic is not None:
+        L += render_generic(*generic)
+    L += ["### Sección ISIN (solo agregados)", ""]
     if isin_agg["status"] == "omitida":
         L.append("Sección ISIN: omitida (no hay secreto PROBE_ISINS).")
     elif isin_agg.get("small"):
@@ -584,6 +794,13 @@ def build_json(meta, results, per_manager, errors):
             "requests_names": meta["requests_names"], "stopped": meta["stopped"], "errors": dict(errors), "per_manager": per_manager, "names": results}
 
 
+def build_generic_json(gmeta, results, agg, errors):
+    """SOLO la sección GENÉRICOS (datos públicos). No recibe nada de la sección ISIN privada."""
+    return {"section": gmeta["section"], "generated": gmeta["generated"], "yfinance": gmeta["yfinance"], "recent_days": RECENT_DAYS, "min_year_bars": MIN_YEAR_BARS,
+            "request_cap": gmeta["request_cap"], "requests_generic": gmeta["requests"], "stopped": gmeta["stopped"], "rules": GENERIC_RULES_TEXT, "errors": dict(errors),
+            "summary": agg, "isins": results}
+
+
 def _yf_version():
     try:
         from importlib import metadata
@@ -592,7 +809,7 @@ def _yf_version():
         return "desconocida"
 
 
-def _run(args, env, names, client, today, clock, sleep):
+def _run(args, env, names, generic, client, today, clock, sleep):
     raw = env.get("PROBE_ISINS") or ""
     _valid, _invalid, tokens = parse_isins(raw)
     for tok in dict.fromkeys(v for t in tokens for v in (t, t.upper())):      # TODAS las máscaras, antes de cualquier otra cosa (ni un ISIN se usa sin enmascarar)
@@ -600,21 +817,38 @@ def _run(args, env, names, client, today, clock, sleep):
     gate = Gate(max_requests=args.max_requests, clock=clock, sleep=sleep)
     client = client or YahooClient()
     errors = new_error_counter()
+    do_names, do_generic = args.sections in ("names", "both"), args.sections in ("generic", "both")
 
     def progress(i, n, r):
         say(f"[{i}/{n}] {r['manager']}: {r['status']}" + (f" (retraso {r['lag_days']} d)" if r["lag_days"] is not None else ""))
-    results = run_names(names, client, gate, today, errors, with_alternatives=False, progress=progress)
+
+    def gprogress(i, n, r):
+        say(f"[{i}/{n}] {r['isin']}: {r['status']}" + (f" (retraso {r['lag_days']} d)" if r["lag_days"] is not None else ""))
+    results = run_names(names, client, gate, today, errors, with_alternatives=False, progress=progress) if do_names else []
     used_names = gate.used
+    # GENÉRICOS va ANTES de la sección ISIN privada: el presupuesto es compartido, así que lo que gaste el secreto no puede cambiar este resultado.
+    gmeta, g_results, g_agg, g_errors = {"section": "omitida"}, [], None, new_error_counter()
+    if do_generic:
+        g_results, g_errors = run_generic(generic, client, gate, today, progress=gprogress)
+        g_agg = aggregate_generic(g_results)
+        gmeta = {"section": "ok", "requests": gate.used - used_names, "stopped": gate.stopped}          # `stopped` se fija AQUÍ: una parada posterior (sección ISIN) no es de esta sección
+    used_generic = gate.used - used_names
     isin_agg = run_isin_section(raw, client, gate, today, emit=lambda s: None)         # las máscaras ya se emitieron arriba
-    used_isin = gate.used - used_names
+    used_isin = gate.used - used_names - used_generic
     probe_alternatives(results, client, gate, today, errors)
     meta = {"generated": today.isoformat(), "yfinance": _yf_version(), "request_cap": gate.max_requests, "requests_total": gate.used,
-            "requests_names": gate.used - used_isin, "stopped": gate.stopped}
+            "requests_names": gate.used - used_isin - used_generic, "stopped": gate.stopped}
     per_manager = summarize_by_manager(results)
+    gmeta.update(generated=meta["generated"], yfinance=meta["yfinance"], request_cap=gate.max_requests)
+    if not do_generic:
+        gmeta.update(requests=0, stopped=None)
     with open(args.json_out, "w", encoding="utf-8") as f:
         json.dump(build_json(meta, results, per_manager, errors), f, ensure_ascii=False, indent=1)
         f.write("\n")
-    md = render_summary(meta, results, per_manager, errors, isin_agg)
+    with open(args.generic_json_out, "w", encoding="utf-8") as f:
+        json.dump(build_generic_json(gmeta, g_results, g_agg, g_errors), f, ensure_ascii=False, indent=1)
+        f.write("\n")
+    md = render_summary(meta, results, per_manager, errors, isin_agg, generic=(gmeta, g_results, g_agg, g_errors), sections=args.sections)
     target = env.get("GITHUB_STEP_SUMMARY")
     if target:
         with open(target, "a", encoding="utf-8") as f:
@@ -631,17 +865,28 @@ def main(argv=None, env=None, client=None, today=None, clock=None, sleep=None):
     env = os.environ if env is None else env
     ap = argparse.ArgumentParser(description="Sonda de cobertura de fondos europeos en Yahoo Finance (diagnóstico manual, solo lectura).")
     ap.add_argument("--names", default="config/fund_probe_names.json")
+    ap.add_argument("--generic-isins", default="config/fund_probe_isins_generic.json")
     ap.add_argument("--json-out", default="fund_probe_names.json")
+    ap.add_argument("--generic-json-out", default="fund_probe_generic.json")
     ap.add_argument("--max-requests", type=int, default=HARD_MAX_REQUESTS)
+    ap.add_argument("--sections", choices=SECTIONS, default="both", help="names | generic | both (la sección ISIN del secreto PROBE_ISINS va aparte y no cambia)")
     args = ap.parse_args(argv)
-    try:
-        names = load_names(args.names)
-    except ValueError:
-        say("::error::La lista de nombres no es válida.")
-        return 2
+    names, generic = [], []
+    if args.sections in ("names", "both"):
+        try:
+            names = load_names(args.names)
+        except ValueError:
+            say("::error::La lista de nombres no es válida.")
+            return 2
+    if args.sections in ("generic", "both"):
+        try:
+            generic = load_generic(args.generic_isins)
+        except ValueError as exc:                     # el fichero es PÚBLICO: el mensaje lista los ISIN malos (solo formato/duplicado), nunca nada del secreto
+            say(f"::error::La lista de ISIN genéricos no es válida: {exc}")
+            return 2
     today = today or datetime.now(timezone.utc).date()
     try:
-        return _run(args, env, names, client, today, clock, sleep)
+        return _run(args, env, names, generic, client, today, clock, sleep)
     except Exception as exc:                          # noqa: BLE001 - nunca un traceback con valores: solo la clase y el sitio
         tb = traceback.extract_tb(exc.__traceback__)[-1]
         say(f"::error::Fallo inesperado: {type(exc).__name__} en {os.path.basename(tb.filename)}:{tb.lineno}")

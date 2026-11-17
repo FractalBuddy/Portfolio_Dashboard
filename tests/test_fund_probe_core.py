@@ -8,7 +8,7 @@ import fund_probe as fp
 from fund_probe_fakes import TODAY, FakeTime, hist_df, rows
 
 
-def mk_gate(max_requests=250, **kw):
+def mk_gate(max_requests=400, **kw):
     t = FakeTime()
     return fp.Gate(max_requests=max_requests, clock=t.clock, sleep=t.sleep, **kw), t
 
@@ -45,9 +45,10 @@ def test_el_coste_cuenta_y_un_coste_que_no_cabe_no_se_ejecuta():
     assert g.used == 2
 
 
-def test_el_tope_duro_es_250_aunque_se_pida_mas():
+def test_el_tope_duro_es_400_aunque_se_pida_mas():
     g, _ = mk_gate(max_requests=10_000)
-    assert g.max_requests == 250
+    assert g.max_requests == 400 == fp.HARD_MAX_REQUESTS
+    assert mk_gate(max_requests=400)[0].max_requests == 400 and mk_gate(max_requests=399)[0].max_requests == 399
 
 
 # ------------------------------------------------------------------ 429 y sin red: parada limpia, sin reintentos
@@ -186,6 +187,17 @@ def test_cliente_real_traduce_search_y_history(monkeypatch):
     assert h["currency"] == "EUR" and len(h["rows"]) == 21 and h["rows"][-1][0].isoformat() == "2026-11-13"
     assert T.kw["period"] == "1mo" and T.kw["interval"] == "1d"
     assert fp.measure(h, TODAY)["lag_days"] == 3
+
+
+def test_cliente_real_pide_un_ano_solo_cuando_se_le_pide(monkeypatch):
+    import yfinance as yf
+    T = _ticker_cls(hist_df(), {"currency": "EUR"})
+    monkeypatch.setattr(yf, "Ticker", T)
+    c = fp.YahooClient()
+    c.history("S", period="1y")
+    assert T.kw["period"] == "1y" and T.kw["interval"] == "1d"
+    c.history("S")
+    assert T.kw["period"] == "1mo"                                         # NOMBRES y la sección privada siguen con 1 mes: no cambian
 
 
 def test_cliente_real_indice_naive_y_tz_con_hora_usa_la_fecha_local(monkeypatch):
