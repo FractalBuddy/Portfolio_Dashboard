@@ -1,0 +1,166 @@
+[
+ {
+  "manager": "Fidelity",
+  "name": "Fidelity Funds - World Fund"
+ },
+ {
+  "manager": "Fidelity",
+  "name": "Fidelity Funds - Global Technology Fund"
+ },
+ {
+  "manager": "Fidelity",
+  "name": "Fidelity Funds - Emerging Markets Fund"
+ },
+ {
+  "manager": "Fidelity",
+  "name": "Fidelity Funds - European Growth Fund"
+ },
+ {
+  "manager": "Fidelity",
+  "name": "Fidelity Index World Fund"
+ },
+ {
+  "manager": "Amundi",
+  "name": "Amundi MSCI World UCITS ETF"
+ },
+ {
+  "manager": "Amundi",
+  "name": "Amundi S&P 500 UCITS ETF"
+ },
+ {
+  "manager": "Amundi",
+  "name": "Amundi MSCI Emerging Markets UCITS ETF"
+ },
+ {
+  "manager": "Amundi",
+  "name": "Amundi Index MSCI World"
+ },
+ {
+  "manager": "Amundi",
+  "name": "Amundi Funds Global Equity"
+ },
+ {
+  "manager": "Vanguard",
+  "name": "Vanguard FTSE All-World UCITS ETF"
+ },
+ {
+  "manager": "Vanguard",
+  "name": "Vanguard S&P 500 UCITS ETF"
+ },
+ {
+  "manager": "Vanguard",
+  "name": "Vanguard Global Stock Index Fund"
+ },
+ {
+  "manager": "Vanguard",
+  "name": "Vanguard Emerging Markets Stock Index Fund"
+ },
+ {
+  "manager": "Vanguard",
+  "name": "Vanguard Global Bond Index Fund"
+ },
+ {
+  "manager": "iShares",
+  "name": "iShares Core MSCI World UCITS ETF"
+ },
+ {
+  "manager": "iShares",
+  "name": "iShares Core S&P 500 UCITS ETF"
+ },
+ {
+  "manager": "iShares",
+  "name": "iShares MSCI Emerging Markets UCITS ETF"
+ },
+ {
+  "manager": "iShares",
+  "name": "iShares Developed World Index Fund"
+ },
+ {
+  "manager": "iShares",
+  "name": "iShares Emerging Markets Index Fund"
+ },
+ {
+  "manager": "SPDR",
+  "name": "SPDR MSCI World UCITS ETF"
+ },
+ {
+  "manager": "SPDR",
+  "name": "SPDR S&P 500 UCITS ETF"
+ },
+ {
+  "manager": "SPDR",
+  "name": "SPDR MSCI ACWI UCITS ETF"
+ },
+ {
+  "manager": "Xtrackers",
+  "name": "Xtrackers MSCI World UCITS ETF"
+ },
+ {
+  "manager": "Xtrackers",
+  "name": "Xtrackers S&P 500 Swap UCITS ETF"
+ },
+ {
+  "manager": "Xtrackers",
+  "name": "Xtrackers MSCI Emerging Markets UCITS ETF"
+ },
+ {
+  "manager": "Xtrackers",
+  "name": "DWS Top Dividende"
+ },
+ {
+  "manager": "Xtrackers",
+  "name": "DWS Concept Kaldemorgen"
+ },
+ {
+  "manager": "Invesco",
+  "name": "Invesco Nasdaq-100 UCITS ETF"
+ },
+ {
+  "manager": "Invesco",
+  "name": "Invesco S&P 500 UCITS ETF"
+ },
+ {
+  "manager": "Invesco",
+  "name": "Invesco Pan European High Income Fund"
+ },
+ {
+  "manager": "Invesco",
+  "name": "Invesco Global Consumer Trends Fund"
+ },
+ {
+  "manager": "MyInvestor",
+  "name": "MyInvestor Nasdaq 100 FI"
+ },
+ {
+  "manager": "MyInvestor",
+  "name": "MyInvestor S&P 500 FI"
+ },
+ {
+  "manager": "MyInvestor",
+  "name": "MyInvestor Cartera Permanente FI"
+ },
+ {
+  "manager": "Indexa",
+  "name": "Indexa Capital"
+ },
+ {
+  "manager": "Otras gestoras espanolas",
+  "name": "Cobas Internacional FI"
+ },
+ {
+  "manager": "Otras gestoras espanolas",
+  "name": "Azvalor Internacional FI"
+ },
+ {
+  "manager": "Otras gestoras espanolas",
+  "name": "Magallanes European Equity FI"
+ },
+ {
+  "manager": "Otras gestoras espanolas",
+  "name": "Bestinver Internacional FI"
+ },
+ {
+  "manager": "Otras gestoras espanolas",
+  "name": "Horos Internacional FI"
+ }
+]

@@ -505,7 +505,7 @@ def test_D44_secretos_usados_solo_los_esperados_y_ninguno_en_run():
         txt = f.read_text(encoding="utf-8")
         used |= set(re.findall(r"secrets\.([A-Za-z0-9_]+)", txt))
     assert used == {"FRED_API_KEY", "HC_UPDATE_URL", "HC_SUPABASE_URL", "HC_UPDATE_V2_URL", "PERSONAL_FEED_TOKEN",
-                    "HEALTHCHECK_PERSONAL_NAV_URL", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY"}      # + el check propio, el token de los datos propios, el latido opcional del job de NAV y (H4) URL y clave de Supabase como secreto con respaldo en variable
+                    "HEALTHCHECK_PERSONAL_NAV_URL", "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "PROBE_ISINS"}      # + el check propio, el token de los datos propios, el latido opcional del job de NAV y (H4) URL y clave de Supabase como secreto con respaldo en variable y PROBE_ISINS (lista de ISIN de la sonda de fondos, solo en el workflow fund-probe)
 
 
 def test_D45_permisos_y_timeouts_de_todos_los_jobs():
