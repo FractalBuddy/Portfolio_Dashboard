@@ -1,0 +1,71 @@
+name: Symbol probe (sonda de símbolos del registro, no publica)
+
+# DIAGNÓSTICO MANUAL antes de ACTIVAR símbolos nuevos del registro público: ¿sirve Yahoo cada símbolo con la divisa y la unidad declaradas en registry.json?
+# Por defecto prueba las filas yahoo en `dormant` (las pendientes de activar). Ver docs/AMPLIAR_UNIVERSO.md.
+# Solo workflow_dispatch (nunca se programa). NO PUBLICA NADA: sin despliegue de Pages, sin commits, sin Supabase, SIN SECRETOS; permisos de solo lectura del repo.
+# Solo corre sobre refs/heads/main (mismo criterio que el resto de diagnósticos manuales).
+# Una petición por símbolo, >= 1 s entre peticiones, tope de símbolos por run (máximo 300) y parada limpia ante un 429 o tres fallos de red seguidos.
+# Salida: tabla en el resumen del job y un artefacto JSON (solo datos públicos del registro y de Yahoo). El job sale en rojo si algún símbolo no pasa.
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: 'Símbolos separados por comas (tienen que estar en registry.json). Vacío = según «select».'
+        type: string
+        default: ''
+      select:
+        description: 'Sin «symbols»: dormant (las filas pendientes de activar) o all (todas las filas yahoo del registro).'
+        type: choice
+        options:
+          - dormant
+          - all
+        default: dormant
+      max_symbols:
+        description: 'Tope de símbolos en este run (1-300; una petición a Yahoo por símbolo).'
+        type: string
+        default: '60'
+
+permissions: {}
+
+concurrency:
+  group: symbol-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    if: ${{ github.ref == 'refs/heads/main' }}
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.14'
+          cache: pip
+
+      - name: Install dependencies (hash-pinned)
+        run: pip install --require-hashes --no-deps -r requirements.txt
+
+      # Los inputs llegan por variables de entorno (nunca interpolados en el script) y el script los valida.
+      - name: Run symbol probe
+        env:
+          SYMBOLS: ${{ inputs.symbols }}
+          SELECT: ${{ inputs.select }}
+          MAX_SYMBOLS: ${{ inputs.max_symbols }}
+        run: python scripts/symbol_probe.py --registry registry.json --symbols "$SYMBOLS" --select "$SELECT" --max-symbols "$MAX_SYMBOLS" --json-out "$RUNNER_TEMP/symbol_probe.json" --summary-out "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload probe JSON
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: symbol-probe
+          path: ${{ runner.temp }}/symbol_probe.json
+          retention-days: 14
+          if-no-files-found: warn
