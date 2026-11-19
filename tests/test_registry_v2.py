@@ -30,11 +30,15 @@ def row(**kw):
 
 # ------------------------------------------------------------------ el registro del repo
 def test_el_registro_del_repo_es_valido_y_del_tamano_previsto(reg):
-    assert 150 <= len(reg) <= 250
+    # REQUISITO CAMBIADO (universo top 50, auditorias/FIXES_UNIVERSO_TOP50.md): el techo era 250 y todo `active`. El universo crece añadiendo filas
+    # (techo real: c.MAX_REGISTRY_SYMBOLS) y una fila nueva entra `dormant` hasta pasar la sonda (docs/AMPLIAR_UNIVERSO.md). `invalid`/`delisted`
+    # siguen sin poder estar aquí: el estado automático vive en health.json.
+    assert 150 <= len(reg) <= c.MAX_REGISTRY_SYMBOLS
     assert {r["kind"] for r in reg} == {"yahoo", "crypto"}
     tiers = {t: sum(1 for r in reg if r["tier"] == t) for t in c.TIERS}
     assert all(tiers[t] > 0 for t in c.TIERS) and tiers["hot"] < tiers["warm"]       # hot = lo que se refresca 4 veces al día: pocos
-    assert all(r["status"] == "active" and r["fail_streak"] == 0 for r in reg)       # el estado en marcha vive en health.json, no aquí
+    assert all(r["status"] in ("active", "dormant") and r["fail_streak"] == 0 for r in reg)   # el estado en marcha vive en health.json, no aquí
+    assert sum(r["status"] == "active" for r in reg) >= 150
 
 
 def test_todos_los_simbolos_son_validos_y_unicos(reg):
