@@ -189,6 +189,17 @@ def test_e2e_en_dormant_no_se_piden_a_yahoo_ni_tienen_ficheros(world, tmp_path):
         assert idx[sym]["status"] == "dormant" and idx[sym]["as_of"] is None, sym
 
 
+def test_la_fila_de_ejemplo_del_procedimiento_es_valida_y_coincide_con_el_registro(raw):
+    """docs/AMPLIAR_UNIVERSO.md no puede enseñar un formato que el validador rechace (ni desincronizarse de la fila real que copia)."""
+    text = (ROOT / "docs" / "AMPLIAR_UNIVERSO.md").read_text(encoding="utf-8")
+    m = re.search(r"```json\n(\{.*?\})\n```", text, re.S)
+    example = json.loads(m.group(1))
+    assert c.registry_problems(doc(example)) == []
+    assert example == next(r for r in raw["symbols"] if r["symbol"] == example["symbol"])
+    for frag in ("symbol-probe", "dormant", "BACKFILL_MAX_PER_RUN", "MAX_REGISTRY_SYMBOLS", "50 %"):
+        assert frag in text, frag
+
+
 def test_el_registro_publico_sigue_sin_nada_personal(raw):
     text = REGISTRY.read_text(encoding="utf-8")
     assert not re.search(r"\b[A-Z]{2}[A-Z0-9]{9}[0-9]\b", text), "algo con forma de ISIN"
