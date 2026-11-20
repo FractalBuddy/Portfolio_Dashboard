@@ -125,13 +125,16 @@ def test_las_filas_nuevas_estan_y_son_coherentes(raw):
         r = by[sym]
         assert (r["kind"], r["currency"], r["unit"], r["country"]) == ("yahoo", cur, unit, country), sym
         assert r["tier"] == "warm" and r["fail_streak"] == 0, sym
-        assert r["status"] == "dormant", sym                                               # no se piden ni se publican hasta pasar la sonda
+        # REQUISITO CAMBIADO (auditorias/FIXES_ACTIVAR_TOP50.md): entraron `dormant`; las 7 pasaron la sonda «Symbol probe» el 2026-11-20 (7/7 OK,
+        # nombre y divisa cotejados) y se activan. Antes: == "dormant".
+        assert r["status"] == "active", sym
         assert c.SYMBOL_RE.fullmatch(sym) and re.fullmatch(r"^[A-Za-z0-9.^=\-]{1,15}$", sym)
         assert list(r["lists"]) == [LIST_ID]
 
 
 def test_solo_las_filas_nuevas_llevan_metadatos_y_estan_en_dormant(raw):
-    """Las filas existentes no se han tocado: ni metadatos ni estado distinto de `active`."""
+    """Las filas existentes no se han tocado: ni metadatos ni estado distinto de `active`. (El nombre es histórico: las nuevas ya están `active`,
+    ver test_las_filas_nuevas_estan_y_son_coherentes; aquí no cambia ninguna aserción.)"""
     for r in raw["symbols"]:
         if r["symbol"] in NUEVAS:
             continue
@@ -149,7 +152,8 @@ def test_ningun_simbolo_nuevo_choca_con_uno_existente_ni_es_otra_linea_de_una_em
 
 def test_e2e_filas_nuevas_activadas_divisa_distinta_no_se_publica_y_el_resto_si(world, tmp_path):
     """Con las filas reales ya activadas: si Yahoo informa otra divisa (Aramco en USD en vez de SAR) ese símbolo NO se publica y queda en
-    health.json (unit_mismatch); el resto de nuevos sí, con su divisa/unidad del registro; y el validador del job `publish` acepta el sitio."""
+    health.json (unit_mismatch); el resto de nuevos sí, con su divisa/unidad del registro; y el validador del job `publish` acepta el sitio.
+    Desde la activación (FIXES_ACTIVAR_TOP50.md) usa las filas reales TAL CUAL (antes forzaba `status="active"` sobre filas `dormant`)."""
     from datetime import timedelta
 
     import sanity_check_v2 as sc
@@ -157,7 +161,8 @@ def test_e2e_filas_nuevas_activadas_divisa_distinta_no_se_publica_y_el_resto_si(
     reg = [dict(e) for e in REG]
     by = {e["symbol"]: e for e in c.load_registry(REGISTRY)}
     for sym in NUEVAS:
-        e = dict(by[sym], status="active")
+        e = dict(by[sym])
+        assert e["status"] == "active", sym
         reg.append(e)
     world.decl = {e["symbol"]: e for e in reg}
     world.currency["2222.SR"] = "USD"
@@ -178,8 +183,11 @@ def test_e2e_filas_nuevas_activadas_divisa_distinta_no_se_publica_y_el_resto_si(
 
 
 def test_e2e_en_dormant_no_se_piden_a_yahoo_ni_tienen_ficheros(world, tmp_path):
+    """Comprueba el mecanismo `dormant` con estas filas reales. Desde la activación (FIXES_ACTIVAR_TOP50.md) están `active` en el registro, así que se
+    devuelven a `dormant` aquí (el estado con que entraron): mismas aserciones que antes. El caso contrario (activas → sí se piden y se publican) lo
+    cubre test_e2e_filas_nuevas_activadas_divisa_distinta_no_se_publica_y_el_resto_si con las filas tal cual."""
     from v2_world import REG, gen, jl
-    reg = [dict(e) for e in REG] + [e for e in c.load_registry(REGISTRY) if e["symbol"] in NUEVAS]
+    reg = [dict(e) for e in REG] + [dict(e, status="dormant") for e in c.load_registry(REGISTRY) if e["symbol"] in NUEVAS]
     world.decl = {e["symbol"]: e for e in reg}
     out, _ = gen(tmp_path, "s1", registry=reg)
     asked = {s for s, _p, _i in world.calls}

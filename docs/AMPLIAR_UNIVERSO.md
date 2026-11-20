@@ -7,8 +7,10 @@ publica nada a medias).
 ## 1. Formato de una fila
 
 ```json
-{"symbol":"PM","kind":"yahoo","name":"Philip Morris International","currency":"USD","unit":"currency","tier":"warm","status":"dormant","fail_streak":0,"country":"US","lists":{"top50-mcap@2026-11-13":46}}
+{"symbol":"PM","kind":"yahoo","name":"Philip Morris International","currency":"USD","unit":"currency","tier":"warm","status":"active","fail_streak":0,"country":"US","lists":{"top50-mcap@2026-11-13":46}}
 ```
+
+(Es la fila real de `PM` **después** de activarla; una fila nueva se escribe igual pero con `"status":"dormant"`, ver § 2.)
 
 | Campo | Obligatorio | Regla (la hace cumplir `feed_v2_common.registry_problems`) |
 |---|---|---|
@@ -51,6 +53,12 @@ registro (aunque sea por otra línea o por un ADR), no se añade otra.
    10 años por run; el resto, en los runs siguientes) y los publica.
 6. Tras 2-3 runs, mirar `health.json`: `run.yahoo_rate_limited` (debe seguir en 0), `problems.failed` y `problems.unit_mismatch` de los nuevos.
 
+**Historial de activaciones**
+
+| Fecha | Sonda | Activados | Pendientes |
+|---|---|---|---|
+| 2026-11-20 | «Symbol probe» en `main`, 17:21 UTC: 7 de 7 `OK`, nombre de Yahoo = empresa esperada, divisa = la declarada, última barra del 19 o 20-11 | `SPCX`, `2222.SR`, `000660.KS`, `601288.SS`, `1398.HK`, `601988.SS`, `PM` (top 50, `warm`; ver `docs/universo/TOP50_MCAP_2026-11-13.md`) | ninguna fila `dormant` en el registro |
+
 ## 3. Qué pasa si un símbolo muere después
 
 No bloquea la publicación del resto (código: `feed_v2.Run.run_symbols/carry`; tests: `test_un_simbolo_que_falla_conserva_lo_anterior_marcado_stale_y_no_bloquea`,
@@ -83,7 +91,7 @@ de sitio (10 años diarios) y ~10,4 ficheros; una sola vez, 1 descarga larga (10
 
 ## 5. Techos (no pagar infraestructura; quedarse lejos de los límites gratuitos)
 
-Regla del dueño: nada de pago y **avisar cuando una estimación pase del ~50 % de un límite**. Estimaciones para añadir N símbolos `warm` a lo de hoy (224 activos):
+Regla del dueño: nada de pago y **avisar cuando una estimación pase del ~50 % de un límite**. Estimaciones para añadir N símbolos `warm` a lo medido el 19-nov (224 activos de Yahoo; desde la activación del 20-nov son **231** y el registro sigue en 249 filas, así que la fila de `MAX_REGISTRY_SYMBOLS` no cambia):
 
 | Límite | Valor | Hoy | +50 | +250 | Fuente del límite |
 |---|---|---|---|---|---|
