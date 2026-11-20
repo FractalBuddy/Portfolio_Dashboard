@@ -119,11 +119,21 @@ def test_texto_de_yahoo_saneado_para_markdown_y_json():
 
 
 # ------------------------------------------------------------------ selección y CLI
-def test_seleccion_por_defecto_son_las_dormant_y_symbols_debe_estar_en_el_registro():
-    reg = c.load_registry(ROOT / "registry.json")
+TOP50_ACTIVADAS = {"SPCX", "2222.SR", "000660.KS", "1398.HK", "601288.SS", "601988.SS", "PM"}
+
+
+def test_seleccion_por_defecto_son_las_dormant_y_symbols_debe_estar_en_el_registro(capsys):
+    # REQUISITO CAMBIADO (activar top 50, auditorias/FIXES_ACTIVAR_TOP50.md): las 7 filas pasaron la sonda el 2026-11-20 y están `active`, así que el
+    # registro real ya no tiene ninguna `dormant`. La selección por defecto se sigue comprobando igual de estricta sobre el registro real con esas 7
+    # devueltas a `dormant` (el estado que tenían cuando se sondearon), y además: con el registro real tal cual no queda nada que probar.
+    real = c.load_registry(ROOT / "registry.json")
+    assert sp.select(real) == []
+    assert sp.main(["--registry", str(ROOT / "registry.json")], fetcher=FakeYahoo({})) == 0                # sin peticiones: el fake no tiene nada
+    assert "nada que probar" in capsys.readouterr().out
+    reg = [dict(e, status="dormant") if e["symbol"] in TOP50_ACTIVADAS else e for e in real]
     dormant = sp.select(reg)
     assert dormant and all(e["status"] == "dormant" and e["kind"] == "yahoo" for e in dormant)
-    assert {e["symbol"] for e in dormant} >= {"SPCX", "2222.SR", "000660.KS", "1398.HK", "601288.SS", "601988.SS", "PM"}
+    assert {e["symbol"] for e in dormant} == TOP50_ACTIVADAS
     assert [e["symbol"] for e in sp.select(reg, "pm, PM ,SPCX")] == ["PM", "SPCX"]
     for bad in ("NOEXISTE", "BTC", "../x", "A;B"):                       # fuera del registro, cripto (no es yahoo) o inválido
         with pytest.raises(ValueError):
