@@ -8,6 +8,7 @@ publicación), que no instala dependencias de terceros.
 Contiene: el contrato de rutas (`/v2/...`), la validación del símbolo (BE-04), las unidades de precio (BE-01/BE-02: «GBp» ≠ «GBP»),
 la carga y validación de `registry.json` y las constantes de tamaño.
 """
+import datetime
 import json
 import math
 import os
@@ -78,6 +79,15 @@ KINDS = ("yahoo", "crypto")
 TIERS = ("hot", "warm", "cold")
 STATUSES = ("active", "dormant", "invalid", "delisted")
 REGISTRY_FIELDS = frozenset({"symbol", "kind", "name", "currency", "unit", "tier", "status", "fail_streak"})
+# Metadatos OPCIONALES de una fila (no se publican en el feed; sirven para documentar de dónde sale y para ampliar el universo por listas):
+#   country: país de la empresa/emisor, ISO 3166-1 alfa-2 en mayúsculas ("US", "SA", "KR").
+#   lists:   {"<lista>@<AAAA-MM-DD de corte>": rango (entero >= 1) o null si el rango exacto no está confirmado}, p. ej. {"top50-mcap@2026-11-13": 46}.
+# Cualquier otro campo sigue siendo un error (nada de ISIN, URL, ids de ficha ni datos del dueño).
+OPTIONAL_REGISTRY_FIELDS = frozenset({"country", "lists"})
+COUNTRY_RE = re.compile(r"^[A-Z]{2}$")
+LIST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{0,39}@(\d{4}-\d{2}-\d{2})$")
+MAX_LISTS_PER_SYMBOL = 10
+MAX_LIST_RANK = 100_000
 MAX_NAME_LEN = 80
 MAX_REGISTRY_SYMBOLS = 400
 _NAME_BAD_RE = re.compile(r"[<>\x00-\x1f\x7f]")
@@ -113,7 +123,7 @@ def registry_problems(doc):
         if not isinstance(r, dict):
             out.append("%s no es un objeto" % where)
             continue
-        extra = sorted(set(r) - REGISTRY_FIELDS)
+        extra = sorted(set(r) - REGISTRY_FIELDS - OPTIONAL_REGISTRY_FIELDS)
         missing = sorted(REGISTRY_FIELDS - set(r))
         if extra:
             out.append("%s: campos no permitidos %s" % (where, extra))
@@ -149,7 +159,27 @@ def registry_problems(doc):
         fs = r["fail_streak"]
         if not (type(fs) is int and 0 <= fs <= 1000):
             out.append("%s: fail_streak inválido" % where)
+        if "country" in r and not (isinstance(r["country"], str) and COUNTRY_RE.fullmatch(r["country"])):
+            out.append("%s: country inválido (ISO 3166-1 alfa-2 en mayúsculas)" % where)
+        if "lists" in r and not _lists_ok(r["lists"]):
+            out.append("%s: lists inválido ({\"<lista>@AAAA-MM-DD\": rango >= 1 o null}, de 1 a %d listas)" % (where, MAX_LISTS_PER_SYMBOL))
     return out
+
+
+def _lists_ok(v):
+    if not isinstance(v, dict) or not 1 <= len(v) <= MAX_LISTS_PER_SYMBOL:
+        return False
+    for k, rank in v.items():
+        m = LIST_ID_RE.fullmatch(k) if isinstance(k, str) else None
+        if not m:
+            return False
+        try:
+            datetime.date.fromisoformat(m.group(1))
+        except ValueError:
+            return False
+        if rank is not None and not (type(rank) is int and 1 <= rank <= MAX_LIST_RANK):
+            return False
+    return True
 
 
 def load_registry(path):

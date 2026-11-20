@@ -518,7 +518,10 @@ def test_medicion_de_peticiones_y_tamano_con_el_registro_real(world, tmp_path, c
     assert rows[0][4] == f2.BACKFILL_MAX_PER_RUN and rows[1][4] == f2.BACKFILL_MAX_PER_RUN         # el cupo reparte el alta
     assert rows[3][1] <= 2 * len(hot) and rows[3][4] == 0                                          # run de solo hot: ≤ 2 peticiones por símbolo, ninguna larga
     assert rows[5][1] <= 2 * len(hot)
-    assert all(jl(prev, "s/%s/latest.json" % e["symbol"]) for e in yahoo)                          # tras el alta, todos publicados
+    # REQUISITO CAMBIADO (universo top 50): las filas `dormant` (pendientes de la sonda) no se piden; «todos» = todos los ACTIVOS. Que las dormant
+    # no tengan ficheros también se comprueba (si se pidieran, aquí se vería).
+    assert all(jl(prev, "s/%s/latest.json" % e["symbol"]) for e in yahoo if e["status"] == "active")  # tras el alta, todos los activos publicados
+    assert not any(exists(prev, "s/%s/latest.json" % e["symbol"]) for e in yahoo if e["status"] == "dormant")
     assert mf["total_bytes"] <= c.MAX_SITE_BYTES and len(mf["files"]) <= c.MAX_SITE_FILES
     for rel, v in mf["files"].items():
         assert v["bytes"] <= c.MAX_BYTES[c.classify_path(rel)[0]], rel
