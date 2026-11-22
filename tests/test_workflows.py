@@ -73,7 +73,8 @@ def test_ningun_run_interpola_expresiones_y_las_acciones_van_fijadas_por_sha():
             for s in job["steps"]:
                 assert "${{" not in s.get("run", ""), "%s/%s interpola una expresión en run:" % (f.name, jn)
                 if "uses" in s:
-                    assert re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40}", s["uses"]), s["uses"]
+                    # acción fijada por SHA; se admite una subruta del mismo repo (p. ej. actions/cache/restore@<sha>, sombra NAV Yahoo F1): mismo SHA, misma garantía
+                    assert re.fullmatch(r"[\w.-]+/[\w.-]+(?:/[\w.-]+)*@[0-9a-f]{40}", s["uses"]), s["uses"]
 
 
 def test_keepalive_permisos_a_nivel_de_job():
@@ -969,7 +970,7 @@ def test_personal_sale_pronto_si_no_hay_nada_que_refrescar(name, job_name, steps
 def test_personal_las_acciones_van_fijadas_por_sha(name, job_name):
     for s in load(name)["jobs"][job_name]["steps"]:
         if "uses" in s:
-            assert re.fullmatch(r"[\w.\-]+/[\w.\-]+@[0-9a-f]{40}", s["uses"]), s["uses"]
+            assert re.fullmatch(r"[\w.\-]+/[\w.\-]+(?:/[\w.\-]+)*@[0-9a-f]{40}", s["uses"]), s["uses"]       # subruta admitida (sombra F1)
 
 
 def test_personal_los_pasos_con_token_importan_solo_biblioteca_estandar():

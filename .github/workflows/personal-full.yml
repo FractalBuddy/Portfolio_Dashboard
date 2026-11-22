@@ -23,6 +23,14 @@ name: Personal full
 #   * Dos runs de ESTE job nunca se pisan: grupo propio `personal-full`.
 #
 # Mientras la variable de repo FEED_V2_ENABLED no valga `true` el cron NO hace nada; el lanzamiento manual (Run workflow) funciona siempre.
+#
+# SOMBRA NAV Yahoo (fase F1 del diseño DISENO_NAV_YAHOO, auditorias/FIXES_NAV_F1_SOMBRA.md): los TRES últimos pasos, DESPUÉS de publicar. Miden si el
+# precio de Yahoo (símbolos 0P…, datos de Morningstar) coincide con el NAV oficial de iShares de la MISMA fecha, solo para los fondos con ficha y NAV
+# oficial en este run. NO PUBLICA NADA (ni Supabase, ni repo, ni artefactos) y no cambia lo que ve nadie. Sin token ni secretos nuevos: lee lo que ya
+# dejaron watch y build en $RUNNER_TEMP/personal. Solo contadores en el log y en el resumen del job. Interruptor y parámetros: config/yahoo_shadow.json
+# (enabled true/false, franjas UTC, tope de peticiones...): apagarla = cambiar ese fichero o revertir su commit. Los tres pasos llevan continue-on-error
+# y su propio timeout-minutes: un fallo o un cuelgue de la sombra nunca pone el job en rojo ni toca lo ya publicado. El libro de contadores agregados
+# (sin ISIN, símbolos, nombres ni precios) se guarda en la caché de Actions con una clave por run; se restaura la más reciente.
 # Si la lista de Supabase no tiene nada que refrescar (ningún fondo con ficha de iShares ni símbolos) el job sale justo después de leerla, sin instalar nada.
 on:
   schedule:
@@ -83,3 +91,32 @@ jobs:
           SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY || vars.SUPABASE_PUBLISHABLE_KEY }}
           PERSONAL_FEED_TOKEN: ${{ secrets.PERSONAL_FEED_TOKEN }}
         run: python3 -S scripts/personal_v2.py publish --dir "$RUNNER_TEMP/personal"
+
+      # ---- SOMBRA NAV Yahoo (F1): solo mide, NO PUBLICA NADA. Ver la cabecera. Nunca rojo: continue-on-error + timeout por paso.
+      - name: Yahoo shadow - restore aggregate counters (cache)
+        if: ${{ !cancelled() && steps.watch.outputs.work == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/yahoo-shadow
+          key: yahoo-shadow-ledger-v1-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: yahoo-shadow-ledger-v1-
+
+      # Código de terceros (yfinance), SIN token. Una búsqueda + un histórico (5d) por fondo y lectura, con la pausa y la parada ante 429 de la sonda.
+      - name: Yahoo shadow - measure (third-party code, NO token, publishes nothing)
+        id: shadow
+        if: ${{ !cancelled() && steps.watch.outputs.work == 'true' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        run: python scripts/yahoo_shadow.py --dir "$RUNNER_TEMP/personal" --config config/yahoo_shadow.json --ledger "$RUNNER_TEMP/yahoo-shadow/ledger.json"
+
+      # Solo si este run hizo una lectura (ledger=written): fuera de franja o con la sombra apagada no se guarda nada.
+      - name: Yahoo shadow - save aggregate counters (cache)
+        if: ${{ !cancelled() && steps.shadow.outputs.ledger == 'written' }}
+        continue-on-error: true
+        timeout-minutes: 2
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/yahoo-shadow
+          key: yahoo-shadow-ledger-v1-${{ github.run_id }}-${{ github.run_attempt }}

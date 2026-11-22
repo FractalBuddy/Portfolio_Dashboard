@@ -215,6 +215,25 @@ imprime el código HTTP, el tamaño, la **fecha y el valor del NAV** leídos y (
 Si `base` va por detrás de `fresh`/`bust`/`nocache` → caché del HTML (en el código sigue `fetch_ishares_nav_freshest`, que elige la fecha más reciente entre las variantes de `NAV_FETCH_VARIANTS`: basta
 añadir `"fresh"` a esa tupla); si solo `alt:*` o `xhr*` dan la fecha nueva → hay que cambiar de URL/fuente.
 
+### Sombra NAV Yahoo (F1): medir antes de enseñar
+
+Fase F1 del diseño «NAV vía Yahoo/Morningstar» (repo privado de la app, `auditorias/DISENO_NAV_YAHOO.md`; informe: [`auditorias/FIXES_NAV_F1_SOMBRA.md`](auditorias/FIXES_NAV_F1_SOMBRA.md)).
+Los **tres últimos pasos** de `personal-full.yml`, **después** de publicar, miden si el precio que da Yahoo (símbolos `0P…`, datos de Morningstar) coincide con el
+**NAV oficial de iShares de la misma fecha**, solo para los fondos que ya tienen ficha y NAV oficial en ese run. **No publica nada** (ni Supabase, ni el repo, ni
+artefactos) y no cambia lo que ve ningún usuario.
+
+* **Interruptor y parámetros**: `config/yahoo_shadow.json` (versionado; no es una variable del repo). `enabled: false` (o revertir el commit que lo puso a `true`)
+  la apaga. Además: franjas UTC (`slots_utc`, por defecto 05-10 y 19-24: en la práctica los runs de 06:38 y 21:38), lecturas por día, tope propio de
+  peticiones por run (`max_requests_per_run`, ≤ 80), umbrales de la puerta y el **canario** (`canary_isin`, que tiene que ser un ISIN de la lista genérica pública).
+* **Qué pide a Yahoo**: el canario primero (si falla, nada más) y, por fondo, una búsqueda por ISIN y un histórico de 5 días sin ajustar, con la misma pausa
+  (≥ 1 s) y la misma parada ante un 429 que la sonda de fondos. Solo se aceptan símbolos `0P…` cuyo nombre en Yahoo cuadre con el del fondo; si no, «sin emparejar».
+* **Nunca rojo**: los tres pasos llevan `continue-on-error` y su propio `timeout-minutes`; el script sale siempre con 0.
+* **Privacidad**: log y resumen del job solo con contadores (comparables, iguales a ≤ 1 pb, diferencia máxima en pb, sin `0P…`, distinta divisa, sin dato de la
+  misma fecha, retraso medio frente a iShares, canario, peticiones). Ningún ISIN, símbolo, nombre, precio ni URL; cada ISIN y cada `0P…` se enmascaran antes de usarse.
+  El guardia `tests/test_privacidad_isin.py` vigila también `0P` + 8 caracteres.
+* **Dónde ver el resultado**: *Actions → «Personal full» → el run más reciente → Summary*: «Puerta D7: EN CURSO / PASA / NO PASA» y una fila por lectura. Los
+  contadores se acumulan en un libro (solo números y fechas) que se guarda en la **caché de Actions**, no en el repo.
+
 ### Riesgos que conviene tener presentes
 
 * **Términos de uso de Yahoo Finance e iShares.** Hacerse pasar por un navegador (User-Agent) para esquivar protecciones anti-bots podría chocar con sus términos: por eso solo está en el diagnóstico manual, no en el scraper (que pide una sola vez cada ficha). `yfinance` se documenta como herramienta de uso personal, y leer automáticamente ishares.com puede chocar con sus términos. Redistribuir sus

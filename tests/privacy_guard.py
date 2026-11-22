@@ -67,3 +67,31 @@ def isin_leaks(text):
 
 def product_id_leaks(text):
     return sum(1 for m in PRODUCT_ID.finditer(text) if m.group(1) not in IDS_FICHA_PERMITIDOS)
+
+
+# ---------------------------------------------------------------------------------------------------------------------------------
+# Símbolos Morningstar/Yahoo `0P` + 8 caracteres (F1 «sombra» NAV Yahoo): identifican un fondo igual que su ISIN, así que el árbol solo puede llevar:
+#   * los 7 de la lista FIJA y pública de la sonda de retraso (config/fund_lag_tickers.json), congelados por HUELLA (sha256 de los 10 primeros caracteres):
+#     no se repiten aquí y uno nuevo en esa lista hace fallar el guardia hasta que alguien lo revise a propósito;
+#   * los inventados de los tests (no existen como instrumento).
+# ---------------------------------------------------------------------------------------------------------------------------------
+ZERO_P_WINDOW = re.compile(r"0P[0-9A-Z]{8}")                  # sin anclar: también caza un símbolo pegado a otros caracteres (o con su sufijo .F)
+ZERO_P_FIJOS_SHA256 = frozenset({
+    "83549c3152eee82401415503236558999485d7bdb97fb5a8f3b16e9faae02ff3",
+    "1a05463acfb343a76bc5764eff5c6a685e3a90fd1d7eebf43853389d3229b14a",
+    "eca9d83ddc24115a4cadc2499f26ee7b498c1d0ba92a04942108854de92dd95c",
+    "d5127657398725ec85c07bb515552bea46008bed9fa745eea495f2f1a1fc1b4b",
+    "ae11f18baeeafba79ed6d54b305df997d08fc0c03216ecfc44384a80f88d5255",
+    "d74af3d6fdffcf5bd760c7390ba3dba276d442fa3bc6a0ea89d7abec845bf307",
+    "a228bffc11e10ac7e3217cece1d8865891803c1d1a020605a4f011fd43fc433b",
+})
+ZERO_P_SINTETICOS = frozenset({
+    "0P00000AAA", "0P0ALPHA01", "0P0ALPHA02", "0P0BETA001", "0P0GAMMA01", "0P0SECRET9", "0P0PRIVATE",        # tests de la sonda de fondos
+    "0PFAKE0001", "0PFAKE0002", "0PFAKE0003", "0PFAKE0004", "0PFAKE0005", "0PCANARY01",                       # tests de la sombra NAV Yahoo
+})
+
+
+def zero_p_leaks(text):
+    """Ventanas `0P` + 8 que no son ni de la lista fija (por huella) ni inventadas. Devuelve cuántas son, nunca su valor."""
+    return sum(1 for m in ZERO_P_WINDOW.finditer(text)
+               if m.group(0) not in ZERO_P_SINTETICOS and hashlib.sha256(m.group(0).encode("utf-8")).hexdigest() not in ZERO_P_FIJOS_SHA256)
