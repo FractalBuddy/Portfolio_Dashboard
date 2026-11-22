@@ -443,6 +443,165 @@ def counters_line(c, counts, cfg, now):
 
 
 # ------------------------------------------------------------------------------------------------------------------------------
+# Libro de contadores (persistencia para evaluar la puerta de 10 días hábiles). SOLO números, fechas de NAV/run y estados de listas cerradas: ni ISIN,
+# ni símbolos, ni nombres, ni precios. El workflow lo guarda en la caché de Actions (sin commits, sin artefactos, sin permisos de escritura).
+# Una entrada por LECTURA: {day, slot, at, official_max, c: {contadores}, by_date: [[fecha NAV, comparables, iguales, máx. pb], ...]}.
+# ------------------------------------------------------------------------------------------------------------------------------
+LEDGER_SCHEMA = 1
+LEDGER_MAX_READS = 500
+LEDGER_C_KEYS = ("en_sombra", "comparables", "iguales", "max_bp", "fuera_de_banda", "sin_0p", "sin_emparejar", "ambiguos", "distinta_divisa", "subunidad",
+                 "sin_divisa", "sin_fecha_comun", "yahoo_por_detras", "dato_invalido", "vacios", "errores", "no_probados", "lag_sum", "lag_n", "canario",
+                 "peticiones", "pendientes")
+CANARY_STATES = ("ok",) + tuple(sorted(CANARY_STOP | CANARY_CONFIG))
+_AT_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}Z$")
+
+
+def _day_ok(v):
+    if not (isinstance(v, str) and _DAY_RE.match(v)):
+        return False
+    try:
+        date.fromisoformat(v)
+    except ValueError:
+        return False
+    return True
+
+
+def _read_ok(r):
+    if not (isinstance(r, dict) and set(r) == {"day", "slot", "at", "official_max", "c", "by_date"}):
+        return False
+    if not (_day_ok(r["day"]) and _int(0, 3)(r["slot"]) and isinstance(r["at"], str) and _AT_RE.match(r["at"]) and r["at"][:10] == r["day"]
+            and (r["official_max"] is None or _day_ok(r["official_max"]))):
+        return False
+    c = r["c"]
+    if not (isinstance(c, dict) and set(c) == set(LEDGER_C_KEYS)):
+        return False
+    for k in LEDGER_C_KEYS:
+        v = c[k]
+        if k == "canario":
+            ok = v in CANARY_STATES
+        elif k == "max_bp":
+            ok = v is None or _num(0, 1e6)(v)
+        elif k == "lag_sum":
+            ok = _int(-100000, 100000)(v)
+        else:
+            ok = _int(0, 100000)(v)
+        if not ok:
+            return False
+    bd = r["by_date"]
+    return isinstance(bd, list) and len(bd) <= 60 and all(
+        isinstance(e, list) and len(e) == 4 and _day_ok(e[0]) and _int(0, 100000)(e[1]) and _int(0, 100000)(e[2]) and e[2] <= e[1] and _num(0, 1e6)(e[3])
+        for e in bd)
+
+
+def load_ledger(path):
+    """-> (lecturas, problema). Sin fichero = libro vacío (primer run o caché perdida). Cualquier cosa que no cumpla el esquema = libro vacío y un
+    problema de texto FIJO (nunca se cita el contenido)."""
+    if not path or not os.path.isfile(path):
+        return [], None
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return [], "ilegible"
+    if not (isinstance(data, dict) and set(data) == {"schema", "reads"} and data["schema"] == LEDGER_SCHEMA and isinstance(data["reads"], list)
+            and len(data["reads"]) <= LEDGER_MAX_READS and all(_read_ok(r) for r in data["reads"])):
+        return [], "ilegible"
+    return data["reads"], None
+
+
+def ledger_entry(c, now, slot, official_max):
+    errs = sum(c["errores"].values())
+    cc = {k: c[k] for k in LEDGER_C_KEYS if k not in ("errores", "pendientes", "max_bp")}
+    cc.update(errores=errs, max_bp=c["max_bp"], pendientes=c["yahoo_por_detras"] + c["vacios"] + errs + c["no_probados"])
+    return {"day": now.date().isoformat(), "slot": slot, "at": now.strftime("%Y-%m-%dT%H:%MZ"), "official_max": official_max, "c": cc,
+            "by_date": [[d, v[0], v[1], v[2]] for d, v in sorted(c["by_date"].items())]}
+
+
+def save_ledger(path, reads, now, keep_days):
+    cutoff = date.fromordinal(now.date().toordinal() - keep_days).isoformat()
+    reads = [r for r in reads if r["day"] >= cutoff][-LEDGER_MAX_READS:]
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"schema": LEDGER_SCHEMA, "reads": reads}, f, separators=(",", ":"), allow_nan=False)
+    os.replace(tmp, path)
+    return reads
+
+
+def decide(now, cfg, reads, n_funds, official_max):
+    """(leer, motivo, franja). Frecuencia (D6 A): como mucho una lectura por franja UTC de `slots_utc` y `max_reads_per_day` al día, con PARADA
+    TEMPRANA: no se vuelve a leer si una lectura anterior de hoy ya lo midió todo (nada pendiente, mismos fondos, misma fecha oficial, canario bien)."""
+    slot = next((i for i, (a, b) in enumerate(cfg["slots_utc"]) if a <= now.hour < b), None)
+    if slot is None:
+        return False, "fuera de franja", None
+    today = [r for r in reads if r["day"] == now.date().isoformat()]
+    if any(r["slot"] == slot for r in today):
+        return False, "franja ya leída hoy", slot
+    if len(today) >= cfg["max_reads_per_day"]:
+        return False, "tope de lecturas del día", slot
+    for r in today:
+        if (r["c"]["pendientes"] == 0 and r["c"]["canario"] == "ok" and r["c"]["en_sombra"] == n_funds and r["official_max"] == official_max):
+            return False, "todo medido en la franja anterior", slot
+    return True, None, slot
+
+
+def evaluate_gate(reads, cfg):
+    """Puerta D7 con los datos del libro. Comparables ÚNICOS por fecha de NAV oficial: de todas las lecturas que midieron una misma fecha se toma la
+    que más comparables tuvo (a igualdad, la de peor diferencia); así una fecha leída por la mañana y otra vez al día siguiente no cuenta doble.
+    La diferencia máxima es la peor de TODAS las lecturas (conservador). Días hábiles = días TARGET (L-V sin festivos TARGET2) con alguna lectura con
+    comparables. Veredicto: NO PASA en cuanto hay uno > max_bp; EN CURSO hasta min_business_days; luego PASA si iguales/comparables ≥ gate_equal_pct."""
+    best = {}
+    worst = None
+    for r in reads:
+        for d, comp, eq, mx in r["by_date"]:
+            cur = best.get(d)
+            if cur is None or (comp, mx) > (cur[0], cur[2]):
+                best[d] = (comp, eq, mx)
+            worst = mx if worst is None else max(worst, mx)
+    comp = sum(v[0] for v in best.values())
+    eq = sum(v[1] for v in best.values())
+    is_bd = lambda d: LC.is_business_day(date.fromisoformat(d))          # noqa: E731
+    days_read = {r["day"] for r in reads if is_bd(r["day"])}
+    days_comp = {r["day"] for r in reads if r["c"]["comparables"] and is_bd(r["day"])}
+    pct = 100.0 * eq / comp if comp else None
+    if worst is not None and worst > cfg["max_bp"]:
+        verdict = "NO PASA"
+    elif len(days_comp) < cfg["min_business_days"]:
+        verdict = "EN CURSO"
+    elif pct + 1e-9 >= cfg["gate_equal_pct"]:
+        verdict = "PASA"
+    else:
+        verdict = "NO PASA"
+    return {"verdict": verdict, "days_comp": len(days_comp), "days_read": len(days_read), "comparables": comp, "iguales": eq, "pct": pct, "max_bp": worst,
+            "dates": len(best)}
+
+
+def gate_line(g, cfg):
+    return ("sombra Yahoo: puerta D7: %s · %d de %d días hábiles con comparables (%d con lectura) · %d comparables únicos (%d fechas de NAV) · "
+            "%d iguales a ≤ %g pb (%s) · dif. máx. %s pb · umbral: ≥ %g %% iguales y ninguno > %g pb") % (
+        g["verdict"], g["days_comp"], cfg["min_business_days"], g["days_read"], g["comparables"], g["dates"], g["iguales"], cfg["equal_bp"],
+        "—" if g["pct"] is None else "%.1f %%" % g["pct"], _fmt_bp(g["max_bp"]), cfg["gate_equal_pct"], cfg["max_bp"])
+
+
+def render_summary(g, cfg, this_run, reads):
+    L = ["## Sombra NAV Yahoo (F1): solo contadores", "", "**Puerta D7: %s**" % g["verdict"], "", gate_line(g, cfg).replace("sombra Yahoo: ", ""), "",
+         "**Este run:** " + this_run.replace("sombra Yahoo: ", ""), "",
+         "### Lecturas (las 30 más recientes)", "",
+         "| Lectura (UTC) | Fondos | Comparables | Iguales | Máx. pb | Sin 0P | Sin emparejar | Distinta divisa | Sin dato misma fecha | Retraso medio (d háb.) | Canario | Peticiones |",
+         "|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for r in reversed(reads[-30:]):
+        c = r["c"]
+        lag = "—" if not c["lag_n"] else "%+.2f" % (c["lag_sum"] / c["lag_n"])
+        L.append("| %s | %d | %d | %d | %s | %d | %d | %d | %d | %s | %s | %d |" % (
+            r["at"].replace("T", " ").rstrip("Z"), c["en_sombra"], c["comparables"], c["iguales"], _fmt_bp(c["max_bp"]), c["sin_0p"], c["sin_emparejar"],
+            c["distinta_divisa"], c["sin_fecha_comun"] + c["yahoo_por_detras"], lag, c["canario"], c["peticiones"]))
+    L += ["", "Cómo leerlo: «PASA» = ≥ %g días hábiles con comparables, ≥ %g %% de comparables iguales a ≤ %g pb y ninguno > %g pb. «Retraso medio» > 0 = "
+          "Yahoo va por detrás de iShares. Solo contadores: ningún ISIN, símbolo, nombre ni precio." % (cfg["min_business_days"], cfg["gate_equal_pct"],
+                                                                                                       cfg["equal_bp"], cfg["max_bp"]), ""]
+    return "\n".join(L)
+
+
+# ------------------------------------------------------------------------------------------------------------------------------
 # Programa
 # ------------------------------------------------------------------------------------------------------------------------------
 def _append(path, text):
@@ -466,30 +625,46 @@ def _main(a, env, client, now, clock, sleep):
     funds, counts, masks = got
     for isin in masks:                                  # TODAS las máscaras antes de la primera petición
         say("::add-mask::" + isin)
+    reads, problem = load_ledger(a.ledger)
+    if problem:
+        say("::warning::sombra Yahoo: libro de contadores ilegible: se empieza de cero (la puerta vuelve a contar desde hoy)")
+    official_max = max((f["day"] for f in funds), default=None)
+    official_max = official_max.isoformat() if official_max else None
     if not funds:
-        say("sombra Yahoo: 0 fondos con NAV oficial en este run (%d con ficha): no se pide nada a Yahoo" % counts["con_ficha"])
-        return 0
-    seen = set()
+        this_run = "sombra Yahoo: 0 fondos con NAV oficial en este run (%d con ficha): no se pide nada a Yahoo" % counts["con_ficha"]
+        do_read = False
+    else:
+        do_read, why, slot = decide(now, cfg, reads, len(funds), official_max)
+        this_run = "sombra Yahoo: no se lee en este run (%s) [run %s]" % (why, now.strftime("%Y-%m-%dT%H:%MZ"))
+    c = None
+    if do_read:
+        seen = set()
 
-    def mask(value):
-        if value not in seen:
-            seen.add(value)
-            say("::add-mask::" + value)
-    gate = Gate(max_requests=cfg["max_requests_per_run"], clock=clock, sleep=sleep)
-    if client is None:
-        with _quiet():
-            client = ShadowYahooClient()
-    c = run_shadow(funds, cfg, client, gate, mask, now.date())
-    line = counters_line(c, counts, cfg, now)
-    say(line)
-    _append(env.get("GITHUB_STEP_SUMMARY"), "## Sombra NAV Yahoo (F1): solo contadores\n\n" + line + "\n")
-    if c["canario"] in CANARY_STOP:
-        say("::warning::sombra Yahoo: el canario (fondo público) falla (%s): no se ha pedido nada de los fondos en este run; no afecta a lo publicado"
-            % c["canario"])
-    elif c["canario"] in CANARY_CONFIG:
-        say("::warning::sombra Yahoo: el canario no resuelve a un 0P con su nombre (revisa canary_isin en config/yahoo_shadow.json); la medida sigue")
-    if c["parada"] in ("429", "sin_red"):
-        say("::warning::sombra Yahoo: parada limpia (%s) sin reintentos; no afecta a lo publicado" % c["parada"])
+        def mask(value):
+            if value not in seen:
+                seen.add(value)
+                say("::add-mask::" + value)
+        gate = Gate(max_requests=cfg["max_requests_per_run"], clock=clock, sleep=sleep)
+        if client is None:
+            with _quiet():
+                client = ShadowYahooClient()
+        c = run_shadow(funds, cfg, client, gate, mask, now.date())
+        this_run = counters_line(c, counts, cfg, now)
+        if a.ledger:
+            reads = save_ledger(a.ledger, reads + [ledger_entry(c, now, slot, official_max)], now, cfg["ledger_days"])
+            PV._set_output(env, "ledger", "written")
+    say(this_run)
+    g = evaluate_gate(reads, cfg)
+    say(gate_line(g, cfg))
+    _append(env.get("GITHUB_STEP_SUMMARY"), render_summary(g, cfg, this_run, reads))
+    if c is not None:
+        if c["canario"] in CANARY_STOP:
+            say("::warning::sombra Yahoo: el canario (fondo público) falla (%s): no se ha pedido nada de los fondos en este run; no afecta a lo publicado"
+                % c["canario"])
+        elif c["canario"] in CANARY_CONFIG:
+            say("::warning::sombra Yahoo: el canario no resuelve a un 0P con su nombre (revisa canary_isin en config/yahoo_shadow.json); la medida sigue")
+        if c["parada"] in ("429", "sin_red"):
+            say("::warning::sombra Yahoo: parada limpia (%s) sin reintentos; no afecta a lo publicado" % c["parada"])
     return 0
 
 
