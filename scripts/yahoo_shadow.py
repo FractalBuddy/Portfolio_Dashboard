@@ -20,10 +20,14 @@ caché de Actions; no lleva nada que identifique un fondo.
 NUNCA ROJO: cualquier fallo (Yahoo caído, 429, configuración mala, libro ilegible, excepción inesperada) acaba en un aviso y salida 0.
 """
 import json
+import math
 import re
 import sys
 import unicodedata
+from datetime import date
+from decimal import ROUND_HALF_UP, Decimal
 
+import fund_lag_common as LC
 from fund_probe import FUND_TYPES, SEARCH_COST, STOPWORDS, _quiet, load_generic
 
 SYMBOL_RE = re.compile(r"^0P[0-9A-Z]{8}\.[A-Z]{1,3}$")            # DISENO_NAV_YAHOO §2.4/§3.3: sin '/', '?', '#', '%', '@', ':' ni '..'
@@ -180,3 +184,72 @@ def resolve(isin, expected_name, client, gate, mask, min_coverage):
     if len(ok) >= 2 and abs(ok[0][0] - ok[1][0]) < 1e-9:
         return "ambiguo", None
     return "ok", ok[0][1]
+
+
+# ------------------------------------------------------------------------------------------------------------------------------
+# Comparación con el NAV oficial: SOLO la barra de la fecha IDÉNTICA (nunca «la más cercana»).
+# ------------------------------------------------------------------------------------------------------------------------------
+def official_decimals(price, minimum):
+    """Decimales con los que se compara: los que trae el NAV oficial (la ficha de iShares escribe 2) y como mínimo `minimum` (87,60 llega como 87.6)."""
+    exp = Decimal(repr(float(price))).normalize().as_tuple().exponent       # 88.0 -> 0 decimales; 87.65 -> 2
+    return max(int(minimum), -exp if isinstance(exp, int) and exp < 0 else 0)
+
+
+def diff_bp(official, yahoo, decimals):
+    """(pb tras redondear Yahoo a `decimals` con mitad-hacia-arriba, pb sin redondear), en Decimal exacto (sin errores de coma flotante):
+    |y - oficial| / oficial × 10 000. Se redondea porque el oficial ya viene redondeado (2 decimales): sin redondear, 87,6512 frente a 87,65 saldría
+    distinto por el redondeo de la ficha y no por el dato."""
+    o, y = Decimal(repr(float(official))), Decimal(repr(float(yahoo)))
+    yr = y.quantize(Decimal(1).scaleb(-decimals), rounding=ROUND_HALF_UP)
+    return abs(yr - o) / o * 10000, abs(y - o) / o * 10000
+
+
+def _valid_price(c):
+    return isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(c) and PRICE_MIN <= c <= PRICE_MAX
+
+
+def signed_lag_bd(yahoo_last, official_day):
+    """Retraso de Yahoo frente al oficial en días hábiles TARGET (fund_lag_common): > 0 si la última barra de Yahoo es ANTERIOR a la fecha oficial."""
+    if yahoo_last < official_day:
+        return LC.business_days_between(yahoo_last, official_day)
+    return -LC.business_days_between(official_day, yahoo_last)
+
+
+def compare(official, official_day, history, cfg, today):
+    """Un fondo con NAV oficial `official` del día `official_day` frente a su histórico de Yahoo ({"rows": [(date, cierre)], "currency"}).
+    -> {"kind": ..., ...}. kind:
+      comparable          hay barra válida de la MISMA fecha: bp (redondeado), raw_bp, equal (bp ≤ equal_bp), out_of_band (fuera de ×0,5-×2)
+      yahoo_por_detras    la última barra válida de Yahoo es anterior a la fecha oficial (no se compara con la anterior)
+      sin_fecha_comun     Yahoo tiene barras posteriores pero no la de esa fecha (no se compara con la más cercana)
+      dato_invalido       hay filas pero ninguna barra válida, o la de esa fecha no lo es (precio no finito, ≤ 0 o fuera de 0,1-10 000)
+      vacio               sin filas
+    Las barras de hoy o posteriores (barra abierta o fecha imposible) se ignoran. `lag_bd`: retraso de Yahoo en días hábiles (si hay barras válidas)."""
+    rows = (history or {}).get("rows") if isinstance(history, dict) else None
+    if not rows:
+        return {"kind": "vacio"}
+    valid, exact_rows = {}, 0
+    for row in rows:
+        try:
+            d, c = row
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(d, date) or d >= today:
+            continue
+        if d == official_day:
+            exact_rows += 1
+        if _valid_price(c):
+            valid[d] = float(c)
+    if not valid:
+        return {"kind": "dato_invalido"}
+    out = {"lag_bd": signed_lag_bd(max(valid), official_day)}
+    if official_day not in valid:
+        if exact_rows:
+            out["kind"] = "dato_invalido"
+        else:
+            out["kind"] = "yahoo_por_detras" if max(valid) < official_day else "sin_fecha_comun"
+        return out
+    y = valid[official_day]
+    bp, raw = diff_bp(official, y, official_decimals(official, cfg["min_official_decimals"]))
+    out.update(kind="comparable", bp=float(round(bp, 4)), raw_bp=float(round(raw, 4)), equal=bp <= Decimal(repr(float(cfg["equal_bp"]))),
+               out_of_band=not (RATIO_LIMITS[0] < y / official < RATIO_LIMITS[1]))
+    return out
