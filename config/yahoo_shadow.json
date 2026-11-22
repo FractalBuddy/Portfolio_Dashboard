@@ -1,0 +1,15 @@
+{
+ "enabled": true,
+ "min_business_days": 10,
+ "gate_equal_pct": 95,
+ "equal_bp": 1,
+ "max_bp": 10,
+ "slots_utc": [[5, 10], [19, 24]],
+ "max_reads_per_day": 2,
+ "max_requests_per_run": 60,
+ "history_period": "5d",
+ "min_official_decimals": 2,
+ "name_min_coverage": 0.6,
+ "canary_isin": "IE00B03HD191",
+ "ledger_days": 60
+}
