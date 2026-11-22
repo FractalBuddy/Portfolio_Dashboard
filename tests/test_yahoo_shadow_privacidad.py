@@ -147,6 +147,7 @@ def test_control_negativo_la_exencion_de_add_mask_es_exacta():
     assert leaks(["x ::add-mask::" + ISIN_A]) == [ISIN_A]
 
 
+@pytest.mark.filterwarnings("ignore")              # sin _quiet, los avisos simulados de yfinance irían al resumen de avisos de pytest
 def test_control_negativo_sin_silenciar_yfinance_hay_fuga(tmp_path, capfd, monkeypatch):
     import contextlib
     monkeypatch.setattr(ys, "_quiet", contextlib.nullcontext)

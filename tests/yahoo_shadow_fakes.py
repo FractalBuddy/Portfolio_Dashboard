@@ -19,8 +19,13 @@ URL_A = "https://www.ishares.com/es/individual/es/products/000001/zeta-quimera-a
 URL_B = "https://www.ishares.com/es/individual/es/products/000002/zeta-quimera-b"
 URL_C = "https://www.ishares.com/es/individual/es/products/100001/zeta-quimera-c"
 PRICE_A, PRICE_B, PRICE_C = 87.65, 43.21, 9.87                  # NAV oficiales inventados (2 decimales, como la ficha)
-CANARY_ISIN = "IE00B03HD191"                                     # el de config/yahoo_shadow.json (lista genérica PÚBLICA)
-CANARY_NAME = "Vanguard Global Stock Index Fund EUR Acc"
+# El canario se LEE de la configuración (es un ISIN de la lista genérica pública): escrito aquí a mano, el guardia tests/test_privacidad_isin.py lo
+# cazaría, porque fuera de esas dos rutas exentas no admite ningún ISIN real.
+_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..")
+with open(os.path.join(_ROOT, "config", "yahoo_shadow.json"), encoding="utf-8") as _f:
+    CANARY_ISIN = json.load(_f)["canary_isin"]
+with open(os.path.join(_ROOT, "config", "fund_probe_isins_generic.json"), encoding="utf-8") as _f:
+    CANARY_NAME = {e["isin"]: e["name"] for e in json.load(_f)}[CANARY_ISIN]
 
 NOW = datetime(2026, 11, 24, 6, 40, tzinfo=timezone.utc)         # martes 06:40 UTC (franja de mañana)
 NAV_DAY = date(2026, 11, 20)                                     # viernes: fecha del NAV oficial
