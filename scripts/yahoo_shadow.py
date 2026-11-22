@@ -328,6 +328,8 @@ def collect_funds(directory):
 COUNTER_KEYS = ("en_sombra", "comparables", "iguales", "fuera_de_banda", "sin_0p", "sin_emparejar", "ambiguos", "distinta_divisa", "subunidad",
                 "sin_divisa", "sin_fecha_comun", "yahoo_por_detras", "dato_invalido", "vacios", "no_probados", "lag_n")
 ERROR_KEYS = ("429", "sin_red", "parseo")
+CANARY_STOP = frozenset({"429", "sin_red", "parseo", "vacio", "dato_invalido", "no_probado"})     # canario mal = problema de Yahoo: no se pide nada más
+CANARY_CONFIG = frozenset({"sin_0p", "sin_emparejar", "ambiguo"})                                 # Yahoo responde, pero el canario configurado no sirve
 
 
 def new_counters():
@@ -374,8 +376,9 @@ def run_shadow(funds, cfg, client, gate, mask, today):
     c = new_counters()
     c["en_sombra"] = len(funds)
     c["canario"], c["canario_lag"] = _canary(cfg, client, gate, mask, today)
+    stop = c["canario"] in CANARY_STOP
     for f in funds:
-        if gate.stopped:
+        if stop or gate.stopped:
             c["no_probados"] += 1
             continue
         try:
@@ -416,7 +419,7 @@ def run_shadow(funds, cfg, client, gate, mask, today):
             c["vacios"] += 1
         else:
             c[kind] += 1
-    c["peticiones"], c["tope"], c["parada"] = gate.used, gate.max_requests, gate.stopped
+    c["peticiones"], c["tope"], c["parada"] = gate.used, gate.max_requests, gate.stopped or ("canario" if stop else None)
     return c
 
 
@@ -480,6 +483,11 @@ def _main(a, env, client, now, clock, sleep):
     line = counters_line(c, counts, cfg, now)
     say(line)
     _append(env.get("GITHUB_STEP_SUMMARY"), "## Sombra NAV Yahoo (F1): solo contadores\n\n" + line + "\n")
+    if c["canario"] in CANARY_STOP:
+        say("::warning::sombra Yahoo: el canario (fondo público) falla (%s): no se ha pedido nada de los fondos en este run; no afecta a lo publicado"
+            % c["canario"])
+    elif c["canario"] in CANARY_CONFIG:
+        say("::warning::sombra Yahoo: el canario no resuelve a un 0P con su nombre (revisa canary_isin en config/yahoo_shadow.json); la medida sigue")
     if c["parada"] in ("429", "sin_red"):
         say("::warning::sombra Yahoo: parada limpia (%s) sin reintentos; no afecta a lo publicado" % c["parada"])
     return 0
