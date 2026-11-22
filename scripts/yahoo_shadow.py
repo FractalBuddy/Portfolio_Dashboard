@@ -27,6 +27,7 @@ import unicodedata
 from datetime import date
 from decimal import ROUND_HALF_UP, Decimal
 
+import feed_v2_common as FC
 import fund_lag_common as LC
 from fund_probe import FUND_TYPES, SEARCH_COST, STOPWORDS, _quiet, load_generic
 
@@ -36,6 +37,8 @@ _DAY_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 HARD_MAX_REQUESTS = 80                                           # DISENO §3.2: presupuesto PROPIO de la capa Yahoo por run (configurable a la baja)
 PRICE_MIN, PRICE_MAX = 0.1, 10000.0                              # mismo rango que acepta el payload para un NAV (personal_v2.FUND_SPEC)
 RATIO_LIMITS = (0.5, 2.0)                                        # misma banda que personal_v2.NAV_RATIO_LIMITS
+OFFICIAL_CURRENCY = "EUR"                                        # el NAV oficial del payload es siempre EUR (personal_v2.FUND_SPEC)
+_CURRENCY_SHAPE = re.compile(r"^[A-Za-z]{3}$")
 
 
 def say(msg):
@@ -222,11 +225,19 @@ def compare(official, official_day, history, cfg, today):
       yahoo_por_detras    la última barra válida de Yahoo es anterior a la fecha oficial (no se compara con la anterior)
       sin_fecha_comun     Yahoo tiene barras posteriores pero no la de esa fecha (no se compara con la más cercana)
       dato_invalido       hay filas pero ninguna barra válida, o la de esa fecha no lo es (precio no finito, ≤ 0 o fuera de 0,1-10 000)
+      distinta_divisa     la divisa de Yahoo no es la del oficial (EUR): no se compara (D5 B: en la sombra solo se cuenta); subunit=True si es una
+                          subunidad (GBp, ZAc...): NUNCA se divide ni se multiplica por 100 en silencio
+      sin_divisa          Yahoo no da una divisa reconocible: no se compara
       vacio               sin filas
     Las barras de hoy o posteriores (barra abierta o fecha imposible) se ignoran. `lag_bd`: retraso de Yahoo en días hábiles (si hay barras válidas)."""
     rows = (history or {}).get("rows") if isinstance(history, dict) else None
     if not rows:
         return {"kind": "vacio"}
+    cur = history.get("currency")
+    if cur != OFFICIAL_CURRENCY:
+        if isinstance(cur, str) and (_CURRENCY_SHAPE.match(cur) or cur in FC.SUBUNIT_FAMILIES):
+            return {"kind": "distinta_divisa", "subunit": cur in FC.SUBUNIT_FAMILIES}
+        return {"kind": "sin_divisa"}
     valid, exact_rows = {}, 0
     for row in rows:
         try:
