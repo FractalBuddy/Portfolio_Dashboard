@@ -1,0 +1,3 @@
+PRECIO_PUBLICADO 0.0 ERRORES ['crypto/latest.json: coins: elemento: price: debe ser > 0']
+.
+1 passed in 9.21s

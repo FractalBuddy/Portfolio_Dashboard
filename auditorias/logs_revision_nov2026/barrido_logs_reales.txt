@@ -1,0 +1,4 @@
+lista_de_runs(100) {"isin_validos_total": 0, "isin_no_genericos": 0, "0P_no_permitidos": 0, "ids_ficha": 0, "supabase": 0, "hc_ping_clave": 0, "jwt": 0, "proxy_dueno": 0, "cripto_idio": 0, "add_mask_lineas": 0}
+log_publish-feed-v2_run45249393927_job_publish {"isin_validos_total": 0, "isin_no_genericos": 0, "0P_no_permitidos": 0, "ids_ficha": 0, "supabase": 0, "hc_ping_clave": 0, "jwt": 0, "proxy_dueno": 0, "cripto_idio": 0, "add_mask_lineas": 0}
+log_fund-probe_run44097280860 {"isin_validos_total": 35, "isin_no_genericos": 0, "0P_no_permitidos": 0, "ids_ficha": 0, "supabase": 0, "hc_ping_clave": 0, "jwt": 0, "proxy_dueno": 0, "cripto_idio": 0, "add_mask_lineas": 0}
+log_personal-full_run45241219684 (revisado a mano, 400 líneas): secretos como ***; imprime solo contadores (usuarios, fondos con ficha, fecha del NAV más reciente, nº de barras y bytes del payload). Sin ISIN, 0P, nombres ni URL.
