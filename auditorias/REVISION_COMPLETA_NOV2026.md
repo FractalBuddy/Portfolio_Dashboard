@@ -124,7 +124,22 @@ Coste: **XS** < 30 min · **S** ~1 h · **M** media sesión · **L** sesión com
   (la regla de CI), una vez: **All checks passed** (`ruff_F.log`).
 * **10 mutantes al azar** (semilla 20261123, sobre una copia en el scratchpad, cada uno contra la suite completa con `-x`; `mutantes.json`):
 
-MUTANTES_TABLA
+| id | fichero | mutación | ¿muerto? | primer test que falla |
+|---|---|---|---|---|
+| M02 | `scripts/feed_v2_common.py:72` | `same_unit` ignora la escala (GBp = GBP) | sí | `test_feed_v2.py::test_divisa_o_unidad_distinta_a_la_declarada_no_se_publica` |
+| M03 | `scripts/feed_v2_common.py:326` | `price_plausible` sin tope superior | sí | `test_picos_H6.py::test_rangos_plausibles_por_unit` |
+| M04 | `scripts/feed_v2.py:233` | `period_for_gap` con `<` en vez de `<=` | sí | `test_feed_v2.py::test_hueco_largo_usa_un_periodo_mayor` |
+| M05 | `scripts/feed_v2.py:415` | tolerancia de rebase ×10 (2 % → 20 %) | **NO** | — (2358 pasan) |
+| M06 | `tests/privacy_guard.py:65` | el guardia ignora los ISIN `IE0…` | sí | `test_fund_probe_generic_list.py::test_el_guardia_sigue_activo_en_todo_el_arbol…` |
+| M08 | `scripts/yahoo_shadow.py:156` | cobertura mínima de nombre a la mitad | **NO** | — (2358 pasan) |
+| M10 | `scripts/feed_v2.py:409` | símbolo congelado a 450 días en vez de 45 | sí | `test_feed_v2.py::test_simbolo_congelado_se_marca_delisted` |
+| M11 | `scripts/feed_v2.py:465` | tope de barras descartadas ×10 | sí | `test_feed_v2_neg.py::test_tres_barras_malas_aun_se_publica_y_cuatro_no` |
+| M13 | `scripts/freshness_gate.py:51` | la puerta tolera `generated_at` 1 h en el futuro | sí | `test_puerta_frescura_F1.py::test_decide_reloj_adelantado…` |
+| M14 | `scripts/freshness_gate.py:82` | `force` también cuenta en `schedule` | sí | `test_puerta_frescura_F1.py::test_force_en_un_schedule_no_cuenta` |
+
+**8 de 10 muertos.** Los 2 supervivientes son huecos reales: ningún test pone un desajuste del pasado entre 2 % y 20 % (un ajuste de
+precios del 5-15 % pasaría sin re-descarga y dejaría un salto en la serie), y ningún test de la sombra está en el borde de `name_min_coverage`
+(con la mitad de cobertura, nombres parecidos de otra clase del mismo fondo se emparejarían: ensucia la medida F1).
 
 * Huecos de cobertura encontrados (todos **nuevos**):
   * T-01 (medio) Ningún test con una moneda de precio < 5·10⁻⁹ (F-01).
@@ -133,6 +148,8 @@ MUTANTES_TABLA
   * T-04 (bajo) Ningún test liga las franjas de la sombra con los crons de `personal-full` ni con la cadencia real (S-01): pasan todos y la sombra no mide nunca.
   * T-05 (bajo) Ningún test del validador v1 avisa al 50 % de `MAX_DATA_BYTES` (C-01).
   * T-06 (bajo) Ningún test impide que un script de diagnóstico imprima valores numéricos de NAV (R-02).
+  * T-07 (medio) Superviviente M05: test de rebase con un desajuste del 5 % (debe re-descargar) y del 1 % (no).
+  * T-08 (bajo) Superviviente M08: test de `name_match` justo por debajo y por encima de `name_min_coverage` (0,6).
 
 ### 8. Mantenimiento
 
@@ -159,7 +176,7 @@ MUTANTES_TABLA
   verificación sha256, puerta de frescura que ante la duda trabaja.
 * **Sombra NAV**: diseño de privacidad muy cuidado (máscaras antes de la primera petición, salida en clase cerrada, nunca rojo); el manejo del 429 se
   ha comprobado contra el código real de yfinance 1.7.0.
-* **Pruebas**: 2358 tests, red bloqueada en `conftest.py`, controles negativos en los guardias. 9 de 10 mutantes muertos (ver §7).
+* **Pruebas**: 2358 tests, red bloqueada en `conftest.py`, controles negativos en los guardias. 8 de 10 mutantes muertos (ver §7; los 2 supervivientes son huecos T-07 y T-08).
 
 ## (d) Lo no comprobable aquí
 
@@ -177,7 +194,7 @@ MUTANTES_TABLA
    (quitar `vars.*`), R-07. Tests T-02, T-06.
 2. **Cadencia real (S)**: W-01 (revisar el Worker; medir), S-01 (franjas de la sombra), #10 (latido de `personal-full`), M-01 (README con la
    cadencia observada). Test T-04.
-3. **Feed v2 robusto (XS-S)**: F-01 + T-01 (cripto diminuta), M-04 (`ROG.SW`, `TON`), D-04 (pandas < 4).
+3. **Feed v2 robusto (XS-S)**: F-01 + T-01 (cripto diminuta), T-07 y T-08 (supervivientes de los mutantes), M-04 (`ROG.SW`, `TON`), D-04 (pandas < 4).
 4. **Avisos al 50 % de verdad (S)**: C-01/C-07: aviso v1 de `data.json`, avisos como `/log` de Healthchecks, contador de runs/día. Test T-05.
 5. **Guardia ampliado (S)**: R-06 + T-03 (ISIN con dígito de control de cualquier país, formas de secreto en todo el árbol, workflow semanal
    que barra historial y ramas de datos).

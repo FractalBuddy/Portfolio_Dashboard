@@ -1,0 +1,138 @@
+[
+ {
+  "id": "M02",
+  "file": "scripts/feed_v2_common.py",
+  "desc": "same_unit ignora la escala (GBp == GBP)",
+  "killed": true,
+  "rc": 1,
+  "secs": 19,
+  "summary": [
+   "1 failed, 189 passed, 1 warning in 18.47s"
+  ],
+  "first_failure": [
+   "FAILED tests/test_feed_v2.py::test_divisa_o_unidad_distinta_a_la_declarada_no_se_publica[SWDA.L-GBP-GBp/subunit]"
+  ]
+ },
+ {
+  "id": "M03",
+  "file": "scripts/feed_v2_common.py",
+  "desc": "price_plausible sin tope superior",
+  "killed": true,
+  "rc": 1,
+  "secs": 156,
+  "summary": [
+   "1 failed, 1268 passed, 1 warning in 155.49s (0:02:35)"
+  ],
+  "first_failure": [
+   "FAILED tests/test_picos_H6.py::test_rangos_plausibles_por_unit[currency-700000.0-100000000.0]"
+  ]
+ },
+ {
+  "id": "M04",
+  "file": "scripts/feed_v2.py",
+  "desc": "period_for_gap: límite estricto (borde)",
+  "killed": true,
+  "rc": 1,
+  "secs": 15,
+  "summary": [
+   "1 failed, 181 passed, 1 warning in 14.81s"
+  ],
+  "first_failure": [
+   "FAILED tests/test_feed_v2.py::test_hueco_largo_usa_un_periodo_mayor - Asserti..."
+  ]
+ },
+ {
+  "id": "M05",
+  "file": "scripts/feed_v2.py",
+  "desc": "rebase: tolerancia x10 (20 %)",
+  "killed": false,
+  "rc": 0,
+  "secs": 242,
+  "summary": [
+   "2358 passed, 1 warning in 241.08s (0:04:01)"
+  ],
+  "first_failure": []
+ },
+ {
+  "id": "M06",
+  "file": "tests/privacy_guard.py",
+  "desc": "guardia ISIN: ignora los ISIN IE0… (casi todos)",
+  "killed": true,
+  "rc": 1,
+  "secs": 71,
+  "summary": [
+   "1 failed, 619 passed, 1 warning in 70.33s (0:01:10)"
+  ],
+  "first_failure": [
+   "FAILED tests/test_fund_probe_generic_list.py::test_el_guardia_sigue_activo_en_todo_el_arbol_y_la_excepcion_es_solo_para_este_fichero"
+  ]
+ },
+ {
+  "id": "M08",
+  "file": "scripts/yahoo_shadow.py",
+  "desc": "sombra: cobertura de nombre a la mitad",
+  "killed": false,
+  "rc": 0,
+  "secs": 243,
+  "summary": [
+   "2358 passed, 1 warning in 242.15s (0:04:02)"
+  ],
+  "first_failure": []
+ },
+ {
+  "id": "M10",
+  "file": "scripts/feed_v2.py",
+  "desc": "símbolo congelado: 450 días",
+  "killed": true,
+  "rc": 1,
+  "secs": 38,
+  "summary": [
+   "1 failed, 214 passed, 1 warning in 37.66s"
+  ],
+  "first_failure": [
+   "FAILED tests/test_feed_v2.py::test_simbolo_congelado_se_marca_delisted - Asse..."
+  ]
+ },
+ {
+  "id": "M11",
+  "file": "scripts/feed_v2.py",
+  "desc": "tope de barras descartadas x10",
+  "killed": true,
+  "rc": 1,
+  "secs": 58,
+  "summary": [
+   "1 failed, 231 passed, 1 warning in 57.94s"
+  ],
+  "first_failure": [
+   "FAILED tests/test_feed_v2_neg.py::test_tres_barras_malas_aun_se_publica_y_cuatro_no"
+  ]
+ },
+ {
+  "id": "M13",
+  "file": "scripts/freshness_gate.py",
+  "desc": "puerta: tolera generated_at 1 h en el futuro",
+  "killed": true,
+  "rc": 1,
+  "secs": 161,
+  "summary": [
+   "1 failed, 1335 passed, 1 warning in 160.98s (0:02:40)"
+  ],
+  "first_failure": [
+   "FAILED tests/test_puerta_frescura_F1.py::test_decide_reloj_adelantado_generated_at_en_el_futuro_trabaja[ahead0]"
+  ]
+ },
+ {
+  "id": "M14",
+  "file": "scripts/freshness_gate.py",
+  "desc": "force también en schedule",
+  "killed": true,
+  "rc": 1,
+  "secs": 150,
+  "summary": [
+   "1 failed, 1350 passed, 1 warning in 149.27s (0:02:29)"
+  ],
+  "first_failure": [
+   "FAILED tests/test_puerta_frescura_F1.py::test_force_en_un_schedule_no_cuenta[true]"
+  ]
+ }
+]
