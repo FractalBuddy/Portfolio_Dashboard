@@ -63,6 +63,8 @@ def examples(world, tmp_path, monkeypatch):
                                                  "url": "https://www.ishares.com/ch/individual/en/products/000001/fake-fund-a",
                                                  "proxy_symbol": "FAKEP", "prev_price": 25.4, "prev_nav_date_iso": "2026-10-23"}], "symbols": ["AAPL", "FAKE1"]}]
     mf = jl(site, "manifest.json")
+    root = jl(site, "manifest-root.json")
+    shard = jl(site, "s/SWDA.L/manifest.json")
     health = jl(site, "health.json")
     latest = jl(site, "s/SWDA.L/latest.json")
     latest["sparkline"] = latest["sparkline"][-5:]          # (el real lleva 30; el último es siempre `price`)
@@ -76,6 +78,9 @@ def examples(world, tmp_path, monkeypatch):
         "news": jl(site, "news.json") | {"general": jl(site, "news.json")["general"][:1], "watchlist": jl(site, "news.json")["watchlist"][:1]},
         "health": cut(health, 2, ("symbols",)),
         "manifest": mf | {"files": {k: mf["files"][k] for k in ("index.json", "s/SWDA.L/latest.json", "s/SWDA.L/d/2026.json")}},   # (health.json cambia en cada run)
+        "manifest_root": root | {"files": {k: root["files"][k] for k in ("index.json", "crypto/latest.json")},
+                                 "symbols": {k: root["symbols"][k] for k in ("AAPL", "SWDA.L")}},
+        "manifest_shard": shard | {"files": {k: shard["files"][k] for k in ("s/SWDA.L/latest.json", "s/SWDA.L/d/2026.json")}},
         "watch": watch,
         "payload": payload,
     }
@@ -102,7 +107,8 @@ def test_los_ejemplos_pasan_los_validadores_de_esquema(examples):
     ctx = sc.Ctx(REG, date(2026, 10, 27))
     assert sc.INDEX_SPEC(examples["index"], ctx) is None
     assert sc.LATEST_SPEC(examples["latest"], ctx) is None
-    for k, spec in (("crypto", sc.CRYPTO_SPEC), ("macro", sc.MACRO_SPEC), ("news", sc.NEWS_SPEC), ("health", sc.HEALTH_SPEC), ("manifest", sc.MANIFEST_SPEC)):
+    for k, spec in (("crypto", sc.CRYPTO_SPEC), ("macro", sc.MACRO_SPEC), ("news", sc.NEWS_SPEC), ("health", sc.HEALTH_SPEC), ("manifest", sc.MANIFEST_SPEC),
+                    ("manifest_root", sc.MANIFEST_ROOT_SPEC), ("manifest_shard", sc.MANIFEST_SHARD_SPEC)):
         assert spec(examples[k], ctx) is None, k
     assert pv.payload_problems(examples["payload"], date(2026, 10, 27)) == []
     assert examples["watch"] and pv.parse_watch(examples["watch"], lambda t, n: t)[1] == 0

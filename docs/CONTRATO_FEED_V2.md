@@ -21,7 +21,9 @@ https://<usuario>.github.io/<repo>/v2/crypto/latest.json        top 250 de CoinG
 https://<usuario>.github.io/<repo>/v2/macro.json                FX, tipos, IPC, VIX, Fear & Greed, calendario
 https://<usuario>.github.io/<repo>/v2/news.json                 titulares (campo `watchlist`, no `positions`)
 https://<usuario>.github.io/<repo>/v2/health.json               salud del run y estado de cada símbolo
-https://<usuario>.github.io/<repo>/v2/manifest.json             ruta -> bytes + sha256 de todo lo anterior
+https://<usuario>.github.io/<repo>/v2/manifest.json             ruta -> bytes + sha256 de todo lo anterior (formato de manifiesto 1)
+https://<usuario>.github.io/<repo>/v2/manifest-root.json        ficheros globales + huella del trozo de cada símbolo (formato 2, desde MANIFEST_ESCALA)
+https://<usuario>.github.io/<repo>/v2/s/<SYM>/manifest.json     trozo del manifiesto: los ficheros de ese símbolo (formato 2)
 ```
 
 Con dominio propio, la URL base es la variable de repo `FEED_V2_BASE_URL`. Pages sirve con `Cache-Control: max-age=600`: no se puede forzar la caché
@@ -440,9 +442,15 @@ símbolos activos del registro o si Yahoo cae a nivel global.
 ```
 <!-- /ejemplo -->
 
-### `manifest.json`
-Ruta → bytes y sha256 de **todos** los ficheros (menos él mismo). El run siguiente verifica con él cada descarga del sitio anterior, y el validador comprueba que coincide con el
-disco. Un cliente que quiera integridad puede verificar lo que descarga.
+### `manifest.json` (formato de manifiesto 1)
+Ruta → bytes y sha256 de **todos** los ficheros de datos (menos él mismo y menos los manifiestos de formato 2, que no son datos). El run siguiente verifica con él cada descarga del sitio
+anterior, y el validador comprueba que coincide con el disco. Un cliente que quiera integridad puede verificar lo que descarga. **No cambia** con el formato 2: mismas claves y
+mismas entradas que antes de MANIFEST_ESCALA (los ficheros listados son los mismos; `total_bytes` mide lo mismo).
+
+**Crece con el universo** (~1,3 KB por símbolo de Yahoo, medido con el sitio sintético; el 89 % son las entradas de los años diarios y la mitad de cada entrada es el
+`sha256`). Su tope es `MAX_BYTES["manifest"]` = 600 KB: con el reparto actual se llega hacia los **~460 símbolos de Yahoo** y, por encima, no solo lo rechaza el
+validador: `site_download.py` (job `fetch`) se niega a bajarlo y el workflow no puede ni empezar. El validador **avisa** (`::warning::`) desde el 50 % de este y de
+todos los topes. Mientras haga falta (el cliente del dueño lo lee) se sigue publicando completo; un cliente nuevo debe usar el formato 2.
 
 <!-- ejemplo:manifest -->
 ```json
@@ -468,6 +476,78 @@ disco. Un cliente que quiera integridad puede verificar lo que descarga.
 ```
 <!-- /ejemplo -->
 
+### Formato de manifiesto 2: `manifest-root.json` + `s/<SYM>/manifest.json` (aditivo, desde MANIFEST_ESCALA)
+Describe **los mismos ficheros de datos** que `manifest.json`, partidos en dos niveles, para que el cliente no tenga que bajar ~1,3 KB por símbolo cada vez que cambia el índice:
+
+* **Raíz** `manifest-root.json`: `manifest_format` = `2`; `generated_at` y `total_bytes` **iguales** a los de `manifest.json` (mismo run, mismos datos); `files` = bytes y sha256
+  de los ficheros **globales** (`index.json`, `health.json`, `macro.json`, `news.json`, `crypto/latest.json`); `symbols` = por cada símbolo **con ficheros**, bytes y sha256 de
+  **su trozo** (~105 B por símbolo: ~0,3 MB a 3.000 símbolos; tope `MAX_BYTES["manifest_root"]` = 600 KB). Un símbolo sin ficheros (cripto, o de Yahoo aún sin datos) no aparece.
+* **Trozo** `s/<SYM>/manifest.json`: `manifest_format` = `2`, `s` y `files` = bytes y sha256 de **todos** los ficheros de ese símbolo (`latest.json`, `d/<AAAA>.json`, `i.json`),
+  con la ruta completa desde `/v2/`. **No lleva `generated_at`** a propósito: si los ficheros del símbolo no cambian, el trozo es idéntico byte a byte y su huella en la raíz
+  también. Tope `MAX_BYTES["manifest_shard"]` = 4 KB (≤ 16 ficheros).
+* Ningún manifiesto (de formato 1 ni 2) aparece en otro manifiesto. El validador comprueba los dos formatos **contra el disco** (no uno contra el otro): un trozo que falta,
+  sobra, lista otros ficheros o tiene una huella que no casa **bloquea la publicación** igual que hoy un `manifest.json` incoherente.
+
+<!-- ejemplo:manifest_root -->
+```json
+{
+  "schema": 2,
+  "manifest_format": 2,
+  "generated_at": "2026-10-26T18:00:00Z",
+  "total_bytes": 1160565,
+  "files": {
+    "index.json": {
+      "bytes": 1304,
+      "sha256": "9f84091ab01c4b47cb881e81a7973d58588c880fe916f693b4b82b9fdf2ea37f"
+    },
+    "crypto/latest.json": {
+      "bytes": 5587,
+      "sha256": "97a6c503b1cbdead223e742cd84d98374c5d836526105bc7bb212e57beff749f"
+    }
+  },
+  "symbols": {
+    "AAPL": {
+      "bytes": 1400,
+      "sha256": "a36498f36d6a18e3939171a64c5bd4deafcfd8650832d96b147965b526d2eee1"
+    },
+    "SWDA.L": {
+      "bytes": 1426,
+      "sha256": "bb9f39ae063ceb2f5eb78039a748f48057abdc1c5d92f04444bcb2960277b5ff"
+    }
+  }
+}
+```
+<!-- /ejemplo -->
+
+<!-- ejemplo:manifest_shard -->
+```json
+{
+  "schema": 2,
+  "manifest_format": 2,
+  "s": "SWDA.L",
+  "files": {
+    "s/SWDA.L/latest.json": {
+      "bytes": 621,
+      "sha256": "965c326af7e5504731eeee52c7de93a8958e9c2c377c3c51ee6f6385ab56676b"
+    },
+    "s/SWDA.L/d/2026.json": {
+      "bytes": 13914,
+      "sha256": "a0f889d9468ef67323b3e2d93f9a49a09587eeaa0ba75a4397fca8240c4278d5"
+    }
+  }
+}
+```
+<!-- /ejemplo -->
+
+**Cómo usarlo (cliente nuevo):** cuando cambie `generated_at` de `index.json`, `GET manifest-root.json`; compara cada `symbols.<SYM>` con el que guardaste la vez anterior y pide
+`s/<SYM>/manifest.json` **solo** de los símbolos que sigues y cuya huella cambió (verifica bytes y sha256 contra la raíz); con el trozo, pide y verifica solo los ficheros que
+cambiaron. En un run normal cambian los trozos de los símbolos refrescados (los hot en cada run, los warm ~1 vez al día, los cold ~1 vez por semana); los años cerrados no
+mueven el trozo. Si `manifest-root.json` da 404 (sitio de antes de MANIFEST_ESCALA), usa `manifest.json`.
+
+**Compatibilidad y retirada:** el formato 2 es **aditivo**: `manifest.json` se sigue publicando igual, con su tope, mientras haga falta. Retirarlo (o dejar de listar en él los años
+cerrados) cambia el contrato y exige antes: (1) que el cliente del dueño lea el formato 2; (2) que `site_download.py` (CI) baje el sitio anterior por el formato 2; (3) una nueva
+versión de este documento. Hasta entonces el universo de Yahoo no puede pasar de ~460 símbolos (ver `manifest.json`).
+
 ## 4. Cómo leerlo (algoritmo del cliente)
 
 1. `GET index.json` (cada pocos minutos; compara `generated_at`). Para cada símbolo que sigues y tiene `status` `active` y `as_of`, `GET s/<SYM>/latest.json`.
@@ -477,6 +557,7 @@ disco. Un cliente que quiera integridad puede verificar lo que descarga.
 4. Valora posiciones con `price / price_unit_divisor` **solo** si `unit` es `currency` o `subunit`; nunca mezcles `GBp` con `GBP` sin dividir.
 5. Si `stale` es `true`, enséñalo (el dato es anterior); si el símbolo no está en `index.json` o no tiene `latest.json`, enséñalo como «sin datos».
 6. Las criptomonedas del top están en `crypto/latest.json` (`kind: crypto` en el índice).
+7. Integridad y «qué ha cambiado»: `manifest.json` (formato 1, completo) o, mejor a partir de unos cientos de símbolos, `manifest-root.json` + los trozos que cambiaron (formato 2, §3).
 
 ## 5. Datos propios (Supabase, fuera del repo)
 
