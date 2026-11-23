@@ -70,7 +70,7 @@ Qué cambia respecto al feed actual (auditoría 08, BE-01..BE-09):
 | | Feed actual (`update-data.yml`) | Feed v2 (`publish-feed-v2.yml`) |
 |---|---|---|
 | Publicación | rama `data` (force-push) + jsDelivr | GitHub Pages con `actions/deploy-pages` (artefacto; **ningún commit a ninguna rama**) |
-| Forma | un `data.json` de ~10 MB | un fichero por símbolo: `index.json`, `s/<SYM>/latest.json`, `s/<SYM>/d/<AAAA>.json`, `s/<SYM>/i.json`, `crypto/latest.json`, `macro.json`, `news.json`, `health.json`, `manifest.json` |
+| Forma | un `data.json` de ~10 MB | un fichero por símbolo: `index.json`, `s/<SYM>/latest.json`, `s/<SYM>/d/<AAAA>.json`, `s/<SYM>/i.json`, `crypto/latest.json`, `macro.json`, `news.json`, `health.json`, `manifest.json` (formato 1) y, aditivo, `manifest-root.json` + `s/<SYM>/manifest.json` (formato 2, por trozos; contrato §3) |
 | Contenido | llevaba `your_funds` y listas del dueño (ya no, desde el cierre del corte) | **genérico**: `registry.json` (242 símbolos públicos y neutros). Lo del dueño va a Supabase |
 | Divisa | `price` sin divisa | `currency` + `unit` (+ `price_unit_divisor`) explícitos; `GBp` ≠ `GBP`; sin divisa/unidad verificada no se publica |
 | Histórico | `max` entero en cada run | **incremental**: ~1 mes por símbolo y run, fusionado por fecha; los años cerrados no se reescriben |

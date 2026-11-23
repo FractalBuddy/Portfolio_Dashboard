@@ -316,11 +316,21 @@ HEALTH_SPEC = obj({
                                           "dropped_why": mapping(_DATE_RE, enum(*DROP_REASONS), 50)},
                                          required={"status", "fail_streak", "tier"}),
                        c.MAX_REGISTRY_SYMBOLS)})
+_PATH_KEY_RE = re.compile(r"^[A-Za-z0-9._^=/\-]{1,120}$")
+_DIGEST = obj({"bytes": integer(0, 10**9), "sha256": text(64, _SHA_RE)})
 MANIFEST_SPEC = obj({
     "schema": SCHEMA_V, "generated_at": stamp, "total_bytes": integer(0, 10**10),
-    "files": mapping(re.compile(r"^[A-Za-z0-9._^=/\-]{1,120}$"), obj({"bytes": integer(0, 10**9), "sha256": text(64, _SHA_RE)}), c.MAX_SITE_FILES)})
+    "files": mapping(_PATH_KEY_RE, _DIGEST, c.MAX_SITE_FILES)})
+# Formato de manifiesto 2 (aditivo, ver feed_v2_common): raíz + un trozo por símbolo. El trozo NO lleva generated_at (lista blanca estricta).
+MANIFEST_FORMAT_V = lambda v, ctx: None if v == c.MANIFEST_FORMAT else "manifest_format != %d" % c.MANIFEST_FORMAT      # noqa: E731
+MAX_FILES_PER_SHARD = 16                                              # 10 años + latest + intradía = 12; margen sin dejar pasar un trozo desbocado
+MANIFEST_ROOT_SPEC = obj({
+    "schema": SCHEMA_V, "manifest_format": MANIFEST_FORMAT_V, "generated_at": stamp, "total_bytes": integer(0, 10**10),
+    "files": mapping(_PATH_KEY_RE, _DIGEST, 20), "symbols": mapping(c.SYMBOL_RE, _DIGEST, c.MAX_REGISTRY_SYMBOLS)})
+MANIFEST_SHARD_SPEC = obj({
+    "schema": SCHEMA_V, "manifest_format": MANIFEST_FORMAT_V, "s": symbol, "files": mapping(_PATH_KEY_RE, _DIGEST, MAX_FILES_PER_SHARD)})
 SPECS = {"index": INDEX_SPEC, "latest": LATEST_SPEC, "crypto": CRYPTO_SPEC, "macro": MACRO_SPEC, "news": NEWS_SPEC, "health": HEALTH_SPEC,
-         "manifest": MANIFEST_SPEC}
+         "manifest": MANIFEST_SPEC, "manifest_root": MANIFEST_ROOT_SPEC, "manifest_shard": MANIFEST_SHARD_SPEC}
 
 
 def _no_constant(name):
@@ -583,11 +593,11 @@ def check_site(site, registry, prev=None, *, today=None, allow_regression=False,
     files, _total = scan_files(site, ctx)
     if not files:
         return ctx.errors + ["el sitio está vacío"], []
-    for req in ("index.json", "manifest.json", "health.json", "macro.json", "news.json"):
+    for req in ("index.json", "manifest.json", c.MANIFEST_ROOT, "health.json", "macro.json", "news.json"):
         if req not in files:
             ctx.err("falta %s" % req)
 
-    docs, latest_new, daily_last, daily_years = {}, {}, {}, {}
+    docs, latest_new, daily_last, daily_years, shards = {}, {}, {}, {}, {}
     for rel, (kind, sym, year, _size) in sorted(files.items()):
         if sym is not None and sym not in ctx.reg:
             continue                                                            # ya es un error (scan_files): no se sigue con un símbolo desconocido
@@ -604,9 +614,12 @@ def check_site(site, registry, prev=None, *, today=None, allow_regression=False,
                 bad = SPECS[kind](doc, ctx)
                 if bad:
                     ctx.err("%s: %s" % (rel, bad))
-            if kind != "manifest":
+                elif kind == "manifest_shard":
+                    shards[sym] = doc
+            if kind not in c.MANIFEST_KINDS:
                 _scan_strings(doc, rel, ctx)
-            docs[kind] = doc if kind not in docs else docs[kind]
+            if kind != "manifest_shard":
+                docs[kind] = doc if kind not in docs else docs[kind]
         elif kind == "daily":
             bars = check_year_doc(doc, sym, year, ctx, rel)
             if bars:
@@ -623,7 +636,10 @@ def check_site(site, registry, prev=None, *, today=None, allow_regression=False,
 
     _check_index(docs.get("index"), ctx)
     _check_health(docs.get("health"), ctx)
-    _check_manifest(docs.get("manifest"), site, files, ctx)
+    digests = _digests(site, files)
+    _check_manifest(docs.get("manifest"), files, digests, ctx)
+    _check_manifest_v2(docs.get("manifest_root"), shards, docs.get("manifest"), files, digests, ctx)
+    _check_headroom(files, len(registry), ctx)
     _check_symbols(files, latest_new, daily_last, ctx)
     yahoo = [e for e in registry if e["kind"] == "yahoo" and e["status"] == "active"]
     # Mínimo absoluto bajo a propósito: el alta de un registro grande se reparte en varios runs (cupo de descargas largas) y Yahoo puede limitar durante
@@ -744,23 +760,112 @@ def _health_alerts(h, ctx, latest_new=None):
         ctx.warn("series bajadas enteras otra vez por rebase (split/ajuste): %s" % ", ".join(str(s) for s in rebased[:8]))
 
 
-def _check_manifest(mf, site, files, ctx):
+def _digests(site, files):
+    """{ruta: {bytes, sha256}} de todos los ficheros del sitio (manifiestos incluidos), leídos UNA vez del disco."""
+    out = {}
+    for rel in files:
+        with open(os.path.join(site, *rel.split("/")), "rb") as f:
+            data = f.read()
+        out[rel] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+    return out
+
+
+def _data_files(files):
+    """Ficheros de DATOS: todos menos los manifiestos (formato 1 y 2). Es lo que describen los dos formatos."""
+    return {r for r, v in files.items() if v[0] not in c.MANIFEST_KINDS}
+
+
+def _check_manifest(mf, files, digests, ctx):
+    """Formato 1 (`manifest.json`): exactamente los ficheros de datos, con bytes y sha256 del disco."""
     if not isinstance(mf, dict) or not isinstance(mf.get("files"), dict):
         return
-    want = {r for r in files if r != "manifest.json"}
+    want = _data_files(files)
     if set(mf["files"]) != want:
         miss, extra = sorted(want - set(mf["files"])), sorted(set(mf["files"]) - want)
         ctx.err("manifest.json no coincide con los ficheros del sitio (sin listar: %s; sobran: %s)" % (miss[:3], extra[:3]))
         return
-    total = 0
     for rel, v in mf["files"].items():
-        with open(os.path.join(site, *rel.split("/")), "rb") as f:
-            data = f.read()
-        total += len(data)
-        if len(data) != v.get("bytes") or hashlib.sha256(data).hexdigest() != v.get("sha256"):
+        if digests[rel] != {"bytes": v.get("bytes"), "sha256": v.get("sha256")}:
             ctx.err("manifest.json: %s no coincide (bytes o sha256)" % _line(rel)[:80])
-    if mf.get("total_bytes") != total:
+    if mf.get("total_bytes") != sum(digests[r]["bytes"] for r in want):
         ctx.err("manifest.json: total_bytes no coincide")
+
+
+def _check_manifest_v2(root, shards, mf, files, digests, ctx):
+    """Formato 2 (`manifest-root.json` + `s/<SYM>/manifest.json`), comprobado contra el DISCO (no contra el formato 1 ni regenerándolo con el código del
+    generador): la raíz lista exactamente los ficheros globales y un trozo por cada símbolo con ficheros, con la huella real de cada trozo; cada trozo lista
+    exactamente los ficheros de su símbolo con su huella real. Errores agregados (como mucho uno por regla) para no inundar el log a 3.000 símbolos."""
+    if not isinstance(root, dict) or not isinstance(root.get("files"), dict) or not isinstance(root.get("symbols"), dict):
+        return                                                              # falta (error aparte) o esquema inválido (ya es error)
+    data = _data_files(files)
+    want_glob = {r for r in data if files[r][1] is None}
+    by_sym = {}
+    for r in data:
+        if files[r][1] is not None:
+            by_sym.setdefault(files[r][1], set()).add(r)
+    if set(root["files"]) != want_glob:
+        ctx.err("manifest-root.json: los ficheros globales no coinciden con el sitio (sin listar: %s; sobran: %s)" % (
+            sorted(want_glob - set(root["files"]))[:3], sorted(set(root["files"]) - want_glob)[:3]))
+    else:
+        bad = sorted(r for r, v in root["files"].items() if digests[r] != v)
+        if bad:
+            ctx.err("manifest-root.json: %d ficheros globales no coinciden (bytes o sha256): %s" % (len(bad), ", ".join(bad[:3])))
+    if set(root["symbols"]) != set(by_sym):
+        ctx.err("manifest-root.json: los símbolos no coinciden con los que tienen ficheros (sin listar: %s; sobran: %s)" % (
+            sorted(set(by_sym) - set(root["symbols"]))[:3], sorted(set(root["symbols"]) - set(by_sym))[:3]))
+    missing = sorted(s for s in by_sym if c.shard_path(s) not in files)
+    orphan = sorted(s for (k, s, _y, _z) in files.values() if k == "manifest_shard" and s not in by_sym)
+    if missing:
+        ctx.err("%d símbolos con ficheros sin trozo de manifiesto (s/<SYM>/manifest.json): %s" % (len(missing), ", ".join(missing[:4])))
+    if orphan:
+        ctx.err("%d trozos de manifiesto de símbolos sin ficheros: %s" % (len(orphan), ", ".join(orphan[:4])))
+    stale_root, wrong_sym, wrong_set, wrong_digest = [], [], [], []
+    for sym, rels in sorted(by_sym.items()):
+        srel = c.shard_path(sym)
+        if srel not in files:
+            continue
+        if sym in root["symbols"] and digests[srel] != root["symbols"][sym]:
+            stale_root.append(sym)
+        sh = shards.get(sym)
+        if sh is None:
+            continue                                                        # trozo ilegible o con esquema inválido: ya es error
+        if sh["s"] != sym:
+            wrong_sym.append(sym)
+        if set(sh["files"]) != rels:
+            wrong_set.append(sym)
+        elif any(digests[r] != v for r, v in sh["files"].items()):
+            wrong_digest.append(sym)
+    if stale_root:
+        ctx.err("manifest-root.json: la huella de %d trozos no coincide con el trozo publicado: %s" % (len(stale_root), ", ".join(stale_root[:4])))
+    if wrong_sym:
+        ctx.err("%d trozos de manifiesto cuyo símbolo `s` no es el de su ruta: %s" % (len(wrong_sym), ", ".join(wrong_sym[:4])))
+    if wrong_set:
+        ctx.err("%d trozos de manifiesto que no listan exactamente los ficheros de su símbolo: %s" % (len(wrong_set), ", ".join(wrong_set[:4])))
+    if wrong_digest:
+        ctx.err("%d trozos de manifiesto con ficheros que no coinciden (bytes o sha256): %s" % (len(wrong_digest), ", ".join(wrong_digest[:4])))
+    if root.get("total_bytes") != sum(digests[r]["bytes"] for r in data):
+        ctx.err("manifest-root.json: total_bytes no coincide con los ficheros de datos")
+    if isinstance(mf, dict) and root.get("generated_at") != mf.get("generated_at"):
+        ctx.err("manifest-root.json: generated_at distinto del de manifest.json (los dos formatos deben ser del mismo run)")
+
+
+def _check_headroom(files, n_registry, ctx):
+    """Aviso (::warning::, no bloquea ni es /fail de Healthchecks) cuando un tope pasa de HEADROOM_WARN_FRACTION (50 %). Pasarlo es un error aparte
+    (scan_files / registro): aquí solo se avisa en la franja [50 %, 100 %]."""
+    biggest = {}
+    for kind, _s, _y, size in files.values():
+        biggest[kind] = max(biggest.get(kind, 0), size)
+    pairs = [("MAX_BYTES[%s]" % k, biggest[k], c.MAX_BYTES[k]) for k in sorted(biggest)]
+    pairs += [("MAX_SITE_FILES", len(files), c.MAX_SITE_FILES), ("MAX_SITE_BYTES", sum(v[3] for v in files.values()), c.MAX_SITE_BYTES),
+              ("MAX_REGISTRY_SYMBOLS", n_registry, c.MAX_REGISTRY_SYMBOLS)]
+    hits = ["%s %d %% (%d de %d)" % (name, round(100 * val / cap), val, cap) for name, val, cap in pairs
+            if c.HEADROOM_WARN_FRACTION * cap <= val <= cap]
+    if hits:
+        extra = ""
+        if any(h.startswith("MAX_BYTES[manifest] ") for h in hits):
+            extra = ("; manifest.json (formato 1) crece ~1,3 KB por símbolo: el cliente debería pasar a manifest-root.json + s/<SYM>/manifest.json "
+                     "(formato 2, contrato §3) antes de que llegue al tope; site_download.py tampoco puede bajarlo por encima")
+        ctx.warn("topes por encima del %d %% (aviso, no bloquea): %s%s" % (round(100 * c.HEADROOM_WARN_FRACTION), "; ".join(hits), extra))
 
 
 def _check_symbols(files, latest_new, daily_last, ctx):

@@ -3,6 +3,7 @@ apéndice A de auditorias/08_backend.md (R4, el NAV, se prueba en test_personal_
 import hashlib
 import json
 import os
+import shutil
 from datetime import date, timedelta
 
 import pytest
@@ -67,20 +68,36 @@ def save(base, rel, doc, repack=True):
 
 
 def pack(base):
-    """Recalcula manifest.json con lo que hay en disco (el atacante que manipula ficheros también puede reescribir el manifiesto)."""
+    """Recalcula los manifiestos con lo que hay en disco (el atacante que manipula ficheros también puede reescribir los manifiestos): manifest.json
+    (formato 1) y, si existen, manifest-root.json y s/<SYM>/manifest.json (formato 2, MANIFEST_ESCALA). Ningún manifiesto se lista a sí mismo ni a los otros."""
+    def digest(rel):
+        data = open(path(base, rel), "rb").read()
+        return {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
     files, total = {}, 0
     for root, _d, names in os.walk(base):
         for n in names:
             rel = os.path.relpath(os.path.join(root, n), base).replace(os.sep, "/")
-            if rel == "manifest.json":
+            if rel == "manifest.json" or rel == c.MANIFEST_ROOT or (rel.startswith("s/") and rel.endswith("/manifest.json")):
                 continue
-            data = open(os.path.join(root, n), "rb").read()
-            files[rel] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
-            total += len(data)
+            files[rel] = digest(rel)
+            total += files[rel]["bytes"]
+    files = dict(sorted(files.items()))
     m = load(base, "manifest.json")
-    m["files"], m["total_bytes"] = dict(sorted(files.items())), total
+    m["files"], m["total_bytes"] = files, total
     with open(path(base, "manifest.json"), "w", encoding="utf-8") as f:
         f.write(c.dumps(m))
+    if os.path.isfile(path(base, c.MANIFEST_ROOT)):
+        root = load(base, c.MANIFEST_ROOT)
+        by_sym, glob = {}, {}
+        for rel, v in files.items():
+            (by_sym.setdefault(rel.split("/")[1], {}) if rel.startswith("s/") else glob)[rel] = v
+        for sym, fs in by_sym.items():
+            with open(path(base, "s/%s/manifest.json" % sym), "w", encoding="utf-8") as f:
+                f.write(c.dumps({"schema": 2, "manifest_format": 2, "s": sym, "files": fs}))
+        root.update(generated_at=m["generated_at"], total_bytes=total, files=glob,
+                    symbols={s: digest("s/%s/manifest.json" % s) for s in sorted(by_sym)})
+        with open(path(base, c.MANIFEST_ROOT), "w", encoding="utf-8") as f:
+            f.write(c.dumps(root))
 
 
 def edit(base, rel, fn):
@@ -310,8 +327,7 @@ def test_simbolo_fuera_del_registro_o_de_cripto_no_lleva_ficheros(site):
     prev, new = site
     save(new, "s/ZZZ/latest.json", load(new, "s/AAPL/latest.json"))
     assert has(run(new, prev)[0], "fuera del registro")
-    os.remove(path(new, "s/ZZZ/latest.json"))
-    os.rmdir(path(new, "s/ZZZ"))
+    shutil.rmtree(path(new, "s/ZZZ"))                    # (lleva también el trozo de manifiesto que escribe pack(), formato 2)
     save(new, "s/BTC/latest.json", load(new, "s/AAPL/latest.json"))
     assert has(run(new, prev)[0], "no es de Yahoo")
 

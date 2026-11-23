@@ -108,7 +108,7 @@ def parse_manifest(data):
     out = {}
     for rel, v in files.items():
         cls = c.classify_path(rel)
-        if cls is None or cls[0] == "manifest":
+        if cls is None or cls[0] in c.MANIFEST_KINDS:          # ningún manifiesto (formato 1 o 2) figura en manifest.json
             raise DownloadError("manifest.json lista una ruta fuera del contrato")
         if not (isinstance(v, dict) and type(v.get("bytes")) is int and 0 <= v["bytes"] <= c.MAX_BYTES[cls[0]]
                 and isinstance(v.get("sha256"), str) and len(v["sha256"]) == 64):

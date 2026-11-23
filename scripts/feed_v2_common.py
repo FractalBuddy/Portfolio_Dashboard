@@ -216,10 +216,27 @@ def intraday_path(sym):
     return "s/%s/i.json" % sym
 
 
+def shard_path(sym):
+    """Trozo del manifiesto de un símbolo (formato de manifiesto 2)."""
+    assert safe_symbol(sym)
+    return "s/%s/manifest.json" % sym
+
+
+# Manifiesto (MANIFEST_ESCALA). Dos formatos que conviven, los dos dentro de schema 2:
+#   formato 1  `manifest.json`: ruta -> bytes + sha256 de TODOS los ficheros de datos. Lo que lee hoy el cliente; crece ~1,3 KB por símbolo.
+#   formato 2  `manifest-root.json` (ficheros globales + huella del trozo de cada símbolo, ~0,1 KB por símbolo) y `s/<SYM>/manifest.json` (los ficheros de
+#              ese símbolo, SIN generated_at: si no cambian sus ficheros, el trozo es idéntico byte a byte). Es aditivo: el formato 1 no cambia.
+# Ningún manifiesto se lista a sí mismo ni a los otros: los dos formatos describen el mismo conjunto de ficheros de DATOS.
+MANIFEST_FORMAT = 2
+MANIFEST_ROOT = "manifest-root.json"
+MANIFEST_KINDS = ("manifest", "manifest_root", "manifest_shard")
+
 _SYM_PART = r"[A-Za-z0-9.^=\-]{1,15}"
 PATH_RES = {
     "index": re.compile(r"^index\.json$"),
     "manifest": re.compile(r"^manifest\.json$"),
+    "manifest_root": re.compile(r"^manifest-root\.json$"),
+    "manifest_shard": re.compile(r"^s/(%s)/manifest\.json$" % _SYM_PART),
     "latest": re.compile(r"^s/(%s)/latest\.json$" % _SYM_PART),
     "daily": re.compile(r"^s/(%s)/d/(\d{4})\.json$" % _SYM_PART),
     "intraday": re.compile(r"^s/(%s)/i\.json$" % _SYM_PART),
@@ -238,7 +255,7 @@ def classify_path(rel):
         m = rx.fullmatch(rel)
         if not m:
             continue
-        sym = m.group(1) if kind in ("latest", "daily", "intraday") else None
+        sym = m.group(1) if kind in ("latest", "daily", "intraday", "manifest_shard") else None
         if sym is not None and not safe_symbol(sym):
             return None
         year = int(m.group(2)) if kind == "daily" else None
@@ -250,12 +267,18 @@ def classify_path(rel):
 
 # Tope de tamaño por tipo de fichero (bytes, sin comprimir) y total del sitio. Los topes salen de las mediciones de `tests/test_feed_v2.py`
 # con holgura; el validador los hace cumplir.
+# manifest_root: ~105 B por símbolo (huella del trozo) + los globales: 600 KB dan para ~5.500 símbolos. manifest_shard: ≤ 12 ficheros por símbolo
+# (10 años + latest + intradía) a ~120 B cada uno (~1,5 KB); 4 KB deja margen sin dejar pasar un trozo desbocado.
 MAX_BYTES = {
     "index": 120_000, "manifest": 600_000, "latest": 8_000, "daily": 90_000, "intraday": 60_000,
     "crypto": 400_000, "macro": 250_000, "news": 120_000, "health": 200_000,
+    "manifest_root": 600_000, "manifest_shard": 4_000,
 }
 MAX_SITE_BYTES = 120_000_000
 MAX_SITE_FILES = 12_000
+# El validador avisa (::warning:: en el log, no bloquea ni manda /fail a Healthchecks) cuando un tope pasa de esta fracción: MAX_BYTES de cada tipo (el
+# fichero más grande), MAX_SITE_FILES, MAX_SITE_BYTES y MAX_REGISTRY_SYMBOLS.
+HEADROOM_WARN_FRACTION = 0.5
 # Años de histórico diario que se conservan por símbolo (los más antiguos se podan: cada año es un fichero que hay que volver a incluir
 # en el artefacto de Pages en cada run).
 HISTORY_YEARS = 10

@@ -22,8 +22,9 @@ alternative.me, CoinGecko, RSS):
     (GBp frente a GBP), el símbolo NO se publica en este run.
   * Además: cripto (CoinGecko, hasta 250 por lote), macro (FX, tipos, IPC, VIX, Fear & Greed, calendario), noticias y salud del run.
 
-Salida (todo bajo --out): index.json, s/<SYM>/{latest.json,d/<AAAA>.json,i.json}, crypto/latest.json, macro.json, news.json, health.json y
-manifest.json (ruta -> bytes + sha256 de todo lo anterior). El workflow lo valida con `sanity_check_v2.py` y lo publica con deploy-pages.
+Salida (todo bajo --out): index.json, s/<SYM>/{latest.json,d/<AAAA>.json,i.json}, crypto/latest.json, macro.json, news.json, health.json,
+manifest.json (formato 1: ruta -> bytes + sha256 de todo lo anterior) y, aditivo desde MANIFEST_ESCALA, manifest-root.json + s/<SYM>/manifest.json
+(formato 2: el mismo contenido partido por símbolo). El workflow lo valida con `sanity_check_v2.py` y lo publica con deploy-pages.
 """
 import argparse
 import hashlib
@@ -769,17 +770,39 @@ class Run:
         }
         self.emit("health.json", doc)
 
+    def _digest(self, rel):
+        with open(os.path.join(self.out, *rel.split("/")), "rb") as f:
+            data = f.read()
+        return {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
+
     def build_manifest(self):
+        """Manifiesto de formato 1 (`manifest.json`, el de siempre) y de formato 2 (`manifest-root.json` + `s/<SYM>/manifest.json`, aditivo). Los dos
+        describen los mismos ficheros de DATOS; ningún manifiesto se lista a sí mismo ni a los otros."""
         files = {}
         total = 0
         for rel in sorted(self.written):
-            p = os.path.join(self.out, *rel.split("/"))
-            with open(p, "rb") as f:
-                data = f.read()
-            files[rel] = {"bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}
-            total += len(data)
+            if c.classify_path(rel)[0] in c.MANIFEST_KINDS:
+                continue
+            files[rel] = self._digest(rel)
+            total += files[rel]["bytes"]
         self.emit("manifest.json", {"schema": c.SCHEMA, "generated_at": self.generated_at, "total_bytes": total, "files": files})
+        self.build_sharded_manifest(files, total)
         return total
+
+    def build_sharded_manifest(self, files, total):
+        """Formato 2. Un trozo por símbolo con ficheros, SIN generated_at (mismos ficheros => mismos bytes => misma huella en la raíz: el cliente solo pide
+        los trozos que cambiaron). La raíz lleva los ficheros globales y la huella (bytes + sha256) de cada trozo."""
+        glob, by_sym = {}, {}
+        for rel, v in files.items():                                       # `files` ya va ordenado por ruta: salida determinista
+            sym = c.classify_path(rel)[1]
+            (by_sym.setdefault(sym, {}) if sym else glob)[rel] = v
+        symbols = {}
+        for sym in sorted(by_sym):
+            rel = c.shard_path(sym)
+            self.emit(rel, {"schema": c.SCHEMA, "manifest_format": c.MANIFEST_FORMAT, "s": sym, "files": by_sym[sym]})
+            symbols[sym] = self._digest(rel)
+        self.emit(c.MANIFEST_ROOT, {"schema": c.SCHEMA, "manifest_format": c.MANIFEST_FORMAT, "generated_at": self.generated_at, "total_bytes": total,
+                                    "files": glob, "symbols": symbols})
 
 
 _LINK_OK_RE = re.compile(r"^https?://[^\s<>\"'\x00-\x1f\x7f]{1,990}$", re.I)

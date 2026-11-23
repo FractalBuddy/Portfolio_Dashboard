@@ -101,10 +101,15 @@ def listing(d):
 def test_modo_full_baja_todo_y_verifica(served, tmp_path):
     s, pub = served
     state, n, size = dl(s, tmp_path)
-    assert state == "ok" and listing(tmp_path / "dest") == listing(pub) and n == len(listing(pub))
-    for rel in listing(pub):
+    # REQUISITO CAMBIADO (MANIFEST_ESCALA): «full» baja todo lo que lista manifest.json (formato 1) más él mismo; los manifiestos de formato 2
+    # (manifest-root.json, s/<SYM>/manifest.json) no están listados y no se bajan: el generador los rehace en cada run.
+    v2 = {"manifest_root", "manifest_shard"}
+    want = [r for r in listing(pub) if c.classify_path(r)[0] not in v2]
+    assert len(want) < len(listing(pub))                                                # el sitio publicado SÍ lleva formato 2
+    assert state == "ok" and listing(tmp_path / "dest") == want and n == len(want)
+    for rel in want:
         assert (tmp_path / "dest" / rel).read_bytes() == (pub / rel).read_bytes()
-    assert size == sum(os.path.getsize(pub / r) for r in listing(pub))
+    assert size == sum(os.path.getsize(pub / r) for r in want)
 
 
 def test_modo_validate_solo_manifest_latest_y_dos_ultimos_anos(served, tmp_path):
