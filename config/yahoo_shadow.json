@@ -4,7 +4,7 @@
  "gate_equal_pct": 95,
  "equal_bp": 1,
  "max_bp": 10,
- "slots_utc": [[5, 10], [19, 24]],
+ "slots_utc": [[0, 12], [12, 24]],
  "max_reads_per_day": 2,
  "max_requests_per_run": 60,
  "history_period": "5d",

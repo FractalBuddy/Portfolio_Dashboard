@@ -223,7 +223,7 @@ Los **tres últimos pasos** de `personal-full.yml`, **después** de publicar, mi
 artefactos) y no cambia lo que ve ningún usuario.
 
 * **Interruptor y parámetros**: `config/yahoo_shadow.json` (versionado; no es una variable del repo). `enabled: false` (o revertir el commit que lo puso a `true`)
-  la apaga. Además: franjas UTC (`slots_utc`, por defecto 05-10 y 19-24: en la práctica los runs de 06:38 y 21:38), lecturas por día, tope propio de
+  la apaga. Además: franjas UTC (`slots_utc`, por defecto 00-12 y 12-24: como mucho una lectura por mitad del día natural UTC, ver S-01 en `auditorias/FIXES_REVISION_PUBLICO.md`), lecturas por día, tope propio de
   peticiones por run (`max_requests_per_run`, ≤ 80), umbrales de la puerta y el **canario** (`canary_isin`, que tiene que ser un ISIN de la lista genérica pública).
 * **Qué pide a Yahoo**: el canario primero (si falla, nada más) y, por fondo, una búsqueda por ISIN y un histórico de 5 días sin ajustar, con la misma pausa
   (≥ 1 s) y la misma parada ante un 429 que la sonda de fondos. Solo se aceptan símbolos `0P…` cuyo nombre en Yahoo cuadre con el del fondo; si no, «sin emparejar».

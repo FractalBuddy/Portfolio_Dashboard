@@ -25,7 +25,8 @@ def test_la_configuracion_del_repo_es_valida_y_la_sombra_queda_encendida():
     cfg, problem = ys.load_config(CFG, GEN)
     assert problem is None and cfg["enabled"] is True
     assert cfg["min_business_days"] == 10 and cfg["equal_bp"] == 1 and cfg["max_bp"] == 10 and cfg["gate_equal_pct"] == 95       # D7 A
-    assert cfg["slots_utc"] == [[5, 10], [19, 24]] and cfg["max_reads_per_day"] == 2                                              # D6 A
+    # REQUISITO CAMBIADO (revisión nov-2026, S-01): franjas 00-12 y 12-24 UTC (antes 05-10 y 19-24, que no cuadraban con la hora real de los runs).
+    assert cfg["slots_utc"] == [[0, 12], [12, 24]] and cfg["max_reads_per_day"] == 2                                              # D6 A
     assert cfg["history_period"] == "5d" and cfg["canary_name"]          # el nombre del canario sale de la lista genérica pública
 
 

@@ -92,7 +92,8 @@ def test_el_libro_se_escribe_tras_una_lectura_y_solo_lleva_contadores(tmp_path, 
 
 
 def test_fuera_de_franja_no_lee_ni_escribe_el_libro_pero_ensena_la_puerta(tmp_path, capsys):
-    w = World(tmp_path, capsys).run(at(date(2026, 11, 24), 13), date(2026, 11, 23))           # el run de las 13:38
+    # S-01: la configuración del repo ya cubre las 24 h; el mecanismo «fuera de franja» se prueba con las franjas viejas, explícitas.
+    w = World(tmp_path, capsys, {"slots_utc": [[5, 10], [19, 24]]}).run(at(date(2026, 11, 24), 13), date(2026, 11, 23))
     assert w.y.calls == [] and "ledger=written" not in w.gh and not w.ledger.exists()
     assert "no se lee en este run (fuera de franja)" in w.out and "puerta D7: EN CURSO" in w.out and "puerta D7" in w.summary
 
