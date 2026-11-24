@@ -513,7 +513,7 @@ def test_supabase_keepalive_estructura():
     assert wf["concurrency"]["cancel-in-progress"] is False
     assert wf["jobs"]["ping"]["timeout-minutes"] <= 5
     env = step(wf, "ping", SB_STEP)["env"]
-    assert env == {"SB_URL": "${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}", "SB_KEY": "${{ secrets.SUPABASE_PUBLISHABLE_KEY || vars.SUPABASE_PUBLISHABLE_KEY }}",
+    assert env == {"SB_URL": "${{ secrets.SUPABASE_URL }}", "SB_KEY": "${{ secrets.SUPABASE_PUBLISHABLE_KEY }}",          # R-05: solo secretos
                    "HC": "${{ secrets.HC_SUPABASE_URL }}"}
 
 
@@ -846,7 +846,7 @@ PN_WATCH, PN_BUILD, PN_PUBLISH = ("Read personal watch list (token, stdlib only)
                                   "Publish personal NAV (token, stdlib only)")
 PF_BUILD, PF_PUBLISH = "Build personal payloads (third-party code, NO token)", "Publish personal payloads (token, stdlib only)"
 PN_FB_BUILD, PN_FB_PUBLISH = "Fallback - build full personal payloads (third-party code, NO token)", "Fallback - publish full personal payloads (token, stdlib only)"
-PN_ENV = {"SUPABASE_URL": "${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}", "SUPABASE_PUBLISHABLE_KEY": "${{ secrets.SUPABASE_PUBLISHABLE_KEY || vars.SUPABASE_PUBLISHABLE_KEY }}",
+PN_ENV = {"SUPABASE_URL": "${{ secrets.SUPABASE_URL }}", "SUPABASE_PUBLISHABLE_KEY": "${{ secrets.SUPABASE_PUBLISHABLE_KEY }}",          # R-05: solo secretos
           "PERSONAL_FEED_TOKEN": "${{ secrets.PERSONAL_FEED_TOKEN }}"}
 PERSONAL = ((PN, "personal-nav"), (PF, "personal-full"))
 
@@ -928,7 +928,7 @@ def test_personal_nav_el_token_solo_en_los_pasos_de_biblioteca_estandar():
         if s["name"] not in (PN_WATCH, PN_PUBLISH, PN_FB_PUBLISH, "Heartbeat (optional)"):
             assert "PERSONAL_FEED_TOKEN" not in json.dumps(s) and "SUPABASE" not in json.dumps(s), s["name"]
     text = (WF / PN).read_text(encoding="utf-8")
-    assert text.count("secrets.PERSONAL_FEED_TOKEN") == 3 and text.count("vars.SUPABASE_PUBLISHABLE_KEY") == 3
+    assert text.count("secrets.PERSONAL_FEED_TOKEN") == 3 and text.count("secrets.SUPABASE_PUBLISHABLE_KEY") == 3 and "vars.SUPABASE" not in text
     assert "service_role" not in text and "sb_secret" not in text
 
 

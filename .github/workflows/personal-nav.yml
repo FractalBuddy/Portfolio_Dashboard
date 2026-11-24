@@ -61,8 +61,8 @@ jobs:
       - name: Read personal watch list (token, stdlib only)
         id: watch
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}
-          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY || vars.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
           PERSONAL_FEED_TOKEN: ${{ secrets.PERSONAL_FEED_TOKEN }}
         run: python3 -S scripts/personal_v2.py watch --nav-only --dir "$RUNNER_TEMP/personal" --github-output
 
@@ -81,8 +81,8 @@ jobs:
         id: publish
         if: ${{ steps.watch.outputs.work == 'true' }}
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}
-          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY || vars.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
           PERSONAL_FEED_TOKEN: ${{ secrets.PERSONAL_FEED_TOKEN }}
           PERSONAL_NAV_FALLBACK_FULL: ${{ vars.PERSONAL_NAV_FALLBACK_FULL }}
         run: python3 -S scripts/personal_v2.py publish --nav-only --dir "$RUNNER_TEMP/personal"
@@ -95,8 +95,8 @@ jobs:
       - name: Fallback - publish full personal payloads (token, stdlib only)
         if: ${{ steps.publish.outputs.fallback_full == 'true' }}
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}
-          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY || vars.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
           PERSONAL_FEED_TOKEN: ${{ secrets.PERSONAL_FEED_TOKEN }}
         run: python3 -S scripts/personal_v2.py publish --dir "$RUNNER_TEMP/personal"
 

@@ -1,7 +1,8 @@
 """Bloque 4 (AU-02): la URL y la clave publicable de Supabase no pueden salir en claro en los logs públicos de Actions.
 
-Los valores se leen con `${{ secrets.NAME || vars.NAME }}`: hoy funciona con las variables; cuando el dueño cree los secretos con el mismo nombre,
-GitHub los enmascara en el bloque `env:` de cada paso. Y ningún workflow puede imprimirlos ni exportarlos de otra forma."""
+REQUISITO CAMBIADO (revisión nov-2026, R-05): los valores se leen SOLO con `${{ secrets.NAME }}` (GitHub los enmascara en el bloque `env:` de cada paso).
+El respaldo `|| vars.NAME` se retira: si algún día se guardaran como variables, la URL saldría en claro en el log público. Y ningún workflow puede
+imprimirlos ni exportarlos de otra forma."""
 import pathlib
 import re
 
@@ -23,7 +24,7 @@ def supabase_leaks(text):
     for m in EXPR.finditer(text):
         inner = " ".join(m.group(1).split())
         for n in NAMES:
-            if re.search(r"\b(?:vars|secrets)\.%s\b" % n, inner) and inner != "secrets.%s || vars.%s" % (n, n):
+            if re.search(r"\b(?:vars|secrets)\.%s\b" % n, inner) and inner != "secrets.%s" % n:
                 out.append("expresión no enmascarable: ${{ %s }}" % inner)
     wf = yaml.safe_load(text)
     for jname, job in (wf.get("jobs") or {}).items():
@@ -57,14 +58,13 @@ def test_ningun_workflow_deja_salir_la_url_ni_la_clave_de_supabase(name):
     assert supabase_leaks((WF / name).read_text(encoding="utf-8")) == []
 
 
-def test_los_workflows_que_usan_supabase_son_los_esperados_y_todos_leen_secret_o_var():
+def test_los_workflows_que_usan_supabase_son_los_esperados_y_todos_leen_solo_secretos():
     usan = {n for n in _workflows() if re.search(r"\b(?:vars|secrets)\.SUPABASE_", (WF / n).read_text(encoding="utf-8"))}
     assert usan == USER_WF
     for n in usan:
         text = (WF / n).read_text(encoding="utf-8")
-        assert "vars.SUPABASE_URL }}" not in text.replace("secrets.SUPABASE_URL || vars.SUPABASE_URL }}", "")
-        assert "vars.SUPABASE_PUBLISHABLE_KEY }}" not in text.replace("secrets.SUPABASE_PUBLISHABLE_KEY || vars.SUPABASE_PUBLISHABLE_KEY }}", "")
-        assert "${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}" in text and "${{ secrets.SUPABASE_PUBLISHABLE_KEY || vars.SUPABASE_PUBLISHABLE_KEY }}" in text
+        assert not re.search(r"\bvars\.SUPABASE_", text), n                     # R-05: ni respaldo ni variable suelta
+        assert "${{ secrets.SUPABASE_URL }}" in text and "${{ secrets.SUPABASE_PUBLISHABLE_KEY }}" in text
 
 
 def test_ni_publish_feed_v2_ni_update_data_ni_ci_tocan_supabase():
@@ -73,21 +73,22 @@ def test_ni_publish_feed_v2_ni_update_data_ni_ci_tocan_supabase():
 
 
 # ---- controles negativos: el detector SÍ encuentra cada forma de fuga (YAML sintético) ----
-def _wf(run, env="SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}"):
+def _wf(run, env="SUPABASE_URL: ${{ secrets.SUPABASE_URL }}"):
     return "on: workflow_dispatch\njobs:\n  j:\n    runs-on: x\n    steps:\n      - name: s\n        env:\n          %s\n        run: |\n          %s\n" % (env, run.replace("\n", "\n          "))
 
 
 @pytest.mark.parametrize("env,run,motivo", [
     ("SUPABASE_URL: ${{ vars.SUPABASE_URL }}", "true", "no enmascarable"),
-    ("SUPABASE_URL: ${{ secrets.SUPABASE_URL }}", "true", "no enmascarable"),
+    ("SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}", "true", "no enmascarable"),        # R-05: el respaldo viejo ya es una fuga
+    ("SB_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY || vars.SUPABASE_PUBLISHABLE_KEY }}", "true", "no enmascarable"),
     ("SUPABASE_URL: ${{ vars.SUPABASE_URL || secrets.SUPABASE_URL }}", "true", "no enmascarable"),
-    ("X: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}", 'echo "$SUPABASE_URL"', "imprime"),
-    ("X: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}", 'echo "url=$SUPABASE_URL" >> "$GITHUB_OUTPUT"', "imprime|exporta"),
-    ("X: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}", 'echo "SB=$SB_KEY" >> "$GITHUB_ENV"', "imprime|exporta"),
-    ("X: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}", 'echo "${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}"', "interpolación"),
-    ("X: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}", 'set -x\ncurl "$SUPABASE_URL"', "set -x"),
-    ("X: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}", 'curl -v -H "apikey: $SUPABASE_PUBLISHABLE_KEY" "$SUPABASE_URL"', "verboso"),
-    ("X: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}", "env", "entorno"),
+    ("X: ${{ secrets.SUPABASE_URL }}", 'echo "$SUPABASE_URL"', "imprime"),
+    ("X: ${{ secrets.SUPABASE_URL }}", 'echo "url=$SUPABASE_URL" >> "$GITHUB_OUTPUT"', "imprime|exporta"),
+    ("X: ${{ secrets.SUPABASE_URL }}", 'echo "SB=$SB_KEY" >> "$GITHUB_ENV"', "imprime|exporta"),
+    ("X: ${{ secrets.SUPABASE_URL }}", 'echo "${{ secrets.SUPABASE_URL }}"', "interpolación"),
+    ("X: ${{ secrets.SUPABASE_URL }}", 'set -x\ncurl "$SUPABASE_URL"', "set -x"),
+    ("X: ${{ secrets.SUPABASE_URL }}", 'curl -v -H "apikey: $SUPABASE_PUBLISHABLE_KEY" "$SUPABASE_URL"', "verboso"),
+    ("X: ${{ secrets.SUPABASE_URL }}", "env", "entorno"),
 ])
 def test_control_negativo_el_detector_encuentra_la_fuga(env, run, motivo):
     leaks = supabase_leaks(_wf(run, env))

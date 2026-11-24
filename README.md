@@ -125,8 +125,8 @@ Además, en cada run: 1 llamada a CoinGecko (250 monedas), ~5 a FRED (con clave)
 2. **Settings → Environments → github-pages**: ese entorno suele restringir el despliegue a la rama por defecto (`main`); si lanzas el workflow desde otra rama, hay que permitirla ahí.
 3. *(Opcional)* **Secrets** (Settings → Secrets and variables → Actions): `HC_UPDATE_V2_URL` (check propio de Healthchecks; recomendado, para que el feed viejo y el nuevo
    no se tapen entre sí; si no existe se usa `HC_UPDATE_URL`) y `PERSONAL_FEED_TOKEN` (lo usa solo `personal-nav.yml`; ver «Datos propios»). `FRED_API_KEY` ya existe y se reutiliza.
-4. **`SUPABASE_URL` y `SUPABASE_PUBLISHABLE_KEY`**: los workflows las leen con `secrets.X || vars.X`. Hoy existen como *variables* (salen en **claro** en el log público del run); lo recomendado es crearlas como **secretos** con el mismo nombre
-   (GitHub los enmascara), borrar después las variables y rotar la clave publicable (runbook). Opcional: variable `FEED_V2_BASE_URL` (dominio propio, URL de la carpeta `/v2`, https).
+4. **`SUPABASE_URL` y `SUPABASE_PUBLISHABLE_KEY`**: **solo Secrets** (Settings → Secrets and variables → Actions → *Secrets*). Los workflows las leen con `secrets.X` y nada más
+   (revisión nov-2026, R-05: se quitó el respaldo `|| vars.X`, porque una *variable* sale en **claro** en el log público del run). Si aún existen como *variables*, bórralas: ya no se usan. Opcional: variable `FEED_V2_BASE_URL` (dominio propio, URL de la carpeta `/v2`, https).
 5. **Antes del primer run**, contrasta los SHA de las dos acciones nuevas (no se pudieron comprobar al escribir el workflow, BE-19):
    `gh api repos/actions/upload-pages-artifact/git/ref/tags/v3.0.1 --jq .object.sha` (debe ser `56afc609…`) y `gh api repos/actions/deploy-pages/git/ref/tags/v4.0.5 --jq .object.sha`
    (`d6db9016…`). Si Dependabot propone versiones nuevas, mejor.
@@ -179,7 +179,7 @@ Lo que sigue describe sobre todo el job completo (`personal-nav.yml` lo era ante
   **último día hábil esperado** (el último día de lunes a viernes anterior a la fecha UTC del run: el lunes, el viernes; festivos desconocidos => se sigue visitando la ficha, nunca se da por «al día» por error).
   Sin ese campo, con una fecha inválida o futura, se visita la ficha (fallo cerrado). **Necesita que el SQL de `personal_watch_for_backend` devuelva `prev_nav_date_iso`** (ver el contrato §5); hasta entonces todo sigue como antes;
 * **gating**: igual que el resto, el cron solo corre con la variable de repo `FEED_V2_ENABLED = true` (el lanzamiento manual, *Run workflow*, funciona siempre), y el job solo corre sobre `refs/heads/main`;
-* **variables y secretos que usa**: `SUPABASE_URL` y `SUPABASE_PUBLISHABLE_KEY` se leen con `secrets.X || vars.X` (secreto si existe, variable si no; **recomendado: secretos**, que GitHub enmascara en el log público);
+* **variables y secretos que usa**: `SUPABASE_URL` y `SUPABASE_PUBLISHABLE_KEY` **solo como secretos** (`secrets.X`, que GitHub enmascara en el log público; sin respaldo a variables, R-05);
   variables `FEED_V2_ENABLED` y (opcional, solo NAV) `PERSONAL_NAV_FALLBACK_FULL`; secretos `PERSONAL_FEED_TOKEN` y (opcional, solo NAV)
   `HEALTHCHECK_PERSONAL_NAV_URL`. El token va solo en los pasos `watch` y `publish`, que ejecutan únicamente biblioteca
   estándar con `python3 -S`; el paso `build`, con código de terceros, no lo recibe;
@@ -396,8 +396,8 @@ publicable de Supabase (arriba) y, si algún día se usa el disparador externo, 
   (404, 540... un proyecto pausado) fallan tras 3 intentos. Aborta si la clave configurada empieza por `sb_secret_`,
   contiene `service_role` o es un JWT con ese rol. Los logs solo muestran códigos HTTP.
   **Configuración** (Settings -> Secrets and variables -> Actions):
-  * pestaña *Secrets* (recomendado) o, si aún no existen, *Variables*: `SUPABASE_URL` (p. ej. `https://<ref>.supabase.co`) y `SUPABASE_PUBLISHABLE_KEY`
-    (`sb_publishable_...`; es pública por diseño, pero como *variable* sale en claro en el log; **nunca** pongas aquí la `sb_secret_` ni la `service_role`). Si existen las dos, manda el secreto;
+  * pestaña *Secrets* (**solo** ahí; las *Variables* ya no se leen, R-05): `SUPABASE_URL` (p. ej. `https://<ref>.supabase.co`) y `SUPABASE_PUBLISHABLE_KEY`
+    (`sb_publishable_...`; es pública por diseño, pero como *variable* saldría en claro en el log; **nunca** pongas aquí la `sb_secret_` ni la `service_role`);
   * pestaña *Secrets* (opcional): `HC_SUPABASE_URL`, URL de ping de un check propio de Healthchecks.io (periodo 3 días
     con gracia de al menos 1 día). Si falta, está vacío o no tiene la forma `https://hc-ping.com/...` (se limpian antes espacios, saltos de línea y comillas envolventes), el workflow solo emite un `::warning::` (sin el valor) y sigue sin avisar.
 

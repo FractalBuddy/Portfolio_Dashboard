@@ -371,7 +371,7 @@ def test_workflow_probe_solo_manual_sin_escritura_y_con_token_solo_al_leer():
     assert watch["run"].startswith("python3 -S scripts/personal_v2.py watch ") and "--github-output" not in watch["run"]
     assert set(watch["env"]) == {"SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "PERSONAL_FEED_TOKEN"}
     assert set(probe_step["env"]) == {"MAX_FUNDS", "CACHE_HEADERS", "TRY_XHR"} and "nav_probe.py" in probe_step["run"]
-    assert text.count("secrets.PERSONAL_FEED_TOKEN") == 1 and text.count("vars.SUPABASE_PUBLISHABLE_KEY") == 1
+    assert text.count("secrets.PERSONAL_FEED_TOKEN") == 1 and text.count("secrets.SUPABASE_PUBLISHABLE_KEY") == 1 and "vars.SUPABASE" not in text
     names = [s["name"] for s in steps]
     assert names.index(watch["name"]) < names.index(probe_step["name"])
     for s in steps:

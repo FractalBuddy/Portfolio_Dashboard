@@ -51,8 +51,8 @@ jobs:
 
       - name: Read personal watch list (token, stdlib only)
         env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL || vars.SUPABASE_URL }}
-          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY || vars.SUPABASE_PUBLISHABLE_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
           PERSONAL_FEED_TOKEN: ${{ secrets.PERSONAL_FEED_TOKEN }}
         run: python3 -S scripts/personal_v2.py watch --dir "$RUNNER_TEMP/personal"
 
