@@ -655,7 +655,10 @@ class Run:
                                         "sparkline": "false", "price_change_percentage": "24h,7d"})
                 if page < pages:
                     fm._nap(2.5)
-            coins = normalize_coins(rows[:CRYPTO_TOP_N], self.today)
+            tiny = []
+            coins = normalize_coins(rows[:CRYPTO_TOP_N], self.today, dropped=tiny)
+            if tiny:
+                log("  ! cripto: %d monedas descartadas por precio < %g USD (redondeado a 8 decimales sería 0): %s" % (len(tiny), CRYPTO_MIN_PRICE, tiny[:10]))
             if len(coins) < 20:
                 raise ValueError("CoinGecko devolvió muy pocas monedas útiles (%d)" % len(coins))
             self.emit(rel, {"schema": c.SCHEMA, "generated_at": self.generated_at, "currency": "USD", "unit": "currency",
@@ -849,8 +852,14 @@ def _pct(v):
     return round(f, 2) if f is not None and abs(f) <= 1000 else None
 
 
-def normalize_coins(rows, today):
-    """Filas de CoinGecko /coins/markets (no fiables) -> monedas con campos validados. Descarta las que no pasan (id/símbolo/precio raros)."""
+# Revisión nov-2026 (F-01): el precio se publica redondeado a 8 decimales; por debajo de 5e-9 USD quedaría en 0.0, que el validador rechaza (price > 0) y
+# bloquearía TODO el sitio. Esas monedas se descartan (como las de precio <= 0) y se avisa en el log; no se publica 0.
+CRYPTO_MIN_PRICE = 5e-9
+
+
+def normalize_coins(rows, today, dropped=None):
+    """Filas de CoinGecko /coins/markets (no fiables) -> monedas con campos validados. Descarta las que no pasan (id/símbolo/precio raros).
+    `dropped` (lista opcional): ahí se añaden los ids de las descartadas por un precio que redondeado a 8 decimales sería 0."""
     out = []
     for r in rows:
         if not isinstance(r, dict):
@@ -862,6 +871,10 @@ def normalize_coins(rows, today):
             continue
         name = fm._plain_text(r.get("name"), 60)
         if not name:
+            continue
+        if round(price, 8) <= 0:                                             # < CRYPTO_MIN_PRICE: publicarla sería un 0.0 (ver arriba)
+            if dropped is not None:
+                dropped.append(cid)
             continue
         rank = r.get("market_cap_rank")
         cap, vol = _num(r.get("market_cap"), None), _num(r.get("total_volume"), None)
