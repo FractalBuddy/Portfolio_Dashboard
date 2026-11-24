@@ -200,15 +200,62 @@ def responder(base=OLD, fresh=NEW, extra="", xhr=None, seen=None):
     return get
 
 
-def test_probe_imprime_fecha_y_valor_por_variante_y_senala_la_ganadora(tmp_path):
+# REQUISITO CAMBIADO (revisión nov-2026, R-02): antes se imprimía «NAV <fecha> = <valor>». Un NAV con su fecha identifica el fondo entre los de iShares
+# y el log es PÚBLICO: ahora solo la fecha y si el valor coincide con el de la petición base (sí/no), nunca el número.
+def test_probe_imprime_fecha_y_si_el_valor_coincide_con_la_base_y_senala_la_ganadora(tmp_path):
     out = probe(tmp_path, responder(base="27/Oct/2026", fresh=NEW))
-    assert re.search(r"#1 base\s+HTTP 200\s+\d+ KB\s+NAV 27/Oct/2026 = 12\.48", out)
-    assert re.search(r"#1 fresh\s+HTTP 200\s+\d+ KB\s+NAV 28/Oct/2026 = 12\.48", out)
+    assert re.search(r"#1 base\s+HTTP 200\s+\d+ KB\s+NAV 27/Oct/2026 \(valor de referencia\)", out)
+    assert re.search(r"#1 fresh\s+HTTP 200\s+\d+ KB\s+NAV 28/Oct/2026, valor = base: sí", out)
+    assert nav_value_leaks(out, (12.48,)) == []
     for v in ("nocache", "bust", "browser", "browser_fresh", "passthrough", "base_again", "alt:uk", "alt:de", "alt:pro"):
         assert re.search(r"#1 %s\s+HTTP" % re.escape(v), out), v
     assert "age=5400" in out and "cache-control=max-age=7200" in out                       # cabeceras de caché (no identifican nada)
     assert "RESUMEN: fecha de NAV más reciente 28/Oct/2026" in out and "<-- la base va por detrás" in out
     assert re.search(r"VEREDICTO: .*bust x1", out) and "fresh x1" in out
+
+
+def nav_value_leaks(out, values):
+    """Líneas del log que llevan alguno de los valores de NAV (con punto o coma decimal, con 2 a 6 decimales). Lista vacía = bien."""
+    pats = []
+    for v in values:
+        for d in range(2, 7):
+            s = "%.*f" % (d, v)
+            pats += [s, s.replace(".", ",")]
+    return [ln for ln in out.splitlines() if any(re.search(r"(?<![0-9])%s(?![0-9])" % re.escape(p), ln) for p in pats)]
+
+
+def test_r02_el_log_no_lleva_ningun_valor_de_nav_en_ninguna_variante_ni_xhr(tmp_path):
+    xhr = json.dumps({"navData": {"navAsOf": NEW, "nav": 13.64}})
+    extra = ' var u="/ch/individual/en/products/100001/ishares-developed-world-index-fund-ie/1521942788811.ajax?fileType=json&tab=overview";'
+    out = probe(tmp_path, responder(base="27/Oct/2026", fresh=NEW, extra=extra, xhr=xhr))
+    assert "NAV 27/Oct/2026" in out and "NAV 28/Oct/2026" in out                 # las fechas sí salen
+    assert nav_value_leaks(out, (12.48, 13.64)) == []
+    assert not re.search(r"NAV \S+ *= *[0-9]", out)                                 # la forma vieja «NAV <fecha> = <valor>»
+
+
+def test_r02_valor_distinto_de_la_base_dice_no_y_sin_base_lo_dice(tmp_path):
+    def get(url, headers):
+        if "cb=" in url:
+            return 200, {}, html(NEW).replace("12.48", "12.51")
+        return 200, {}, html("27/Oct/2026")
+    out = probe(tmp_path, get, try_xhr=False)
+    assert re.search(r"#1 fresh\s+.*NAV 28/Oct/2026, valor = base: no", out) and re.search(r"#1 nocache\s+.*valor = base: sí", out)
+    assert nav_value_leaks(out, (12.48, 12.51)) == []
+
+    def sin_base(url, headers):
+        if "cb=" in url:
+            return 200, {}, html(NEW)
+        return 200, {}, "<html>Please verify you are human</html>"
+    (tmp_path / "b").mkdir()
+    out = probe(tmp_path / "b", sin_base, try_xhr=False)
+    assert re.search(r"#1 fresh\s+.*NAV 28/Oct/2026, valor = base: sin base", out) and nav_value_leaks(out, (12.48,)) == []
+
+
+def test_r02_control_negativo_el_detector_encuentra_un_valor_impreso():
+    assert nav_value_leaks("#1 base HTTP 200 10 KB NAV 27/Oct/2026 = 12.48", (12.48,))
+    assert nav_value_leaks("#1 xhr1 NAV 28/Oct/2026 = 13,640", (13.64,))
+    assert nav_value_leaks("#1 base HTTP 200 10 KB NAV 27/Oct/2026 (valor de referencia)  [age=5400]", (12.48,)) == []
+    assert nav_value_leaks("x 112.480 y", (12.48,)) == []                       # no es el valor: otro número que lo contiene
 
 
 def test_probe_sin_desfase_lo_dice(tmp_path):
@@ -230,7 +277,8 @@ def test_probe_descubre_y_prueba_la_xhr_y_la_considera_mas_fresca(tmp_path):
     extra = ' var u="/ch/individual/en/products/100001/ishares-developed-world-index-fund-ie/1521942788811.ajax?fileType=json&tab=overview";'
     out = probe(tmp_path, responder(base="27/Oct/2026", fresh="27/Oct/2026", extra=extra, xhr=xhr))
     assert "XHR/JSON citados en el HTML de la ficha: 1" in out
-    assert re.search(r"#1 xhr1\s+/ch/individual/en/products/\*/\*/1521942788811\.ajax\?fileType=json&tab=overview HTTP 200.*NAV 28/Oct/2026 = 13\.64", out)
+    assert re.search(r"#1 xhr1\s+/ch/individual/en/products/\*/\*/1521942788811\.ajax\?fileType=json&tab=overview HTTP 200.*NAV 28/Oct/2026 \(valor = base: no\)", out)
+    assert nav_value_leaks(out, (12.48, 13.64)) == []                    # REQUISITO CAMBIADO (R-02): antes «NAV 28/Oct/2026 = 13.64»
     assert "RESUMEN: fecha de NAV más reciente 28/Oct/2026; la dan: xhr1" in out and "VEREDICTO: variantes que dan una fecha más reciente que la base (nº de fichas): xhr1 x1" in out
 
 

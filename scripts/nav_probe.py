@@ -6,14 +6,15 @@ DIAGNÓSTICO MANUAL del desfase de fecha del NAV: ¿por qué la ficha de iShares
     python  scripts/nav_probe.py --dir $RUNNER_TEMP/personal                  # este script (SIN token; solo LEE iShares; no escribe en ningún sitio)
 
 Para cada ficha del dueño (etiquetada #1, #2... en el orden de la lista; nunca ISIN, nombre ni URL) pide la página con varias variantes de la petición y escribe, por
-variante, la fecha del NAV y el valor que lee el parser. Variantes (ver fetch_market_data.ishares_request): base (la petición de siempre), nocache (Cache-Control/Pragma),
+variante, la fecha del NAV que lee el parser y si su VALOR coincide con el de la petición base (sí/no), nunca el número (R-02). Variantes (ver fetch_market_data.ishares_request): base (la petición de siempre), nocache (Cache-Control/Pragma),
 bust (parámetro único), fresh (ambas; es la que usa el scraper junto a base), browser / browser_fresh (User-Agent y cabeceras de navegador), passthrough
 (siteEntryPassthrough=true), base_again (la base repetida: ¿cambia entre dos peticiones seguidas?) y las MISMAS fichas en otros sitios de iShares (alt:uk, alt:de...).
 Además busca en el HTML de la ficha las peticiones XHR/JSON (*.ajax, *.json), las describe SIN identificadores (ruta sin id ni nombre de producto) y prueba si traen un NAV
 más fresco que el HTML (xhr1, xhr2...). Con las cabeceras de caché de cada respuesta (Age, Cache-Control...: no identifican nada) se ve si la copia viene de una caché.
 
-PRIVACIDAD: los logs de un repo público son públicos. Se imprimen etiquetas, códigos HTTP, tamaños, fechas y valores de NAV, y nombres de campos JSON de las XHR; nunca ISIN,
-nombres, URL, token ni clave. Todo lo que imprimen las funciones reutilizadas (citan ISIN) se descarta.
+PRIVACIDAD: los logs de un repo público son públicos. Se imprimen etiquetas, códigos HTTP, tamaños, fechas de NAV, si el valor coincide con la base (sí/no) y nombres de
+campos JSON de las XHR; nunca el VALOR del NAV (un NAV con su fecha identifica el fondo entre los de iShares; revisión nov-2026, R-02), ISIN, nombres, URL, token ni clave.
+Todo lo que imprimen las funciones reutilizadas (citan ISIN) se descarta.
 """
 import argparse
 import contextlib
@@ -219,6 +220,13 @@ def fmt_date(d):
     return d.strftime("%d/%b/%Y") if d else "-"
 
 
+def same_as_base(value, base_value):
+    """«sí» / «no» / «sin base»: el valor del NAV de una variante frente al de la petición base. Nunca devuelve el número."""
+    if base_value is None or value is None:
+        return "sin base" if base_value is None else "no"
+    return "sí" if abs(float(value) - float(base_value)) <= 1e-9 * max(1.0, abs(float(base_value))) else "no"
+
+
 def header_note(headers):
     got = ["%s=%s" % (k, headers[k][:48]) for k in KEEP_HEADERS if headers.get(k)]
     return ("  [" + " ".join(got) + "]") if got else ""
@@ -245,6 +253,7 @@ def run(directory, max_funds=4, show_headers=True, try_xhr=True, http_get=real_g
         tag = "#%d" % i
         results = {}                                           # etiqueta -> fecha de NAV (date) leída; para el resumen
         raw_base = None
+        base_value = None                                      # valor del NAV de la petición base: solo para comparar, NUNCA se imprime
         plan = [(v, "base" if v == "base_again" else v, f["url"]) for v in list(fm.ISHARES_VARIANTS) + ["base_again"]]
         plan += [(label, "base", u) for label, u in alt_urls(f["url"])]
         for label, variant, base_url in plan:
@@ -260,7 +269,11 @@ def run(directory, max_funds=4, show_headers=True, try_xhr=True, http_get=real_g
             r, n_tok, dates, isin_in = read_html_nav(text, f["isin"], today)
             if r:
                 results[label] = date.fromisoformat(r["nav_date_iso"]) if r.get("nav_date_iso") else None
-                line = "NAV %s = %s" % (r["nav_date"], r["price"])
+                if label == "base":
+                    base_value = r["price"]
+                    line = "NAV %s (valor de referencia)" % r["nav_date"]
+                else:
+                    line = "NAV %s, valor = base: %s" % (r["nav_date"], same_as_base(r["price"], base_value))
             else:
                 line = "NAV - (sin NAV legible; ISIN en la página: %s; «NAV as of» con fecha: %d)" % ("sí" if isin_in else "no", n_tok)
             extra = ""
@@ -284,7 +297,7 @@ def run(directory, max_funds=4, show_headers=True, try_xhr=True, http_get=real_g
                 best = max((c for c in cand if c[0]), default=None, key=lambda c: c[0])
                 if best:
                     results[label] = best[0]
-                found = ", ".join("%s = %s" % (fmt_date(d), n) for d, n in cand[:3]) or "sin NAV reconocible"
+                found = ", ".join("%s (valor = base: %s)" % (fmt_date(d), same_as_base(n, base_value)) for d, n in cand[:3]) or "sin NAV reconocible"
                 say("%s %-14s %s HTTP %s %6.0f KB  NAV %s%s%s" % (tag, label, shape(xurl), status, len(text) / 1024.0, found,
                                                                    ("  campos: " + ",".join(keys)) if keys and not cand else "", header_note(rh) if show_headers else ""))
                 sleep(pause)
