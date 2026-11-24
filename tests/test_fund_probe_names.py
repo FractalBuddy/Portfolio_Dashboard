@@ -211,11 +211,10 @@ def test_lista_de_nombres_tamano_gestoras_y_estructura():
 
 
 def test_lista_de_nombres_no_contiene_isin_ids_ni_urls_ni_nada_de_la_cartera():
-    from privacy_guard import CRYPTO_HASHES, PROXY_HASHES, hits
     text = CFG.read_text(encoding="utf-8")
     assert not re.search(r"\b[A-Z]{2}[A-Z0-9]{9}\d\b", text)               # forma de ISIN (cualquier país)
     assert not re.search(r"https?://|/products/\d|supabase|@", text, re.I)
-    assert hits(text, PROXY_HASHES) == [] and hits(text, CRYPTO_HASHES) == []
+    # lista privada del dueño: tests/test_privacidad_lista_privada.py (todo el árbol, lista desde el secreto PRIVATE_DENYLIST)
 
 
 def test_load_names_rechaza_entradas_invalidas(tmp_path):

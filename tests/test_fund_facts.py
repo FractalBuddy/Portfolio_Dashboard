@@ -80,7 +80,7 @@ def test_analitica_pide_historico_maximo_y_recorta_los_anuales_a_10_anos(monkeyp
     df = pd.DataFrame({"Close": [100 + i * 0.01 for i in range(len(idx))]}, index=idx)
     seen = {}
     monkeypatch.setattr(fm, "yf_history", lambda sym, **kw: seen.update(kw) or df)
-    a = fm.compute_fund_analytics("EUNL.DE")
+    a = fm.compute_fund_analytics("SYNW.DE")
     assert seen["period"] == "max"
     assert "10y" in a["period_returns"]                                           # antes con period="10y" faltaba (histórico < 10 años justos)
     ys = sorted(a["annual_returns"])

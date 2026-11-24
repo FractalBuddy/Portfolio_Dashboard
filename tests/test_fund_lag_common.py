@@ -191,7 +191,7 @@ def test_la_lista_no_tiene_isin_ni_nada_de_la_cartera_del_dueno():
     import privacy_guard as pg
     text = (ROOT / "config" / "fund_lag_tickers.json").read_text(encoding="utf-8")
     assert not pg.ISIN_WINDOW.search(text) and not re.search(r"\b[A-Z]{2}(?=[A-Z0-9]*\d)[A-Z0-9]{10}\b", text)
-    assert pg.hits(text, pg.PROXY_HASHES) == [] and pg.hits(text, pg.CRYPTO_HASHES) == []
+    # lista privada del dueño: tests/test_privacidad_lista_privada.py (todo el árbol, lista desde el secreto PRIVATE_DENYLIST)
     assert set(json.loads(text)[0]) == {"ticker", "kind"}                  # ni nombres, ni cantidades, ni nada más
 
 

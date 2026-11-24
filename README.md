@@ -259,8 +259,10 @@ cachés (jsDelivr) o forks no se pueden recuperar.
 1. El dashboard lee de v2 (equivalencias en el contrato) y los datos propios de Supabase. **Hecho en el backend (bloque H1):** v1 ya no publica `your_funds` ni `news.positions` con contenido; el cliente
    (build ≥ 28b) los ignora.
 2. Queda por borrar `update-data.yml`, la rama `data`, `sanity_check.py` y sus tests, y de `fetch_market_data.py` las listas de nicho de `STOCKS` y las funciones de v1 que v2 no usa. **El módulo se queda**:
-   `feed_v2.py` reutiliza su lógica de Yahoo, FRED, CoinGecko, RSS e iShares (y `personal_v2.py`, la de iShares). Los tests que comprobaban que el registro público no lleva nada del dueño ya no leen listas del código:
-   usan huellas (`tests/privacy_guard.py`).
+   `feed_v2.py` reutiliza su lógica de Yahoo, FRED, CoinGecko, RSS e iShares (y `personal_v2.py`, la de iShares). Los tests que comprobaban que el registro público no lleva nada del dueño ya no leen listas del código.
+   La lista privada (proxies de sus fondos, cripto idiosincrática) **no está en el repo** ni como huella: `tests/test_privacidad_lista_privada.py` la lee del secreto
+   de Actions `PRIVATE_DENYLIST` (o de una variable de entorno local con ese nombre; entradas separadas por comas) y barre todo el árbol. Sin el secreto (PR de forks,
+   Dependabot, local sin la variable) esa comprobación sale **NO EJECUTADO** («skipped» con el motivo y un `::warning::` en CI), nunca aprobada.
 3. Se recrea el repo (BE-09) si se quiere borrar el pasado.
 
 ### Cambiar lo que se sigue en v2

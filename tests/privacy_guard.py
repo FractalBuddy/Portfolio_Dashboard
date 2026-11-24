@@ -1,37 +1,47 @@
 """Guardia de privacidad compartida por los tests (el repo es PÚBLICO).
 
-Tras el cierre del corte ya no hay listas del dueño en el código, así que los tests que antes las leían de `fetch_market_data`
-(`YOUR_FUNDS`, `CRYPTO_WATCHLIST`) comprueban ahora contra HUELLAS (sha256 del texto en minúsculas): el valor no se repite aquí.
+Lista privada del dueño (proxies de sus fondos y su lista cripto idiosincrática): NO está en el repo, ni en claro ni como huella. Hasta la revisión de
+nov-2026 (R-01) aquí había huellas sha256 SIN sal de esos textos; al ser textos muy cortos se revertían por diccionario, así que se retiraron. Ahora la lista
+se lee en ejecución de la variable de entorno PRIVATE_DENYLIST (en CI, el secreto del mismo nombre; en local, una variable de entorno) y, si no está, la
+comprobación sale NO EJECUTADO (tests/test_privacidad_lista_privada.py), nunca aprobada.
 """
 import hashlib
+import os
+import pathlib
 import re
 
-# sha256 de: proxies EUR de los fondos del dueño y palabras de la lista cripto idiosincrática (las grandes y genéricas no cuentan).
-PROXY_HASHES = frozenset({
-    "611ae0ee18d4697d54281d404aa31e668a57c613960a88c494cbd834e7967410",
-    "a0836648fe6466613a186d668943a60750e73d4d43f5d1b01bb6b53c4fe5965e",
-})
-CRYPTO_HASHES = frozenset({
-    "9bb840df7f699d6547f49fd6f9ed17b2d9dd34148f0b01e798d7c51da897ea1a",
-    "c13aa4e200ae5d168af4f7469b26e164963e0ffb9d3c0a3698c304f0693ae254",
-    "a0c7f3081f6a44603fa63d0ebb5e3d979aea85c240d649832539c4056d503b15",
-    "afefb91b38561ce4c5ed9f03d31ba2e93d8d878f6d2817a2851641fbdd290343",
-    "2b81a0696f5bae30162c46892aee6dbec43a5c71d887cd9518a2a2ba015c7073",
-    "0b391db142bb2de896d9e4ba3a7e8a720ef02136d275ef46fb5b157c3fe96a66",
-})
-
+DENYLIST_ENV = "PRIVATE_DENYLIST"
 _TOKEN = re.compile(r"[A-Za-z0-9.^=\-]+")
+_SKIP_DIRS = frozenset({".git", "__pycache__", ".pytest_cache", ".ruff_cache", "node_modules", ".venv"})
+_SKIP_SUFFIXES = frozenset({".pyc", ".png", ".ico", ".zip", ".gz"})
 
 
-def _h(s):
-    return hashlib.sha256(s.lower().encode("utf-8")).hexdigest()
+def load_denylist(env=None):
+    """frozenset de entradas normalizadas (minúsculas, espacios simples) de PRIVATE_DENYLIST, o None si no hay lista. Nunca imprime nada."""
+    env = os.environ if env is None else env
+    raw = env.get(DENYLIST_ENV) or ""
+    items = frozenset(" ".join(x.lower().split()) for x in re.split(r"[,;\n]", raw)) - {""}
+    return items or None
 
 
-def hits(text, hashes):
-    """Palabras (o pares de palabras) de `text` cuya huella está en `hashes`. Solo devuelve la huella, nunca el texto."""
+def _candidates(text):
     toks = [t.strip(".-").lower() for t in _TOKEN.findall(text)]
-    cand = set(toks) | {a + " " + b for a, b in zip(toks, toks[1:])}
-    return sorted(h for h in map(_h, cand) if h in hashes)
+    return set(toks) | {a + " " + b for a, b in zip(toks, toks[1:])}
+
+
+def denylist_hits(text, denylist):
+    """Cuántas palabras (o pares de palabras seguidas) distintas de `text` están en la lista. Devuelve un número, nunca el texto."""
+    return len(_candidates(text) & denylist) if denylist else 0
+
+
+def tree_files(root):
+    """Ficheros del árbol de trabajo (lo versionado y lo que haya sin versionar), sin cachés ni binarios."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _SKIP_DIRS]
+        for fn in filenames:
+            p = pathlib.Path(dirpath) / fn
+            if p.suffix not in _SKIP_SUFFIXES:
+                yield p
 
 
 # ---------------------------------------------------------------------------------------------------------------------------------

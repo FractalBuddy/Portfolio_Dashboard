@@ -38,8 +38,17 @@ jobs:
       - name: Ruff (solo reglas F de pyflakes)
         run: ruff check --select F scripts tests
 
+      # PRIVATE_DENYLIST (R-01): lista privada del dueño (proxies de sus fondos, cripto idiosincrática) para tests/test_privacidad_lista_privada.py.
+      # Es un SECRETO (lo crea el dueño a mano); el repo no lleva ni los valores ni sus huellas. En PR de forks y de Dependabot GitHub no lo pasa:
+      # entonces esa comprobación sale «skipped» con el motivo NO EJECUTADO (-rs lo imprime) y además se avisa aquí. El test nunca imprime los valores.
       - name: Tests (sanity-check del feed, scrape de iShares, FRED, noticias)
-        run: python -m pytest -q
+        env:
+          PRIVATE_DENYLIST: ${{ secrets.PRIVATE_DENYLIST }}
+        run: |
+          if [ -z "${PRIVATE_DENYLIST:-}" ]; then
+            echo "::warning::PRIVATE_DENYLIST no disponible: la comprobación de la lista privada del dueño NO SE HA EJECUTADO en este run"
+          fi
+          python -m pytest -q -rs
 
       # actionlint no viene garantizado en el runner: si no está, se avisa y se sigue (no se descarga nada de terceros).
       - name: actionlint (si está disponible)

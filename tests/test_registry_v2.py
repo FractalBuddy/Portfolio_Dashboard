@@ -58,15 +58,13 @@ def test_las_unidades_son_coherentes_con_la_divisa(reg):
 
 
 def test_el_registro_publico_no_lleva_nada_del_dueno(reg):
-    """Sin ISIN, sin los proxies de sus fondos clase S y sin la lista cripto idiosincrática. Tras el cierre del corte ya no hay listas del dueño en
-    el código: se comprueba contra huellas (tests/privacy_guard.py), así que este test no contiene ningún dato del dueño."""
+    """Sin ISIN, sin fondos clase S y sin acciones de nicho del universo v1. Los proxies de sus fondos y la lista cripto idiosincrática los comprueba
+    tests/test_privacidad_lista_privada.py en todo el árbol (registry.json incluido) con la lista del secreto PRIVATE_DENYLIST (R-01: las huellas sin sal
+    que se usaban aquí se revertían por diccionario y se retiraron); este test no contiene ningún dato del dueño."""
     import fetch_market_data as fm
-    from privacy_guard import CRYPTO_HASHES, PROXY_HASHES, hits
     text = REGISTRY.read_text(encoding="utf-8")
     assert not re.search(r"\b[A-Z]{2}[A-Z0-9]{9}[0-9]\b", text), "hay algo con forma de ISIN"
-    assert "Class S" not in text and not hits(text, PROXY_HASHES), "proxy o fondo clase S del dueño en el registro"
-    words = " ".join(r["name"] + " " + r["symbol"] for r in reg)
-    assert not hits(words, CRYPTO_HASHES), "cripto idiosincrática en el registro público"
+    assert "Class S" not in text, "fondo clase S del dueño en el registro"
     # acciones de nicho del universo v1 (la tanda «Explore» fotónica y las dos últimas, small caps): fuera del registro público
     niche = {s for s, _ in fm.STOCKS[10:15] + fm.STOCKS[-2:]}
     in_reg = {r["symbol"] for r in reg}

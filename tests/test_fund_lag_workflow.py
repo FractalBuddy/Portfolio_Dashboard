@@ -145,7 +145,7 @@ def test_d44_sigue_igual_este_workflow_no_aporta_ningun_secreto():
     for f in WF.glob("*.yml"):
         used |= set(re.findall(r"secrets\.([A-Za-z0-9_]+)", f.read_text(encoding="utf-8")))
     assert used == {"FRED_API_KEY", "HC_UPDATE_URL", "HC_SUPABASE_URL", "HC_UPDATE_V2_URL", "PERSONAL_FEED_TOKEN", "HEALTHCHECK_PERSONAL_NAV_URL",
-                    "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "PROBE_ISINS"}
+                    "SUPABASE_URL", "SUPABASE_PUBLISHABLE_KEY", "PROBE_ISINS", "PRIVATE_DENYLIST"}         # REQUISITO CAMBIADO (R-01): + PRIVATE_DENYLIST (ci.yml)
     assert "secrets." not in FILE.read_text(encoding="utf-8")
 
 

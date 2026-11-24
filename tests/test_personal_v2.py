@@ -571,8 +571,8 @@ def test_key_looks_secret_casos():
 
 def test_el_codigo_publico_no_contiene_datos_del_dueno():
     """Este módulo, el workflow y la documentación no pueden llevar ISIN reales, fondos clase S ni los proxies del dueño. Tras el cierre del corte ya no
-    hay listas del dueño en el código: se comprueba contra huellas (tests/privacy_guard.py). El ISIN lo cubre test_privacidad_isin.py."""
-    from privacy_guard import PROXY_HASHES, hits
+    hay listas del dueño en el código. Los proxies los comprueba tests/test_privacidad_lista_privada.py en todo el árbol con la lista del secreto
+    PRIVATE_DENYLIST (R-01: las huellas sin sal se retiraron). El ISIN lo cubre test_privacidad_isin.py."""
     root = os.path.join(os.path.dirname(__file__), "..")
     paths = ["scripts/personal_v2.py", "scripts/feed_v2.py", "scripts/feed_v2_common.py", "scripts/sanity_check_v2.py", "scripts/site_download.py",
              "scripts/fetch_market_data.py", "scripts/sanity_check.py",
@@ -584,7 +584,6 @@ def test_el_codigo_publico_no_contiene_datos_del_dueno():
     for rel in paths:
         text = open(os.path.join(root, rel), encoding="utf-8").read()
         assert not re.search(r"[—-] Class S", text), (rel, "fondo clase S del dueño")
-        assert not hits(text, PROXY_HASHES), (rel, "proxy del dueño")
 
 
 # ------------------------------------------------------------------ controles negativos del validador de series largas
