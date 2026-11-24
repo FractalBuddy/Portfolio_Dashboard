@@ -31,6 +31,8 @@ concurrency:
 
 jobs:
   probe:
+    # Solo sobre refs/heads/main (R-03): un workflow_dispatch lanzado con otra rama no ejecuta código sin revisar con el token.
+    if: ${{ github.ref == 'refs/heads/main' }}
     permissions:
       contents: read
     runs-on: ubuntu-24.04

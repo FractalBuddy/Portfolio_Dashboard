@@ -11,6 +11,7 @@ yaml = pytest.importorskip("yaml")
 
 WF = pathlib.Path(__file__).resolve().parent.parent / ".github" / "workflows"
 V2, PN, PF, V1 = "publish-feed-v2.yml", "personal-nav.yml", "personal-full.yml", "update-data.yml"
+NP, FP = "nav-probe.yml", "fund-probe.yml"                # diagnósticos manuales con secretos (revisión nov-2026, R-03)
 MAIN = "github.ref == 'refs/heads/main'"
 
 # Tabla de respaldo (la misma que el informe auditorias/FIXES_AU01_F1.md). Minutos «feos»: ni :00 ni :30.
@@ -126,7 +127,7 @@ def _jobs_with_secrets(name):
     return [jn for jn, job in load(name)["jobs"].items() if "secrets." in json.dumps(job)]
 
 
-@pytest.mark.parametrize("name", [V2, PN, PF])
+@pytest.mark.parametrize("name", [V2, PN, PF, NP, FP])
 def test_los_jobs_con_secretos_solo_corren_en_main(name):
     jobs = load(name)["jobs"]
     with_secrets = _jobs_with_secrets(name)
@@ -135,6 +136,24 @@ def test_los_jobs_con_secretos_solo_corren_en_main(name):
         cond = jobs[jn].get("if", "")
         assert MAIN in cond, (name, jn)
         assert cond.startswith("${{") and cond.endswith("}}")
+
+
+def test_todo_workflow_con_secretos_esta_en_la_lista_parametrizada():
+    """R-03: un workflow nuevo con secretos tiene que entrar en el test de arriba (si no, nadie comprueba su condición de main)."""
+    con = {p.name for p in WF.glob("*.yml") if _jobs_with_secrets(p.name)}
+    # Fuera, a propósito y con nombre: update-data.yml (v1, decisión «no tocar v1», W-02); supabase-keepalive.yml (solo la clave publicable y su latido, sin
+    # token; fuera del alcance de R-03); ci.yml (PRIVATE_DENYLIST, R-01: tiene que correr en cada PR; GitHub no pasa secretos a PR de forks).
+    assert con - {V1, "supabase-keepalive.yml", "ci.yml"} == {V2, PN, PF, NP, FP}
+
+
+def test_control_negativo_un_job_con_secretos_sin_condicion_de_main_falla(tmp_path, monkeypatch):
+    import test_workflows_F1 as este
+    text = (WF / NP).read_text(encoding="utf-8").replace("    if: ${{ github.ref == 'refs/heads/main' }}\n", "")
+    assert MAIN not in text
+    (tmp_path / NP).write_text(text, encoding="utf-8")
+    monkeypatch.setattr(este, "WF", tmp_path)
+    with pytest.raises(AssertionError):
+        este.test_los_jobs_con_secretos_solo_corren_en_main(NP)
 
 
 def test_que_jobs_tienen_secretos_y_condicion_de_main():
