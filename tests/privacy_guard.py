@@ -80,6 +80,48 @@ def product_id_leaks(text):
 
 
 # ---------------------------------------------------------------------------------------------------------------------------------
+# R-06 (revisión nov-2026): ISIN de CUALQUIER país, no solo irlandeses. Para no dar falsos positivos con cualquier texto de 12 caracteres en mayúsculas,
+# solo cuenta si el dígito de control (ISO 6166) es válido y el texto no va pegado a letras, dígitos o «_» (la regla IE de arriba sigue sin anclar y sin
+# exigir dígito de control: es más estricta para los fondos irlandeses, que son los del dueño). Excepciones:
+#   * los sintéticos válidos de los tests (SINTETICOS_VALIDOS) y el país ficticio «ZZ» (código de usuario en ISO 3166: ningún ISIN real lo lleva);
+#   * los 4 ejemplos públicos de la propia norma (empresas cotizadas, no fondos), que usan los tests del dígito de control;
+#   * la lista genérica pública (config/fund_probe_isins_generic.json), que el llamador pasa en `permitidos`.
+# ---------------------------------------------------------------------------------------------------------------------------------
+ISIN_ANY = re.compile(r"(?<![A-Za-z0-9_])[A-Z]{2}[A-Z0-9]{9}[0-9](?![A-Za-z0-9_])")
+PAIS_FICTICIO = "ZZ"
+EJEMPLOS_NORMA = frozenset({"US0378331005", "AU0000XVGZA3", "GB0002634946", "DE000BAY0017"})
+
+
+def isin_valid(isin):
+    return len(isin) == 12 and isin_check_digit(isin[:11]) == int(isin[11])
+
+
+def isin_any_leaks(text, permitidos=frozenset()):
+    """Textos con forma de ISIN de cualquier país y dígito de control válido que no son excepción. Devuelve cuántos son, nunca su valor."""
+    ok = SINTETICOS_VALIDOS | EJEMPLOS_NORMA | frozenset(permitidos)
+    return sum(1 for m in ISIN_ANY.finditer(text)
+               if not m.group(0).startswith(PAIS_FICTICIO) and m.group(0) not in ok and isin_valid(m.group(0)))
+
+
+# ---------------------------------------------------------------------------------------------------------------------------------
+# R-06: formas de secreto (URL de Supabase y de Healthchecks con clave, claves de Supabase, JWT, tokens de GitHub) en TODO el árbol, no solo en los
+# workflows. Devuelve QUÉ forma aparece, nunca el valor.
+# ---------------------------------------------------------------------------------------------------------------------------------
+SECRET_SHAPES = (
+    (re.compile(r"[a-z0-9]{20}\.supabase\.(?:co|in)"), "URL de proyecto de Supabase"),
+    (re.compile(r"hc-ping\.com/[0-9a-f]{8}-[0-9a-f]{4}-"), "URL de Healthchecks con clave"),
+    (re.compile(r"hc-ping\.com/[A-Za-z0-9_-]{16,}"), "URL de Healthchecks con clave"),
+    (re.compile(r"sb_(?:publishable|secret)_[A-Za-z0-9_-]{8,}"), "clave de Supabase"),
+    (re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"), "JWT"),
+    (re.compile(r"\b(?:ghp|gho|ghs|ghu|github_pat)_[A-Za-z0-9_]{20,}"), "token de GitHub"),
+)
+
+
+def secret_shape_leaks(text):
+    return sorted({why for rx, why in SECRET_SHAPES if rx.search(text)})
+
+
+# ---------------------------------------------------------------------------------------------------------------------------------
 # Símbolos Morningstar/Yahoo `0P` + 8 caracteres (F1 «sombra» NAV Yahoo): identifican un fondo igual que su ISIN, así que el árbol solo puede llevar:
 #   * los 7 de la lista FIJA y pública de la sonda de retraso (config/fund_lag_tickers.json), congelados por HUELLA (sha256 de los 10 primeros caracteres):
 #     no se repiten aquí y uno nuevo en esa lista hace fallar el guardia hasta que alguien lo revise a propósito;
