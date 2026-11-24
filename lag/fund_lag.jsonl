@@ -138,3 +138,13 @@
 {"measured_at":"2026-11-24T03:59:36Z","ticker":"IWDA.L","status":"ok","last_bar":"2026-11-20","bars":4,"dates":["2026-11-17","2026-11-18","2026-11-19","2026-11-20"],"lag_bd":2,"lag_wd":2,"lag_days":4}
 {"measured_at":"2026-11-24T03:59:37Z","ticker":"VWCE.DE","status":"ok","last_bar":"2026-11-20","bars":4,"dates":["2026-11-17","2026-11-18","2026-11-19","2026-11-20"],"lag_bd":2,"lag_wd":2,"lag_days":4}
 {"measured_at":"2026-11-24T03:59:38Z","ticker":"SPXS.L","status":"ok","last_bar":"2026-11-20","bars":4,"dates":["2026-11-17","2026-11-18","2026-11-19","2026-11-20"],"lag_bd":2,"lag_wd":2,"lag_days":4}
+{"measured_at":"2026-11-24T17:50:53Z","ticker":"0P00000WLG.F","status":"ok","last_bar":"2026-11-20","bars":3,"dates":["2026-11-18","2026-11-19","2026-11-20"],"lag_bd":2,"lag_wd":2,"lag_days":4}
+{"measured_at":"2026-11-24T17:50:54Z","ticker":"0P00012PP6.F","status":"ok","last_bar":"2026-11-20","bars":3,"dates":["2026-11-18","2026-11-19","2026-11-20"],"lag_bd":2,"lag_wd":2,"lag_days":4}
+{"measured_at":"2026-11-24T17:50:55Z","ticker":"0P0001CLDK.F","status":"ok","last_bar":"2026-11-20","bars":3,"dates":["2026-11-18","2026-11-19","2026-11-20"],"lag_bd":2,"lag_wd":2,"lag_days":4}
+{"measured_at":"2026-11-24T17:50:56Z","ticker":"0P0001CLDM.F","status":"ok","last_bar":"2026-11-20","bars":3,"dates":["2026-11-18","2026-11-19","2026-11-20"],"lag_bd":2,"lag_wd":2,"lag_days":4}
+{"measured_at":"2026-11-24T17:50:57Z","ticker":"0P00016YQ5.F","status":"ok","last_bar":"2026-11-19","bars":2,"dates":["2026-11-18","2026-11-19"],"lag_bd":3,"lag_wd":3,"lag_days":5}
+{"measured_at":"2026-11-24T17:50:58Z","ticker":"0P0001DFE8.F","status":"ok","last_bar":"2026-11-20","bars":3,"dates":["2026-11-18","2026-11-19","2026-11-20"],"lag_bd":2,"lag_wd":2,"lag_days":4}
+{"measured_at":"2026-11-24T17:50:59Z","ticker":"0P000168OI.F","status":"ok","last_bar":"2026-11-19","bars":2,"dates":["2026-11-18","2026-11-19"],"lag_bd":3,"lag_wd":3,"lag_days":5}
+{"measured_at":"2026-11-24T17:51:00Z","ticker":"IWDA.L","status":"ok","last_bar":"2026-11-24","bars":5,"dates":["2026-11-18","2026-11-19","2026-11-20","2026-11-23","2026-11-24"],"lag_bd":0,"lag_wd":0,"lag_days":0}
+{"measured_at":"2026-11-24T17:51:01Z","ticker":"VWCE.DE","status":"ok","last_bar":"2026-11-24","bars":5,"dates":["2026-11-18","2026-11-19","2026-11-20","2026-11-23","2026-11-24"],"lag_bd":0,"lag_wd":0,"lag_days":0}
+{"measured_at":"2026-11-24T17:51:02Z","ticker":"SPXS.L","status":"ok","last_bar":"2026-11-24","bars":5,"dates":["2026-11-18","2026-11-19","2026-11-20","2026-11-23","2026-11-24"],"lag_bd":0,"lag_wd":0,"lag_days":0}
