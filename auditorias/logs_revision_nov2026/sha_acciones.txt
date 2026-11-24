@@ -1,0 +1,9 @@
+Contraste de los SHA fijados en .github/workflows/*.yml con los tags upstream (git ls-remote, 2026-11-23):
+actions/checkout              v7.0.1  3d3c42e5aac5ba805825da76410c181273ba90b1  = fijado
+actions/setup-python          v7.1.0  6d4fd22b20465ccc0f7354476588e8df7c9ca0e0  = fijado
+actions/upload-artifact       v7.0.2  cf430e030ddbb5b0abf93d22962f4752f3646cd9  = fijado
+actions/download-artifact     v8.0.2  9000827ccba6bdab643e8b6fd33ac0654aef8333  = fijado
+actions/upload-pages-artifact v5.0.0  fc324d3547104276b827a68afc52ff2a11cc49c9  = fijado
+actions/deploy-pages          v5.0.1  368f82528645a54fb793d4d04e342629a3f51346  = fijado
+actions/cache                 v6.1.0  55cc8345863c7cc4c66a329aec7e433d2d1c52a9  = fijado
+Los 7 coinciden: la nota BE-19 de publish-feed-v2.yml:244-245 («NO se han contrastado») está desfasada.

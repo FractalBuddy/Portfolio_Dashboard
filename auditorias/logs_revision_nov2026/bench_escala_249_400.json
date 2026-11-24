@@ -1,0 +1,412 @@
+[
+ {
+  "n": 249,
+  "registry": {
+   "hot": 63,
+   "warm": 168,
+   "cold": 18,
+   "crypto": 18
+  },
+  "registry_problems": [],
+  "gen1": {
+   "phase": "gen1",
+   "n": 249,
+   "stats": {
+    "due": 231,
+    "updated": 231,
+    "backfilled": 231,
+    "crypto": 250
+   },
+   "backfills": 231,
+   "yahoo_calls": 289,
+   "seconds": 17.47,
+   "max_rss_mb": 112.8
+  },
+  "val1": {
+   "phase": "val1",
+   "n": 249,
+   "errors": 0,
+   "errors_sample": [],
+   "warnings": 2,
+   "warnings_sample": [
+    "topes por encima del 50 % (aviso, no bloquea): MAX_BYTES[manifest] 50 % (302612 de 600000); MAX_REGISTRY_SYMBOLS 62 % (249 de 400); manifest.json (formato 1) cr",
+    "sin sitio anterior: primer run, solo reglas absolutas"
+   ],
+   "seconds": 2.89,
+   "max_rss_mb": 109.7
+  },
+  "gen2": {
+   "phase": "gen2",
+   "n": 249,
+   "stats": {
+    "due": 214,
+    "updated": 214,
+    "backfilled": 0,
+    "crypto": 250
+   },
+   "backfills": 0,
+   "yahoo_calls": 272,
+   "seconds": 2.89,
+   "max_rss_mb": 111.7
+  },
+  "val2": {
+   "phase": "val2",
+   "n": 249,
+   "errors": 0,
+   "errors_sample": [],
+   "warnings": 1,
+   "warnings_sample": [
+    "topes por encima del 50 % (aviso, no bloquea): MAX_BYTES[manifest] 50 % (302611 de 600000); MAX_REGISTRY_SYMBOLS 62 % (249 de 400); manifest.json (formato 1) cr"
+   ],
+   "seconds": 2.49,
+   "max_rss_mb": 112.0
+  },
+  "site1": {
+   "total_bytes": 40266715,
+   "files": 2837,
+   "by_kind": {
+    "health": {
+     "files": 1,
+     "bytes": 29930
+    },
+    "news": {
+     "files": 1,
+     "bytes": 78
+    },
+    "macro": {
+     "files": 1,
+     "bytes": 228
+    },
+    "manifest": {
+     "files": 1,
+     "bytes": 302612
+    },
+    "manifest_root": {
+     "files": 1,
+     "bytes": 24087
+    },
+    "index": {
+     "files": 1,
+     "bytes": 41311
+    },
+    "crypto": {
+     "files": 1,
+     "bytes": 48420
+    },
+    "latest": {
+     "files": 231,
+     "bytes": 143965
+    },
+    "intraday": {
+     "files": 58,
+     "bytes": 622651
+    },
+    "manifest_shard": {
+     "files": 231,
+     "bytes": 315050
+    },
+    "daily": {
+     "files": 2310,
+     "bytes": 38738383
+    }
+   },
+   "max_file_bytes": {
+    "health": 29930,
+    "news": 78,
+    "macro": 228,
+    "manifest": 302612,
+    "manifest_root": 24087,
+    "index": 41311,
+    "crypto": 48420,
+    "latest": 692,
+    "intraday": 11578,
+    "manifest_shard": 1467,
+    "daily": 19373
+   },
+   "caps_broken": [],
+   "index_bytes": 41311,
+   "manifest_bytes": 302612,
+   "health_bytes": 29930,
+   "projection_warm_cold_5y": {
+    "files": 865,
+    "bytes": 14820057
+   }
+  },
+  "site2": {
+   "total_bytes": 40280040,
+   "files": 2837,
+   "by_kind": {
+    "health": {
+     "files": 1,
+     "bytes": 29927
+    },
+    "news": {
+     "files": 1,
+     "bytes": 78
+    },
+    "macro": {
+     "files": 1,
+     "bytes": 228
+    },
+    "manifest": {
+     "files": 1,
+     "bytes": 302611
+    },
+    "manifest_root": {
+     "files": 1,
+     "bytes": 24087
+    },
+    "index": {
+     "files": 1,
+     "bytes": 41311
+    },
+    "crypto": {
+     "files": 1,
+     "bytes": 48420
+    },
+    "latest": {
+     "files": 231,
+     "bytes": 144024
+    },
+    "intraday": {
+     "files": 58,
+     "bytes": 622022
+    },
+    "manifest_shard": {
+     "files": 231,
+     "bytes": 315049
+    },
+    "daily": {
+     "files": 2310,
+     "bytes": 38752283
+    }
+   },
+   "max_file_bytes": {
+    "health": 29927,
+    "news": 78,
+    "macro": 228,
+    "manifest": 302611,
+    "manifest_root": 24087,
+    "index": 41311,
+    "crypto": 48420,
+    "latest": 691,
+    "intraday": 11575,
+    "manifest_shard": 1467,
+    "daily": 19373
+   },
+   "caps_broken": [],
+   "index_bytes": 41311,
+   "manifest_bytes": 302611,
+   "health_bytes": 29927,
+   "projection_warm_cold_5y": {
+    "files": 865,
+    "bytes": 14820057
+   }
+  }
+ },
+ {
+  "n": 400,
+  "registry": {
+   "hot": 84,
+   "warm": 280,
+   "cold": 36,
+   "crypto": 29
+  },
+  "registry_problems": [],
+  "gen1": {
+   "phase": "gen1",
+   "n": 400,
+   "stats": {
+    "due": 371,
+    "updated": 371,
+    "backfilled": 371,
+    "crypto": 250
+   },
+   "backfills": 371,
+   "yahoo_calls": 448,
+   "seconds": 27.19,
+   "max_rss_mb": 114.2
+  },
+  "val1": {
+   "phase": "val1",
+   "n": 400,
+   "errors": 0,
+   "errors_sample": [],
+   "warnings": 2,
+   "warnings_sample": [
+    "topes por encima del 50 % (aviso, no bloquea): MAX_BYTES[index] 55 % (66408 de 120000); MAX_BYTES[manifest] 81 % (483850 de 600000); MAX_SITE_BYTES 54 % (645040",
+    "sin sitio anterior: primer run, solo reglas absolutas"
+   ],
+   "seconds": 3.87,
+   "max_rss_mb": 113.4
+  },
+  "gen2": {
+   "phase": "gen2",
+   "n": 400,
+   "stats": {
+    "due": 337,
+    "updated": 337,
+    "backfilled": 0,
+    "crypto": 250
+   },
+   "backfills": 0,
+   "yahoo_calls": 414,
+   "seconds": 4.07,
+   "max_rss_mb": 113.5
+  },
+  "val2": {
+   "phase": "val2",
+   "n": 400,
+   "errors": 0,
+   "errors_sample": [],
+   "warnings": 1,
+   "warnings_sample": [
+    "topes por encima del 50 % (aviso, no bloquea): MAX_BYTES[index] 55 % (66408 de 120000); MAX_BYTES[manifest] 81 % (483849 de 600000); MAX_SITE_BYTES 54 % (645254"
+   ],
+   "seconds": 3.81,
+   "max_rss_mb": 116.8
+  },
+  "site1": {
+   "total_bytes": 64504045,
+   "files": 4536,
+   "by_kind": {
+    "health": {
+     "files": 1,
+     "bytes": 47760
+    },
+    "news": {
+     "files": 1,
+     "bytes": 78
+    },
+    "macro": {
+     "files": 1,
+     "bytes": 228
+    },
+    "manifest": {
+     "files": 1,
+     "bytes": 483850
+    },
+    "manifest_root": {
+     "files": 1,
+     "bytes": 38296
+    },
+    "index": {
+     "files": 1,
+     "bytes": 66408
+    },
+    "crypto": {
+     "files": 1,
+     "bytes": 48486
+    },
+    "latest": {
+     "files": 371,
+     "bytes": 231403
+    },
+    "intraday": {
+     "files": 77,
+     "bytes": 827555
+    },
+    "manifest_shard": {
+     "files": 371,
+     "bytes": 504197
+    },
+    "daily": {
+     "files": 3710,
+     "bytes": 62255784
+    }
+   },
+   "max_file_bytes": {
+    "health": 47760,
+    "news": 78,
+    "macro": 228,
+    "manifest": 483850,
+    "manifest_root": 38296,
+    "index": 66408,
+    "crypto": 48486,
+    "latest": 692,
+    "intraday": 11578,
+    "manifest_shard": 1467,
+    "daily": 19373
+   },
+   "caps_broken": [],
+   "index_bytes": 66408,
+   "manifest_bytes": 483850,
+   "health_bytes": 47760,
+   "projection_warm_cold_5y": {
+    "files": 1470,
+    "bytes": 25177547
+   }
+  },
+  "site2": {
+   "total_bytes": 64525446,
+   "files": 4536,
+   "by_kind": {
+    "health": {
+     "files": 1,
+     "bytes": 47757
+    },
+    "news": {
+     "files": 1,
+     "bytes": 78
+    },
+    "macro": {
+     "files": 1,
+     "bytes": 228
+    },
+    "manifest": {
+     "files": 1,
+     "bytes": 483849
+    },
+    "manifest_root": {
+     "files": 1,
+     "bytes": 38296
+    },
+    "index": {
+     "files": 1,
+     "bytes": 66408
+    },
+    "crypto": {
+     "files": 1,
+     "bytes": 48486
+    },
+    "latest": {
+     "files": 371,
+     "bytes": 231486
+    },
+    "intraday": {
+     "files": 77,
+     "bytes": 826963
+    },
+    "manifest_shard": {
+     "files": 371,
+     "bytes": 504196
+    },
+    "daily": {
+     "files": 3710,
+     "bytes": 62277699
+    }
+   },
+   "max_file_bytes": {
+    "health": 47757,
+    "news": 78,
+    "macro": 228,
+    "manifest": 483849,
+    "manifest_root": 38296,
+    "index": 66408,
+    "crypto": 48486,
+    "latest": 691,
+    "intraday": 11576,
+    "manifest_shard": 1467,
+    "daily": 19373
+   },
+   "caps_broken": [],
+   "index_bytes": 66408,
+   "manifest_bytes": 483849,
+   "health_bytes": 47757,
+   "projection_warm_cold_5y": {
+    "files": 1470,
+    "bytes": 25177547
+   }
+  }
+ }
+]

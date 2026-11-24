@@ -1,0 +1,8 @@
+n=249 gen1 17.5s 113 MB
+n=249 val1 2.9s 110 MB
+n=249 gen2 2.9s 112 MB
+n=249 val2 2.5s 112 MB
+n=400 gen1 27.2s 114 MB
+n=400 val1 3.9s 113 MB
+n=400 gen2 4.1s 114 MB
+n=400 val2 3.8s 117 MB

@@ -1,0 +1,86 @@
+Runs reales (API de Actions vía MCP, solo lectura; 100 más recientes de 245 en total; ventana 2026-11-16T01:04:59Z .. 2026-11-23T19:28:59Z)
+Solo metadatos (nombre, evento, hora de inicio, conclusión): ningún dato del dueño.
+
+ 10  CI | pull_request | success
+  9  CI | push | success
+ 13  Fund lag (retraso de los fondos 0P en Yahoo) | schedule | success
+  2  Fund probe (cobertura de fondos en Yahoo) | workflow_dispatch | success
+  2  Keepalive | schedule | success
+  8  Personal NAV | schedule | success
+  1  Personal NAV | workflow_dispatch | success
+ 15  Personal full | schedule | success
+ 15  Publish feed v2 | schedule | success
+  3  Publish feed v2 | workflow_dispatch | success
+  3  Supabase keepalive | schedule | success
+  1  Symbol probe (sonda de símbolos del registro, no publica) | workflow_dispatch | success
+ 18  Update market data | schedule | success
+
+Hora real de inicio (UTC) por workflow programado:
+
+Publish feed v2:
+    2026-11-16T01:24:36Z schedule
+    2026-11-16T14:19:28Z workflow_dispatch
+    2026-11-16T14:42:10Z workflow_dispatch
+    2026-11-17T04:10:49Z schedule
+    2026-11-17T10:18:48Z workflow_dispatch
+    2026-11-17T17:04:24Z schedule
+    2026-11-18T03:08:27Z schedule
+    2026-11-18T16:43:16Z schedule
+    2026-11-19T02:48:42Z schedule
+    2026-11-19T16:47:51Z schedule
+    2026-11-20T02:36:27Z schedule
+    2026-11-20T16:22:37Z schedule
+    2026-11-21T02:50:10Z schedule
+    2026-11-21T16:58:01Z schedule
+    2026-11-21T23:36:24Z schedule
+    2026-11-22T17:24:39Z schedule
+    2026-11-22T23:52:41Z schedule
+    2026-11-23T19:28:59Z schedule
+
+Personal NAV:
+    2026-11-16T13:47:43Z schedule
+    2026-11-16T22:55:31Z workflow_dispatch
+    2026-11-17T00:17:35Z schedule
+    2026-11-17T16:56:21Z schedule
+    2026-11-18T16:31:53Z schedule
+    2026-11-19T16:38:40Z schedule
+    2026-11-20T16:14:10Z schedule
+    2026-11-20T22:42:05Z schedule
+    2026-11-23T19:18:41Z schedule
+
+Personal full:
+    2026-11-16T01:20:48Z schedule
+    2026-11-17T04:09:52Z schedule
+    2026-11-17T16:26:22Z schedule
+    2026-11-18T03:06:55Z schedule
+    2026-11-18T15:56:34Z schedule
+    2026-11-19T02:45:58Z schedule
+    2026-11-19T16:01:22Z schedule
+    2026-11-20T02:33:45Z schedule
+    2026-11-20T15:43:28Z schedule
+    2026-11-21T02:47:57Z schedule
+    2026-11-21T14:54:26Z schedule
+    2026-11-22T01:32:19Z schedule
+    2026-11-22T14:51:44Z schedule
+    2026-11-23T01:56:51Z schedule
+    2026-11-23T18:42:25Z schedule
+
+Update market data:
+    2026-11-16T01:04:59Z schedule
+    2026-11-16T15:53:43Z schedule
+    2026-11-17T03:56:20Z schedule
+    2026-11-17T16:06:28Z schedule
+    2026-11-18T02:55:27Z schedule
+    2026-11-18T15:44:13Z schedule
+    2026-11-19T02:36:36Z schedule
+    2026-11-19T15:49:50Z schedule
+    2026-11-20T02:21:44Z schedule
+    2026-11-20T15:31:45Z schedule
+    2026-11-21T02:21:51Z schedule
+    2026-11-21T14:43:08Z schedule
+    2026-11-21T20:54:50Z schedule
+    2026-11-22T01:22:36Z schedule
+    2026-11-22T14:39:43Z schedule
+    2026-11-22T21:05:26Z schedule
+    2026-11-23T01:46:25Z schedule
+    2026-11-23T18:17:57Z schedule

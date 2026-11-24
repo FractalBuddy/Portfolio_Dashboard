@@ -1,0 +1,6 @@
+Prueba de reversibilidad de las huellas de tests/privacy_guard.py (PROXY_HASHES y CRYPTO_HASHES: sha256 SIN sal de textos cortos en minúsculas).
+Método: diccionario de 297 candidatos escritos de memoria (ids y símbolos de las ~150 criptomonedas más conocidas y tickers habituales), sha256 de cada uno
+y comparación con las 8 huellas. Tiempo: < 1 s en un portátil.
+Resultado: 4 de 8 huellas revertidas.
+Los valores revertidos NO se escriben aquí ni en el informe. El diccionario no se guarda en el repo (es trivial de rehacer, que es precisamente el problema).
+Además: uno de los textos protegidos por PROXY_HASHES aparece en claro en el árbol (ver barrido_historial_git.txt, filas «proxy_dueno»).
