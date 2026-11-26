@@ -127,7 +127,7 @@ def test_seleccion_por_defecto_son_las_dormant_y_symbols_debe_estar_en_el_regist
     # REQUISITO CAMBIADO (activar top 50, auditorias/FIXES_ACTIVAR_TOP50.md): las 7 filas pasaron la sonda el 2026-11-20 y están `active`, así que el
     # registro real ya no tiene ninguna `dormant`. La selección por defecto se sigue comprobando igual de estricta sobre el registro real con esas 7
     # devueltas a `dormant` (el estado que tenían cuando se sondearon), y además: con el registro real tal cual no queda nada que probar.
-    # REQUISITO CAMBIADO otra vez (F5, docs/F5_LISTAS_Y_SIMBOLOS.md): el registro real vuelve a tener filas `dormant` (ENPH, ORSTED.CO, pendientes de
+    # REQUISITO CAMBIADO otra vez (F5, auditorias/FIXES_F5_LISTAS_Y_SIMBOLOS.md): el registro real vuelve a tener filas `dormant` (ENPH, ORSTED.CO, pendientes de
     # sonda). Antes: `sp.select(real) == []`. «Nada que probar» se comprueba ahora con esas filas activadas en un registro temporal.
     real = c.load_registry(ROOT / "registry.json")
     assert {e["symbol"] for e in sp.select(real)} == F5_DORMANT

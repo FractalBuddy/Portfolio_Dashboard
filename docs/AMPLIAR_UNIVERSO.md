@@ -41,7 +41,7 @@ registro (aunque sea por otra línea o por un ADR), no se añade otra.
 (`feed_v2_common.list_problems`) rechaza el registro entero si la lista está incompleta (`len(symbols) != size`) o vacía, si falta la fuente o no es `https`, si
 `as_of` no es la fecha del id, si un símbolo no está en el registro o se repite, o si la anotación de las filas no coincide (cada miembro lleva la clave en su
 `lists`, ninguna fila ajena la lleva y un rango no nulo es su posición). Hoy **no hay ninguna lista en la raíz**: el top 50 del 13-nov-2026 solo está anotado en 7
-filas y está incompleto (ver `docs/F5_LISTAS_Y_SIMBOLOS.md`).
+filas y está incompleto (ver `auditorias/FIXES_F5_LISTAS_Y_SIMBOLOS.md`).
 
 ## 2. Pasos para añadir N símbolos
 
@@ -65,7 +65,7 @@ filas y está incompleto (ver `docs/F5_LISTAS_Y_SIMBOLOS.md`).
 | Fecha | Sonda | Activados | Pendientes |
 |---|---|---|---|
 | 2026-11-20 | «Symbol probe» en `main`, 17:21 UTC: 7 de 7 `OK`, nombre de Yahoo = empresa esperada, divisa = la declarada, última barra del 19 o 20-11 | `SPCX`, `2222.SR`, `000660.KS`, `601288.SS`, `1398.HK`, `601988.SS`, `PM` (top 50, `warm`; ver `docs/universo/TOP50_MCAP_2026-11-13.md`) | ninguna fila `dormant` en el registro |
-| 2026-11-26 (F5) | **pendiente**: no lanzada todavía | — | `ENPH`, `ORSTED.CO` entran `dormant` (`warm`; divisa del sufijo, sin verificar en Yahoo). Ver `docs/F5_LISTAS_Y_SIMBOLOS.md` |
+| 2026-11-26 (F5) | **pendiente**: no lanzada todavía | — | `ENPH`, `ORSTED.CO` entran `dormant` (`warm`; divisa del sufijo, sin verificar en Yahoo). Ver `auditorias/FIXES_F5_LISTAS_Y_SIMBOLOS.md` |
 
 ## 3. Qué pasa si un símbolo muere después
 

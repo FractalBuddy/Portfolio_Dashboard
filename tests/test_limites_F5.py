@@ -1,5 +1,5 @@
 """F5 punto 4: los topes propios del feed v2 que afectan al crecimiento del registro, fijados a propósito (cambiarlos es una decisión del dueño), y
-el aviso al 50 % con el registro real. Números antes/después en docs/F5_LISTAS_Y_SIMBOLOS.md."""
+el aviso al 50 % con el registro real. Números antes/después en auditorias/FIXES_F5_LISTAS_Y_SIMBOLOS.md."""
 import pathlib
 
 import feed_v2_common as c

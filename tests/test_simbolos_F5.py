@@ -1,7 +1,7 @@
 """F5: símbolos nuevos del registro público, en `dormant` hasta pasar la sonda `symbol-probe.yml`.
 
 De los 11 pedidos solo entran 2 (ENPH, ORSTED.CO). Los demás no, por privacidad (repo público) o porque ya estaban; el motivo está en
-docs/F5_LISTAS_Y_SIMBOLOS.md y lo vigilan los guardias de tests/test_registry_v2.py (sin repetir aquí ningún dato del dueño)."""
+auditorias/FIXES_F5_LISTAS_Y_SIMBOLOS.md y lo vigilan los guardias de tests/test_registry_v2.py (sin repetir aquí ningún dato del dueño)."""
 import json
 import pathlib
 

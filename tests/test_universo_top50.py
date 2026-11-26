@@ -135,7 +135,7 @@ def test_las_filas_nuevas_estan_y_son_coherentes(raw):
 def test_solo_las_filas_nuevas_llevan_metadatos_y_estan_en_dormant(raw):
     """Las filas existentes no se han tocado: ni metadatos ni estado distinto de `active`. (El nombre es histórico: las nuevas ya están `active`,
     ver test_las_filas_nuevas_estan_y_son_coherentes; aquí no cambia ninguna aserción.)"""
-    # REQUISITO CAMBIADO (F5, docs/F5_LISTAS_Y_SIMBOLOS.md): ENPH y ORSTED.CO entran `dormant` (sin metadatos) hasta pasar la sonda. Antes: todas `active`.
+    # REQUISITO CAMBIADO (F5, auditorias/FIXES_F5_LISTAS_Y_SIMBOLOS.md): ENPH y ORSTED.CO entran `dormant` (sin metadatos) hasta pasar la sonda. Antes: todas `active`.
     for r in raw["symbols"]:
         if r["symbol"] in NUEVAS:
             continue

@@ -4,7 +4,7 @@ La definición de una lista vive en la raíz de `registry.json` (clave opcional 
 COMPLETA: tantos símbolos como `size`, todos en el registro, sin repetir, fuente https y fecha igual a la del id. Una lista incompleta, vacía o sin
 fuente/fecha hace inválido el registro entero (CI en rojo, el generador y el validador del job `publish` no arrancan): no hay publicación a medias.
 Las anotaciones por fila (`symbols[i].lists`) siguen siendo metadatos que NO se publican; la lista top 50 del 13-nov-2026 solo existe así (7 filas,
-incompleta) y por eso no aparece en `index.json`. Informe: docs/F5_LISTAS_Y_SIMBOLOS.md."""
+incompleta) y por eso no aparece en `index.json`. Informe: auditorias/FIXES_F5_LISTAS_Y_SIMBOLOS.md."""
 import copy
 import json
 import os
