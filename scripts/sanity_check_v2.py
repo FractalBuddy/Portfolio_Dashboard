@@ -81,8 +81,9 @@ def _line(s):
 
 
 class Ctx:
-    def __init__(self, registry, today, allow_regression=False):
+    def __init__(self, registry, today, allow_regression=False, lists=None):
         self.reg = {e["symbol"]: e for e in registry}
+        self.lists = lists or {}
         self.today = today
         self.allow_regression = allow_regression
         self.errors, self.warnings, self.regressions = [], [], []
@@ -263,7 +264,11 @@ INDEX_SPEC = obj({
     "schema": SCHEMA_V, "generated_at": stamp,
     "symbols": seq(obj({"s": symbol, "kind": enum(*c.KINDS), "name": text(c.MAX_NAME_LEN), "currency": text(4, c.CURRENCY_RE),
                         "unit": enum(*c.UNITS), "tier": enum(*c.TIERS), "as_of": day(nullable=True), "status": enum(*c.STATUSES)}),
-                   c.MAX_REGISTRY_SYMBOLS)})
+                   c.MAX_REGISTRY_SYMBOLS),
+    # F5: opcional. Contenido exacto = c.index_lists(listas del registro); lo comprueba _check_index (aquí solo la forma).
+    "lists": mapping(c.LIST_ID_RE, obj({"id": text(60, c.LIST_ID_RE), "source": text(c.MAX_LIST_SOURCE_LEN, re.compile(r"^https://")),
+                                       "as_of": day(), "symbols": seq(symbol, c.MAX_LIST_SIZE)}), c.MAX_LISTS)},
+    required={"schema", "generated_at", "symbols"})
 LATEST_SPEC = obj({
     "schema": SCHEMA_V, "s": symbol, "kind": enum(*c.KINDS), "name": text(c.MAX_NAME_LEN), "currency": text(4, c.CURRENCY_RE), "unit": enum(*c.UNITS),
     "price_unit_divisor": integer(1, 100), "price": number(1e-9, 1e9, positive=True), "change_pct": number(-1000, 100000, nullable=True),
@@ -585,9 +590,9 @@ def check_continuity(site, prev, new_manifest_files, latest_new, ctx):
 # ------------------------------------------------------------------------------------------------------------------------------
 # Comprobación completa
 # ------------------------------------------------------------------------------------------------------------------------------
-def check_site(site, registry, prev=None, *, today=None, allow_regression=False, expect_prev=False):
+def check_site(site, registry, prev=None, *, today=None, allow_regression=False, expect_prev=False, lists=None):
     """Devuelve (errores, avisos): listas de textos de una línea. Sin errores = publicable."""
-    ctx = Ctx(registry, today or dt.datetime.now(dt.timezone.utc).date(), allow_regression)
+    ctx = Ctx(registry, today or dt.datetime.now(dt.timezone.utc).date(), allow_regression, lists)
     if not os.path.isdir(site):
         return ["el sitio %s no existe" % _line(site)[:80]], []
     files, _total = scan_files(site, ctx)
@@ -699,6 +704,10 @@ def _check_index(idx, ctx):
                 ctx.err("index.json: %s.%s distinto del registro" % (_line(s)[:15], k))
         if e["status"] != "active" and r.get("status") != e["status"]:
             ctx.err("index.json: %s tiene un estado distinto del fijado en el registro" % _line(s)[:15])
+    # F5: `lists` publicado = EXACTAMENTE las listas que valida el registro del repo (completas, fuente https, fecha). Ni más, ni menos, ni cambiadas:
+    # el index.json lo escribe el job `fetch`, que ejecuta código de terceros.
+    if idx.get("lists") != c.index_lists(ctx.lists):
+        ctx.err("index.json: lists no coincide con las listas validadas del registro")
 
 
 def _check_health(h, ctx):
@@ -892,7 +901,7 @@ def main(argv=None):
     ap.add_argument("--today", default=None, help=argparse.SUPPRESS)          # solo para los tests: fecha de «hoy» (YYYY-MM-DD)
     a = ap.parse_args(argv)
     try:
-        registry = c.load_registry(a.registry)
+        registry, lists = c.load_registry_doc(a.registry)
     except c.RegistryError as e:
         print("::error::registro inválido: %s" % _line(e)[:300])
         return 1
@@ -901,7 +910,7 @@ def main(argv=None):
         errors, warnings = check_site(
             a.site, registry, a.prev, today=dt.date.fromisoformat(a.today) if a.today else None,
             allow_regression=os.environ.get("SANITY_ALLOW_REGRESSION", "").lower() in truthy,
-            expect_prev=os.environ.get("EXPECT_PREV", "").lower() in truthy)
+            expect_prev=os.environ.get("EXPECT_PREV", "").lower() in truthy, lists=lists)
     except Exception as e:                                                       # noqa: BLE001 - sitio con tipos inesperados = no publicable
         print("::error::sitio malformado: %s" % _line(type(e).__name__))
         return 1

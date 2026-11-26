@@ -119,6 +119,13 @@ sus datos están en `crypto/latest.json`).
 ```
 <!-- /ejemplo -->
 
+**`lists` (opcional, F5, aditivo).** Listas fechadas de símbolos (p. ej. un top N por capitalización). Solo aparece si el registro define al menos una
+lista **completa**; hoy no hay ninguna, así que `index.json` no lleva la clave. Forma: `{"<lista>@<AAAA-MM-DD>": {"id": "<lista>@<AAAA-MM-DD>", "source":
+"https://…", "as_of": "AAAA-MM-DD", "symbols": ["SYM1", "SYM2", …]}}`, con `symbols` en orden de rango (el primero es el 1.º) y todos presentes en `symbols` de este
+mismo `index.json` (pueden estar `dormant`, sin datos). El validador del job `publish` exige que `lists` sea **exactamente** lo que valida el registro del repo
+(tantos símbolos como el tamaño declarado, fuente `https`, `as_of` = fecha del id); una lista incompleta no se publica nunca. Un cliente que no conozca la clave
+debe ignorarla.
+
 ### `s/<SYM>/latest.json`
 Precio y cambios. `change_pct_7d` y `volume_ratio` pueden ser `null`. `sparkline` son los últimos ≤30 cierres (el último es `price`).
 

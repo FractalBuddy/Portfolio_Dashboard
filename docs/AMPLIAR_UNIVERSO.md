@@ -36,6 +36,13 @@ subunidad (`GBp`, `ZAc`, `ILA`) — pero no todo: algunos ETF de Londres cotizan
 **Varias líneas de la misma empresa**: una sola fila por empresa. Se usa la línea que la fuente de la lista trate como principal; si la empresa ya está en el
 registro (aunque sea por otra línea o por un ADR), no se añade otra.
 
+**Listas publicadas (F5)**: la anotación `lists` de una fila **no se publica**. Para publicar una lista en `index.json.lists` se añade en la **raíz** del registro
+`"lists": {"<lista>@<AAAA-MM-DD>": {"source": "https://…", "as_of": "AAAA-MM-DD", "size": N, "symbols": [N símbolos, en orden de rango]}}`. El validador
+(`feed_v2_common.list_problems`) rechaza el registro entero si la lista está incompleta (`len(symbols) != size`) o vacía, si falta la fuente o no es `https`, si
+`as_of` no es la fecha del id, si un símbolo no está en el registro o se repite, o si la anotación de las filas no coincide (cada miembro lleva la clave en su
+`lists`, ninguna fila ajena la lleva y un rango no nulo es su posición). Hoy **no hay ninguna lista en la raíz**: el top 50 del 13-nov-2026 solo está anotado en 7
+filas y está incompleto (ver `docs/F5_LISTAS_Y_SIMBOLOS.md`).
+
 ## 2. Pasos para añadir N símbolos
 
 1. Añadir las filas en `dormant`, con `tier`, `currency` y `unit` decididos según lo de arriba. Si salen de una lista, anotar `lists` y dejar el documento de la

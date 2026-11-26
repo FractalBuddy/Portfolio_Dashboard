@@ -269,8 +269,9 @@ def check_unit(entry, observed):
 # Un run
 # ------------------------------------------------------------------------------------------------------------------------------
 class Run:
-    def __init__(self, registry, out, prev, now, force_all=False):
+    def __init__(self, registry, out, prev, now, force_all=False, lists=None):
         self.registry = registry
+        self.lists = lists or {}        # listas de la raíz del registro, ya validadas (F5); se publican en index.json
         self.out, self.prev = out, prev
         self.now = now
         self.today = now.date()
@@ -745,7 +746,11 @@ class Run:
             as_of = lat["as_of"] if lat else (self.today.isoformat() if e["kind"] == "crypto" and e["symbol"].upper() in crypto else None)
             rows.append({"s": e["symbol"], "kind": e["kind"], "name": e["name"], "currency": e["currency"], "unit": e["unit"],
                          "tier": e["tier"], "as_of": as_of, "status": self.final_status(e)})
-        self.emit("index.json", {"schema": c.SCHEMA, "generated_at": self.generated_at, "symbols": rows})
+        doc = {"schema": c.SCHEMA, "generated_at": self.generated_at, "symbols": rows}
+        lists = c.index_lists(self.lists)              # solo listas completas, con fuente https y fecha (las valida el registro); sin listas, sin clave
+        if lists:
+            doc["lists"] = lists
+        self.emit("index.json", doc)
 
     def build_health(self, duration, http):
         cap = lambda l: sorted(set(l))[:40]                                  # noqa: E731
@@ -899,13 +904,13 @@ def build_calendar(today):
 
 
 # ------------------------------------------------------------------------------------------------------------------------------
-def generate(registry, out, prev=None, now=None, force_all=False):
+def generate(registry, out, prev=None, now=None, force_all=False, lists=None):
     """Genera el sitio v2 en `out`. Devuelve el Run (para los tests y el resumen)."""
     now = now or datetime.now(timezone.utc)
     if os.path.exists(out) and os.listdir(out):
         raise FileExistsError("--out debe estar vacío o no existir: no se borra nada")
     os.makedirs(out, exist_ok=True)
-    run = Run(registry, out, prev, now, force_all=force_all)
+    run = Run(registry, out, prev, now, force_all=force_all, lists=lists)
     t0 = time.monotonic()
     yf0 = fm._YF_REQS
     with Counting() as http:
@@ -928,14 +933,14 @@ def main(argv=None):
     ap.add_argument("--force-all", action="store_true", help="refrescar todos los símbolos, sea cual sea su nivel")
     a = ap.parse_args(argv)
     try:
-        registry = c.load_registry(a.registry)
+        registry, lists = c.load_registry_doc(a.registry)
     except c.RegistryError as e:
         print("::error::registro inválido: %s" % str(e).replace("\n", " ")[:400])
         return 1
     fm._DEADLINE = time.monotonic() + V2_YAHOO_BUDGET_SECONDS
     fm._HARD_DEADLINE = time.monotonic() + V2_HARD_BUDGET_SECONDS
     force = a.force_all or os.environ.get("FEED_V2_FORCE_ALL", "").lower() in ("1", "true", "yes")
-    run = generate(registry, a.out, a.prev if a.prev and os.path.isdir(a.prev) else None, force_all=force)
+    run = generate(registry, a.out, a.prev if a.prev and os.path.isdir(a.prev) else None, force_all=force, lists=lists)
     s = run.stats
     print("v2: %d en el registro, %d tocaban, %d actualizados, %d fallidos, %d aplazados, %d con descarga larga; %d peticiones a Yahoo (%d llamadas); "
           "%d bytes en total" % (len(registry), s["due"], s["updated"], s["failed"], s["deferred"], run.backfills, run.yahoo_paced,
