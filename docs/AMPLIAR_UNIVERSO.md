@@ -65,6 +65,7 @@ filas y está incompleto (ver `docs/F5_LISTAS_Y_SIMBOLOS.md`).
 | Fecha | Sonda | Activados | Pendientes |
 |---|---|---|---|
 | 2026-11-20 | «Symbol probe» en `main`, 17:21 UTC: 7 de 7 `OK`, nombre de Yahoo = empresa esperada, divisa = la declarada, última barra del 19 o 20-11 | `SPCX`, `2222.SR`, `000660.KS`, `601288.SS`, `1398.HK`, `601988.SS`, `PM` (top 50, `warm`; ver `docs/universo/TOP50_MCAP_2026-11-13.md`) | ninguna fila `dormant` en el registro |
+| 2026-11-26 (F5) | **pendiente**: no lanzada todavía | — | `ENPH`, `ORSTED.CO` entran `dormant` (`warm`; divisa del sufijo, sin verificar en Yahoo). Ver `docs/F5_LISTAS_Y_SIMBOLOS.md` |
 
 ## 3. Qué pasa si un símbolo muere después
 
@@ -98,7 +99,7 @@ de sitio (10 años diarios) y ~10,4 ficheros; una sola vez, 1 descarga larga (10
 
 ## 5. Techos (no pagar infraestructura; quedarse lejos de los límites gratuitos)
 
-Regla del dueño: nada de pago y **avisar cuando una estimación pase del ~50 % de un límite**. Estimaciones para añadir N símbolos `warm` a lo medido el 19-nov (224 activos de Yahoo; desde la activación del 20-nov son **231** y el registro sigue en 249 filas, así que la fila de `MAX_REGISTRY_SYMBOLS` no cambia):
+Regla del dueño: nada de pago y **avisar cuando una estimación pase del ~50 % de un límite**. Estimaciones para añadir N símbolos `warm` a lo medido el 19-nov (224 activos de Yahoo; desde la activación del 20-nov son **231**; con F5 el registro pasa de 249 a **251** filas (2 `dormant`), 63 % de `MAX_REGISTRY_SYMBOLS`):
 
 | Límite | Valor | Hoy | +50 | +250 | Fuente del límite |
 |---|---|---|---|---|---|
