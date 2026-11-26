@@ -96,7 +96,7 @@ MAX_REGISTRY_SYMBOLS = 400
 # `index.json.lists` (ver index_lists). Las anotaciones por fila (`symbols[i].lists`) siguen siendo metadatos no publicados y tienen que coincidir
 # con la definición de la raíz cuando esta existe.
 MAX_LISTS = 10
-MAX_LIST_SIZE = 500
+MAX_LIST_SIZE = MAX_REGISTRY_SYMBOLS           # una lista no puede tener más símbolos que el registro
 MAX_LIST_SOURCE_LEN = 300
 LIST_FIELDS = frozenset({"source", "as_of", "size", "symbols"})
 _SOURCE_RE = re.compile(r"^https://[A-Za-z0-9.\-]+(?::\d{1,5})?(?:/[^\s<>\x00-\x1f\x7f]*)?$")
