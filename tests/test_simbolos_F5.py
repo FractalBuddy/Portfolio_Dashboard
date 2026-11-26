@@ -72,3 +72,13 @@ def test_el_texto_del_registro_sigue_sin_isin_ni_urls():
     assert "lists" not in raw
     for bad in ("http", "supabase", "/products/", "sb_", "token"):
         assert bad not in text.lower(), bad
+
+
+# ------------------------------------------------------------------ punto 3: ETF de referencia del benchmark (en EUR)
+def test_la_referencia_sp500_en_eur_es_una_sola_fila_activa_y_ya_existia():
+    """SXR8.DE ya estaba en el registro (activa, warm, EUR) antes de F5: no se duplica ni se pasa a `dormant` (dejaría de publicarse un símbolo que
+    ya se publica). El otro ETF de referencia pedido no se añade por la regla de privacidad del registro público (guardia por huella en
+    tests/test_registry_v2.py); no se nombra en el árbol."""
+    rows = [r for r in _rows() if r["symbol"].upper() == "SXR8.DE"]
+    assert len(rows) == 1
+    assert (rows[0]["currency"], rows[0]["unit"], rows[0]["status"], rows[0]["tier"]) == ("EUR", "currency", "active", "warm")
