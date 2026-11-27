@@ -134,8 +134,9 @@ def test_el_registro_real_no_publica_ninguna_lista_y_el_top50_sigue_solo_como_an
     assert "lists" not in raw
     rows, lists = c.load_registry_doc(REGISTRY)
     assert lists == {}
-    anotadas = [r["symbol"] for r in rows if "top50-mcap@2026-11-13" in r.get("lists", {})]
-    assert 0 < len(anotadas) < 50
+    # F6 punto 2: la anotación pasa a la lista del 27-11 y está en las 50 filas; la definición en la raíz llega en el punto 3 (y este test cambia allí).
+    anotadas = [r["symbol"] for r in rows if "top50-mcap@2026-11-27" in r.get("lists", {})]
+    assert len(anotadas) == 50
 
 
 def test_control_negativo_el_top50_real_tal_cual_no_se_puede_publicar(tmp_path):

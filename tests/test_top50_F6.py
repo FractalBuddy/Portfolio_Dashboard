@@ -93,3 +93,39 @@ def test_e2e_las_filas_nuevas_no_se_piden_a_yahoo_ni_tienen_ficheros(world, tmp_
     for sym in NUEVAS_F6:
         assert idx[sym]["status"] == "dormant" and idx[sym]["as_of"] is None, sym
         assert not (out / "v2" / "s" / sym).exists(), sym
+
+
+# ------------------------------------------------------------------ punto 2: anotación por fila y documento de la lista
+OLD_LID = "top50-mcap@2026-11-13"
+ANTES_ANOTADAS = {"SPCX", "2222.SR", "000660.KS", "601288.SS", "1398.HK", "601988.SS", "PM"}   # las 7 que llevaban la lista del 13-11
+
+
+def test_las_50_filas_llevan_la_lista_nueva_con_su_rango_real():
+    by = {r["symbol"]: r for r in _rows()}
+    for pos, sym in enumerate(TOP50, 1):
+        assert by[sym].get("lists") == {LID: pos}, sym
+
+
+def test_ninguna_fila_ajena_lleva_la_lista_y_la_lista_antigua_ya_no_existe():
+    rows = _rows()
+    assert sorted(r["symbol"] for r in rows if LID in r.get("lists", {})) == sorted(TOP50)
+    assert OLD_LID not in REGISTRY.read_text(encoding="utf-8")
+
+
+def test_las_7_filas_de_la_lista_antigua_pasan_a_la_nueva_con_su_rango_real():
+    by = {r["symbol"]: r for r in _rows()}
+    rangos = {s: TOP50.index(s) + 1 for s in ANTES_ANOTADAS}
+    assert rangos == {"SPCX": 7, "2222.SR": 8, "000660.KS": 24, "601288.SS": 29, "1398.HK": 39, "601988.SS": 37, "PM": 49}
+    for sym, pos in rangos.items():
+        assert by[sym]["lists"] == {LID: pos} and by[sym]["status"] == "active", sym
+
+
+def test_el_documento_de_la_lista_nueva_trae_los_50_en_orden_con_la_fuente_y_el_antiguo_esta_sustituido():
+    new = (ROOT / "docs" / "universo" / "TOP50_MCAP_2026-11-27.md").read_text(encoding="utf-8")
+    assert SOURCE in new and "27-11-2026" in new and LID in new
+    filas = [ln for ln in new.splitlines() if ln.startswith("| ") and ln.split("|")[1].strip().isdigit()]
+    got = [ln.split("|")[2].strip().strip("`") for ln in filas]
+    assert got == TOP50
+    assert [int(ln.split("|")[1]) for ln in filas] == list(range(1, 51))
+    old = (ROOT / "docs" / "universo" / "TOP50_MCAP_2026-11-13.md").read_text(encoding="utf-8")
+    assert "SUSTITUIDA" in old.splitlines()[2] and "TOP50_MCAP_2026-11-27.md" in old.splitlines()[2]

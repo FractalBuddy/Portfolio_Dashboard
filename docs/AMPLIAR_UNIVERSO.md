@@ -7,7 +7,7 @@ publica nada a medias).
 ## 1. Formato de una fila
 
 ```json
-{"symbol":"PM","kind":"yahoo","name":"Philip Morris International","currency":"USD","unit":"currency","tier":"warm","status":"active","fail_streak":0,"country":"US","lists":{"top50-mcap@2026-11-13":46}}
+{"symbol":"PM","kind":"yahoo","name":"Philip Morris International","currency":"USD","unit":"currency","tier":"warm","status":"active","fail_streak":0,"country":"US","lists":{"top50-mcap@2026-11-27":49}}
 ```
 
 (Es la fila real de `PM` **después** de activarla; una fila nueva se escribe igual pero con `"status":"dormant"`, ver § 2.)

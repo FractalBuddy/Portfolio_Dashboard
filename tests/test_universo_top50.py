@@ -11,7 +11,9 @@ import feed_v2_common as c
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 REGISTRY = ROOT / "registry.json"
-LIST_ID = "top50-mcap@2026-11-13"
+LIST_ID = "top50-mcap@2026-11-13"            # id de ejemplo para los tests sintéticos de formato (ya no está en el registro real)
+# F6 (auditorias/FIXES_F6_TOP50.md): la lista del 13-11 queda sustituida por la del 27-11 en el registro real.
+REAL_LIST_ID = "top50-mcap@2026-11-27"
 # Las 7 filas que añade esta tanda (empresas del top 50 que faltaban), con su divisa y unidad esperadas. Ninguna cotiza en subunidad.
 NUEVAS = {
     "SPCX": ("USD", "currency", "US"), "2222.SR": ("SAR", "currency", "SA"), "000660.KS": ("KRW", "currency", "KR"),
@@ -71,7 +73,8 @@ def test_load_registry_acepta_los_metadatos_y_los_devuelve():
     entries = c.load_registry(REGISTRY)
     by = {e["symbol"]: e for e in entries}
     for sym, (_cur, _unit, country) in NUEVAS.items():
-        assert by[sym]["country"] == country and LIST_ID in by[sym]["lists"], sym
+        # REQUISITO CAMBIADO (F6): antes `LIST_ID` (13-11) en `lists`; la anotación pasa a la lista del 27-11.
+        assert by[sym]["country"] == country and REAL_LIST_ID in by[sym]["lists"], sym
 
 
 # ------------------------------------------------------------------ controles negativos pedidos (registro real + 1 fila mala)
@@ -130,7 +133,8 @@ def test_las_filas_nuevas_estan_y_son_coherentes(raw):
         # nombre y divisa cotejados) y se activan. Antes: == "dormant".
         assert r["status"] == "active", sym
         assert c.SYMBOL_RE.fullmatch(sym) and re.fullmatch(r"^[A-Za-z0-9.^=\-]{1,15}$", sym)
-        assert list(r["lists"]) == [LIST_ID]
+        # REQUISITO CAMBIADO (F6, auditorias/FIXES_F6_TOP50.md): antes `[LIST_ID]` (lista del 13-11, incompleta); ahora solo la del 27-11.
+        assert list(r["lists"]) == [REAL_LIST_ID]
 
 
 def test_solo_las_filas_nuevas_llevan_metadatos_y_estan_en_dormant(raw):
@@ -145,7 +149,9 @@ def test_solo_las_filas_nuevas_llevan_metadatos_y_estan_en_dormant(raw):
         if r["symbol"] in F6_DORMANT:
             assert r["status"] == "dormant", r["symbol"]
             continue
-        assert "country" not in r and "lists" not in r, r["symbol"]
+        # REQUISITO CAMBIADO (F6): las 50 filas del top 50 del 27-11 llevan su anotación `lists` (y solo esa). Antes: ninguna fila fuera de NUEVAS con `lists`.
+        assert "country" not in r, r["symbol"]
+        assert set(r.get("lists", {})) <= {REAL_LIST_ID}, r["symbol"]
         assert r["status"] == ("dormant" if r["symbol"] in {"ENPH", "ORSTED.CO"} else "active"), r["symbol"]
 
 
