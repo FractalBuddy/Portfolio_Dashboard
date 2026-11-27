@@ -224,5 +224,13 @@ def test_la_fila_de_ejemplo_del_procedimiento_es_valida_y_coincide_con_el_regist
 def test_el_registro_publico_sigue_sin_nada_personal(raw):
     text = REGISTRY.read_text(encoding="utf-8")
     assert not re.search(r"\b[A-Z]{2}[A-Z0-9]{9}[0-9]\b", text), "algo con forma de ISIN"
+    # REQUISITO CAMBIADO (F6, auditorias/FIXES_F6_TOP50.md): la definición de la lista publicada exige una fuente `https` en la raíz del registro, así
+    # que "http" ya no puede faltar del texto entero. Antes: ninguna aparición de "http" en todo registry.json. Ahora: la ÚNICA URL admitida es la
+    # fuente pública de la lista, exactamente (una aparición, en `lists.<id>.source`); fuera de eso, "http" sigue prohibido, y las filas no llevan ninguna.
+    srcs = [d["source"] for d in raw.get("lists", {}).values()]
+    assert srcs == ["https://companiesmarketcap.com/"]
+    assert text.count("http") == 1 and text.count(srcs[0]) == 1
+    rest = text.replace(srcs[0], "")
+    assert "http" not in json.dumps(raw["symbols"]).lower()
     for bad in ("supabase", "http", "/products/", "sb_", "token", "@gmail", "ishares.com"):
-        assert bad not in text.lower(), bad
+        assert bad not in rest.lower(), bad

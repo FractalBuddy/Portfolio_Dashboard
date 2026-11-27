@@ -40,8 +40,9 @@ registro (aunque sea por otra línea o por un ADR), no se añade otra.
 `"lists": {"<lista>@<AAAA-MM-DD>": {"source": "https://…", "as_of": "AAAA-MM-DD", "size": N, "symbols": [N símbolos, en orden de rango]}}`. El validador
 (`feed_v2_common.list_problems`) rechaza el registro entero si la lista está incompleta (`len(symbols) != size`) o vacía, si falta la fuente o no es `https`, si
 `as_of` no es la fecha del id, si un símbolo no está en el registro o se repite, o si la anotación de las filas no coincide (cada miembro lleva la clave en su
-`lists`, ninguna fila ajena la lleva y un rango no nulo es su posición). Hoy **no hay ninguna lista en la raíz**: el top 50 del 13-nov-2026 solo está anotado en 7
-filas y está incompleto (ver `auditorias/FIXES_F5_LISTAS_Y_SIMBOLOS.md`).
+`lists`, ninguna fila ajena la lleva y un rango no nulo es su posición). Desde F6 hay **una** lista en la raíz: `top50-mcap@2026-11-27` (50 símbolos, fuente
+https://companiesmarketcap.com/, consultada el 27-11-2026; ver `docs/universo/TOP50_MCAP_2026-11-27.md` y `auditorias/FIXES_F6_TOP50.md`). Sustituye a la del
+13-nov-2026, que estaba incompleta (7 filas) y nunca se publicó.
 
 ## 2. Pasos para añadir N símbolos
 

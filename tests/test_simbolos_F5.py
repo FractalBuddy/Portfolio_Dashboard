@@ -74,9 +74,15 @@ def test_control_negativo_una_fila_f5_activa_si_se_pediria(world, tmp_path):
 def test_el_texto_del_registro_sigue_sin_isin_ni_urls():
     text = REGISTRY.read_text(encoding="utf-8")
     raw = json.loads(text)
-    assert "lists" not in raw
+    # REQUISITO CAMBIADO (F6, auditorias/FIXES_F6_TOP50.md). Antes: `"lists" not in raw` y ninguna aparición de "http" en todo el texto. F6 define a
+    # propósito la lista top50-mcap@2026-11-27 en la raíz, con su fuente https obligatoria. Ahora: la única lista es esa, la única URL es su fuente
+    # exacta (una sola aparición) y, quitada esa fuente, el texto sigue sin "http" ni el resto de cadenas prohibidas.
+    assert list(raw["lists"]) == ["top50-mcap@2026-11-27"]
+    src = raw["lists"]["top50-mcap@2026-11-27"]["source"]
+    assert src == "https://companiesmarketcap.com/" and text.count("http") == 1
+    rest = text.replace(src, "")
     for bad in ("http", "supabase", "/products/", "sb_", "token"):
-        assert bad not in text.lower(), bad
+        assert bad not in rest.lower(), bad
 
 
 # ------------------------------------------------------------------ punto 3: ETF de referencia del benchmark (en EUR)

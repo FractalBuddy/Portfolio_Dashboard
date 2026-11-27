@@ -129,3 +129,18 @@ def test_el_documento_de_la_lista_nueva_trae_los_50_en_orden_con_la_fuente_y_el_
     assert [int(ln.split("|")[1]) for ln in filas] == list(range(1, 51))
     old = (ROOT / "docs" / "universo" / "TOP50_MCAP_2026-11-13.md").read_text(encoding="utf-8")
     assert "SUSTITUIDA" in old.splitlines()[2] and "TOP50_MCAP_2026-11-27.md" in old.splitlines()[2]
+
+
+# ------------------------------------------------------------------ punto 3: definición en la raíz del registro
+def test_la_raiz_del_registro_define_la_lista_completa_y_fechada():
+    raw = _raw()
+    assert raw["lists"] == {LID: {"source": SOURCE, "as_of": "2026-11-27", "size": 50, "symbols": TOP50}}
+    assert list(raw) == ["schema", "symbols", "lists"]
+
+
+def test_la_lista_real_pasa_list_problems_y_load_registry_doc_la_devuelve():
+    raw = _raw()
+    assert c.list_problems(raw["lists"], raw["symbols"]) == []
+    assert c.registry_problems(raw) == []
+    rows, lists = c.load_registry_doc(REGISTRY)
+    assert list(lists) == [LID] and lists[LID]["symbols"] == TOP50 and len(rows) == FILAS_ANTES + len(NUEVAS_F6)

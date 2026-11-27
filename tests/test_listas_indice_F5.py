@@ -127,27 +127,36 @@ def test_index_lists_forma_publicada():
 
 
 # ------------------------------------------------------------------ el registro real
-def test_el_registro_real_no_publica_ninguna_lista_y_el_top50_sigue_solo_como_anotacion():
-    """REQUISITO: el top 50 del 13-nov-2026 está INCOMPLETO (7 filas anotadas, sin top 50 verificado y fechado). No se define en la raíz y, por
-    tanto, no se publica. Cuando llegue completo (fuente https + fecha + 50 símbolos) se añadirá en la raíz y este test cambiará a propósito."""
+def test_el_registro_real_publica_exactamente_el_top50_del_27_11():
+    """REQUISITO CAMBIADO (F6, auditorias/FIXES_F6_TOP50.md). Antes (F5) se llamaba
+    `test_el_registro_real_no_publica_ninguna_lista_y_el_top50_sigue_solo_como_anotacion` y comprobaba que el registro real NO tenía `lists` en la
+    raíz (`"lists" not in raw`, `load_registry_doc` devolvía `{}`) y que el top 50 del 13-11 solo existía como anotación incompleta (entre 1 y 49 filas
+    anotadas). Era la barrera para no publicar una lista incompleta. Ahora la lista del 27-11 está completa (50 símbolos, fuente https, fecha) y se
+    define en la raíz a propósito: se comprueba que hay exactamente UNA lista, la del 27-11, con 50 miembros, y que la antigua ya no existe."""
     raw = json.loads(REGISTRY.read_text(encoding="utf-8"))
-    assert "lists" not in raw
+    assert list(raw["lists"]) == ["top50-mcap@2026-11-27"]
     rows, lists = c.load_registry_doc(REGISTRY)
-    assert lists == {}
-    # F6 punto 2: la anotación pasa a la lista del 27-11 y está en las 50 filas; la definición en la raíz llega en el punto 3 (y este test cambia allí).
+    d = lists["top50-mcap@2026-11-27"]
+    assert (d["source"], d["as_of"], d["size"], len(d["symbols"])) == ("https://companiesmarketcap.com/", "2026-11-27", 50, 50)
     anotadas = [r["symbol"] for r in rows if "top50-mcap@2026-11-27" in r.get("lists", {})]
-    assert len(anotadas) == 50
+    assert sorted(anotadas) == sorted(d["symbols"])
+    assert not any("top50-mcap@2026-11-13" in r.get("lists", {}) for r in rows)
 
 
-def test_control_negativo_el_top50_real_tal_cual_no_se_puede_publicar(tmp_path):
-    """Si alguien intentara publicar el top 50 con lo que hay (las 7 filas anotadas), el registro se rechaza: está incompleto."""
+def test_control_negativo_el_top50_real_recortado_no_se_puede_publicar(tmp_path):
+    """REQUISITO CAMBIADO (F6). Antes: definía el top 50 del 13-11 con sus 7 filas anotadas y comprobaba que se rechazaba por incompleto. Esa lista
+    ya no existe; el mismo control se hace ahora sobre la lista real del 27-11 recortada a 7 miembros (los 7 primeros, con la anotación de los
+    otros 43 quitada para que el único problema sea el tamaño): se rechaza por «incompleta (7 de 50)»."""
     raw = json.loads(REGISTRY.read_text(encoding="utf-8"))
-    tid = "top50-mcap@2026-11-13"
-    members = [r["symbol"] for r in raw["symbols"] if tid in r.get("lists", {})]
+    tid = "top50-mcap@2026-11-27"
     bad = copy.deepcopy(raw)
-    bad["lists"] = {tid: {"source": "https://example.org/top50", "as_of": "2026-11-13", "size": 50, "symbols": members}}
+    keep = bad["lists"][tid]["symbols"][:7]
+    bad["lists"][tid]["symbols"] = keep
+    for r in bad["symbols"]:
+        if tid in r.get("lists", {}) and r["symbol"] not in keep:
+            del r["lists"]
     probs = c.registry_problems(bad)
-    assert any("incompleta" in p for p in probs), probs
+    assert probs == ["lists[%s]: lista incompleta (7 de 50 símbolos)" % tid], probs
 
 
 # ------------------------------------------------------------------ generador + validador del job publish

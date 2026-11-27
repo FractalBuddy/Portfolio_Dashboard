@@ -260,5 +260,14 @@
 {"symbol":"XLM","kind":"crypto","name":"Stellar","currency":"USD","unit":"currency","tier":"warm","status":"active","fail_streak":0},
 {"symbol":"SHIB","kind":"crypto","name":"Shiba Inu","currency":"USD","unit":"currency","tier":"warm","status":"active","fail_streak":0},
 {"symbol":"TON","kind":"crypto","name":"Toncoin","currency":"USD","unit":"currency","tier":"warm","status":"active","fail_streak":0}
-]
+],
+"lists":{
+"top50-mcap@2026-11-27":{"source":"https://companiesmarketcap.com/","as_of":"2026-11-27","size":50,"symbols":[
+"AAPL","MSFT","NVDA","GOOG","AMZN","TSM","SPCX","2222.SR","META","TSLA",
+"AVGO","LLY","BRK-B","ANT","WMT","JPM","005930.KS","V","MU","AMD",
+"JNJ","XOM","MA","000660.KS","ABBV","ASML","601939.SS","COST","601288.SS","KO",
+"CVX","PG","RO.SW","PLTR","TCEHY","CSCO","601988.SS","HD","1398.HK","688825.SS",
+"MRK","BAC","GE","ORCL","UNH","NVS","PANW","INTC","PM","AZN"
+]}
+}
 }
