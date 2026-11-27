@@ -7,6 +7,9 @@ Punto 1: los 8 símbolos de la lista que no estaban en el registro (misma grafí
 Sus nombres NO están verificados en Yahoo (la sonda informa el de Yahoo). Las variantes ya presentes de la misma empresa no se tocan."""
 import json
 import pathlib
+from datetime import datetime, timezone
+
+import pytest
 
 import feed_v2_common as c
 
@@ -33,6 +36,8 @@ NUEVAS_F6 = {
 VARIANTES = {"GOOG": "GOOGL", "RO.SW": "ROG.SW", "TCEHY": "0700.HK", "NVS": "NOVN.SW", "AZN": "AZN.L", "TSM": "2330.TW"}
 F5_DORMANT = {"ENPH", "ORSTED.CO"}
 FILAS_ANTES = 251
+# Reloj de los e2e: el de tests/v2_world.py (26-10-2026) es anterior a as_of y el validador rechaza fechas futuras (ver el control negativo).
+NOW_F6 = datetime(2026, 11, 27, 12, 0, tzinfo=timezone.utc)
 
 
 def _raw():
@@ -144,3 +149,125 @@ def test_la_lista_real_pasa_list_problems_y_load_registry_doc_la_devuelve():
     assert c.registry_problems(raw) == []
     rows, lists = c.load_registry_doc(REGISTRY)
     assert list(lists) == [LID] and lists[LID]["symbols"] == TOP50 and len(rows) == FILAS_ANTES + len(NUEVAS_F6)
+
+
+# ------------------------------------------------------------------ punto 4: publicación de extremo a extremo y controles negativos
+def test_e2e_el_indice_generado_con_el_registro_real_lleva_la_lista_con_los_50_en_orden_y_el_validador_lo_acepta(world, tmp_path):
+    """Registro real tal cual (259 filas, la lista de la raíz), Yahoo simulado: `index.json.lists` es exactamente la lista, con los 50 en orden de
+    rango; los 50 aparecen en `index.json.symbols` (las `dormant` con `as_of: null`) y el validador del job `publish` acepta el sitio."""
+    import os
+
+    import sanity_check_v2 as sc
+    from v2_world import gen, jl
+    rows, lists = c.load_registry_doc(REGISTRY)
+    world.decl = {e["symbol"]: e for e in rows}
+    world.end = NOW_F6.date()
+    out, _ = gen(tmp_path, "s1", now=NOW_F6, registry=rows, lists=lists)
+    idx = jl(out, "index.json")
+    assert idx["lists"] == {LID: {"id": LID, "source": SOURCE, "as_of": "2026-11-27", "symbols": TOP50}}
+    assert list(idx["lists"][LID]["symbols"]) == TOP50
+    by = {r["s"]: r for r in idx["symbols"]}
+    assert set(TOP50) <= set(by)
+    for sym in NUEVAS_F6:
+        assert by[sym]["status"] == "dormant" and by[sym]["as_of"] is None, sym
+    assert all("lists" not in r for r in idx["symbols"])                                  # la anotación por fila no se publica
+    errs, _w = sc.check_site(os.path.join(out, "v2"), rows, None, today=NOW_F6.date(), lists=lists)
+    assert errs == []
+
+
+def test_control_negativo_la_lista_no_se_publica_antes_de_su_fecha(world, tmp_path):
+    """El validador no admite fechas a más de MAX_FUTURE_DAYS (1) de «hoy». Con el reloj del mundo simulado (26-10-2026, un mes antes de as_of) el
+    ÚNICO error del sitio es el `as_of` de la lista: una lista fechada en el futuro no se publica. (En producción «hoy» ya es >= 27-11-2026.)"""
+    import os
+
+    import sanity_check_v2 as sc
+    from v2_world import NOW, gen
+    rows, lists = c.load_registry_doc(REGISTRY)
+    world.decl = {e["symbol"]: e for e in rows}
+    out, _ = gen(tmp_path, "s1", registry=rows, lists=lists)
+    errs, _w = sc.check_site(os.path.join(out, "v2"), rows, None, today=NOW.date(), lists=lists)
+    assert errs == ["index.json: lists: %s: as_of: fecha fuera de rango" % LID]
+    assert (datetime(2026, 11, 27).date() - NOW.date()).days > sc.MAX_FUTURE_DAYS
+
+
+def test_e2e_main_de_generador_y_validador_con_el_fichero_real(world, tmp_path):
+    """El camino de la CI: `feed_v2.main --registry registry.json` y `sanity_check_v2.main --registry registry.json` (el job `publish` saca el
+    registro del repo) publican y aceptan la lista."""
+    import feed_v2 as f2
+    import sanity_check_v2 as sc
+    from v2_world import jl
+    world.decl = {e["symbol"]: e for e in _rows()}
+    world.end = NOW_F6.date()
+    orig = f2.datetime
+
+    class _DT(orig):
+        @classmethod
+        def now(cls, tz=None):
+            return NOW_F6
+    f2.datetime = _DT
+    try:
+        assert f2.main(["--registry", str(REGISTRY), "--out", str(tmp_path / "o" / "v2")]) == 0
+    finally:
+        f2.datetime = orig
+    assert jl(tmp_path / "o", "index.json")["lists"][LID]["symbols"] == TOP50
+    assert sc.main(["--site", str(tmp_path / "o" / "v2"), "--registry", str(REGISTRY), "--today", NOW_F6.date().isoformat()]) == 0
+
+
+def _bad(fn):
+    raw = _raw()
+    fn(raw)
+    return raw
+
+
+def _drop_row(sym):
+    def f(raw):
+        raw["symbols"] = [r for r in raw["symbols"] if r["symbol"] != sym]
+    return f
+
+
+def _set_last(sym):
+    def f(raw):
+        raw["lists"][LID]["symbols"][-1] = sym
+    return f
+
+
+def _drop_last_member(raw):
+    gone = raw["lists"][LID]["symbols"].pop()
+    for r in raw["symbols"]:
+        if r["symbol"] == gone:
+            del r["lists"]                                    # sin la anotación huérfana: el único problema es el tamaño
+
+
+NEGATIVOS = {
+    "simbolo_quitado_del_registro": (_drop_row("ANT"), ["lists[%s]: el símbolo ANT no está en el registro" % LID]),
+    "49_simbolos": (_drop_last_member, ["lists[%s]: lista incompleta (49 de 50 símbolos)" % LID]),
+    "grafia_distinta": (lambda raw: raw["lists"][LID]["symbols"].__setitem__(13, "ant"), ["lists[%s]: el símbolo ant no está en el registro" % LID]),
+    "fuente_http": (lambda raw: raw["lists"][LID].__setitem__("source", "http://companiesmarketcap.com/"),
+                    ["lists[%s]: source ausente o no es una URL https" % LID]),
+    "duplicado": (_set_last("AAPL"), ["lists[%s]: símbolo repetido AAPL" % LID, "lists[%s]: AZN lleva la anotación de la lista pero no está en ella" % LID]),
+    "duplicado_otra_caja": (_set_last("aapl"), ["lists[%s]: símbolo repetido aapl" % LID, "lists[%s]: AZN lleva la anotación de la lista pero no está en ella" % LID]),
+}
+
+
+def test_control_la_lista_real_sin_tocar_no_tiene_problemas():
+    assert c.registry_problems(_raw()) == []
+
+
+@pytest.mark.parametrize("case", sorted(NEGATIVOS))
+def test_control_negativo_la_lista_real_estropeada_se_rechaza(case):
+    fn, expected = NEGATIVOS[case]
+    assert c.registry_problems(_bad(fn)) == expected
+
+
+@pytest.mark.parametrize("case", sorted(NEGATIVOS))
+def test_control_negativo_con_la_lista_estropeada_ni_el_generador_ni_el_validador_arrancan(case, tmp_path):
+    """Lista mala = registro inválido: el generador no escribe nada y el validador del job `publish` no acepta el registro (no hay publicación a medias)."""
+    import feed_v2 as f2
+    import sanity_check_v2 as sc
+    p = tmp_path / "r.json"
+    p.write_text(json.dumps(_bad(NEGATIVOS[case][0])), encoding="utf-8")
+    with pytest.raises(c.RegistryError):
+        c.load_registry_doc(p)
+    assert f2.main(["--registry", str(p), "--out", str(tmp_path / "o" / "v2")]) != 0
+    assert not (tmp_path / "o" / "v2" / "manifest.json").exists()
+    assert sc.main(["--site", str(tmp_path / "o" / "v2"), "--registry", str(p)]) != 0
