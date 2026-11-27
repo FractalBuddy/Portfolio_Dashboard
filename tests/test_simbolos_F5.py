@@ -28,14 +28,19 @@ def test_las_filas_f5_estan_en_dormant_con_divisa_y_unidad_del_sufijo():
 
 
 def test_tamano_del_registro_y_solo_estas_filas_estan_en_dormant():
+    # REQUISITO CAMBIADO (F6, auditorias/FIXES_F6_TOP50.md): F6 añade 8 filas `dormant` del top 50. Antes: el registro tenía exactamente 249 + 2 filas y las
+    # únicas `dormant` eran las 2 de F5. Ahora se comprueba que las de F5 siguen ahí y `dormant`; el tamaño exacto y el conjunto completo de `dormant`
+    # los fija tests/test_top50_F6.py::test_tamano_del_registro_y_filas_dormant.
     rows = _rows()
-    assert len(rows) == FILAS_ANTES + len(NUEVAS_F5)
-    assert {r["symbol"] for r in rows if r["status"] == "dormant"} == set(NUEVAS_F5)
+    assert len(rows) >= FILAS_ANTES + len(NUEVAS_F5)
+    assert set(NUEVAS_F5) <= {r["symbol"] for r in rows if r["status"] == "dormant"}
 
 
 def test_la_sonda_por_defecto_prueba_exactamente_las_filas_f5():
+    # REQUISITO CAMBIADO (F6): antes `== set(NUEVAS_F5)` (eran las únicas `dormant`). Con las 8 de F6 la sonda por defecto prueba las 10; la igualdad
+    # exacta la fija tests/test_top50_F6.py::test_la_sonda_por_defecto_prueba_las_dormant_f5_y_f6.
     import symbol_probe as sp
-    assert {e["symbol"] for e in sp.select(_rows())} == set(NUEVAS_F5)
+    assert set(NUEVAS_F5) <= {e["symbol"] for e in sp.select(_rows())}
 
 
 def test_ninguna_fila_f5_duplica_una_empresa_ya_presente():

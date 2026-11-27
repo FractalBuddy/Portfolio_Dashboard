@@ -18,6 +18,7 @@ NUEVAS = {
     "1398.HK": ("HKD", "currency", "CN"), "601288.SS": ("CNY", "currency", "CN"), "601988.SS": ("CNY", "currency", "CN"),
     "PM": ("USD", "currency", "US"),
 }
+F6_DORMANT = {"GOOG", "ANT", "601939.SS", "RO.SW", "TCEHY", "688825.SS", "NVS", "AZN"}   # F6: auditorias/FIXES_F6_TOP50.md
 
 
 def doc(*rows):
@@ -138,6 +139,11 @@ def test_solo_las_filas_nuevas_llevan_metadatos_y_estan_en_dormant(raw):
     # REQUISITO CAMBIADO (F5, auditorias/FIXES_F5_LISTAS_Y_SIMBOLOS.md): ENPH y ORSTED.CO entran `dormant` (sin metadatos) hasta pasar la sonda. Antes: todas `active`.
     for r in raw["symbols"]:
         if r["symbol"] in NUEVAS:
+            continue
+        # REQUISITO CAMBIADO (F6, auditorias/FIXES_F6_TOP50.md): las 8 filas nuevas del top 50 del 27-11 entran `dormant` (con `country`). Antes: solo ENPH y
+        # ORSTED.CO `dormant` y ninguna otra fila con metadatos.
+        if r["symbol"] in F6_DORMANT:
+            assert r["status"] == "dormant", r["symbol"]
             continue
         assert "country" not in r and "lists" not in r, r["symbol"]
         assert r["status"] == ("dormant" if r["symbol"] in {"ENPH", "ORSTED.CO"} else "active"), r["symbol"]
