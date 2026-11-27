@@ -35,6 +35,9 @@ subunidad (`GBp`, `ZAc`, `ILA`) — pero no todo: algunos ETF de Londres cotizan
 
 **Varias líneas de la misma empresa**: una sola fila por empresa. Se usa la línea que la fuente de la lista trate como principal; si la empresa ya está en el
 registro (aunque sea por otra línea o por un ADR), no se añade otra.
+**Excepción abierta en F6 (pendiente de decisión del dueño)**: una lista publicada exige que sus símbolos estén en el registro **con la misma grafía**, así que
+el top 50 del 27-11 añadió `GOOG`, `RO.SW`, `TCEHY`, `NVS` y `AZN` en `dormant` aunque ya existían `GOOGL`, `ROG.SW`, `0700.HK`, `NOVN.SW` y `AZN.L`. Nada se ha
+renombrado ni borrado; qué línea se queda la decide el dueño (ver `auditorias/FIXES_F6_TOP50.md`).
 
 **Listas publicadas (F5)**: la anotación `lists` de una fila **no se publica**. Para publicar una lista en `index.json.lists` se añade en la **raíz** del registro
 `"lists": {"<lista>@<AAAA-MM-DD>": {"source": "https://…", "as_of": "AAAA-MM-DD", "size": N, "symbols": [N símbolos, en orden de rango]}}`. El validador
@@ -67,6 +70,7 @@ https://companiesmarketcap.com/, consultada el 27-11-2026; ver `docs/universo/TO
 |---|---|---|---|
 | 2026-11-20 | «Symbol probe» en `main`, 17:21 UTC: 7 de 7 `OK`, nombre de Yahoo = empresa esperada, divisa = la declarada, última barra del 19 o 20-11 | `SPCX`, `2222.SR`, `000660.KS`, `601288.SS`, `1398.HK`, `601988.SS`, `PM` (top 50, `warm`; ver `docs/universo/TOP50_MCAP_2026-11-13.md`) | ninguna fila `dormant` en el registro |
 | 2026-11-26 (F5) | **pendiente**: no lanzada todavía | — | `ENPH`, `ORSTED.CO` entran `dormant` (`warm`; divisa del sufijo, sin verificar en Yahoo). Ver `auditorias/FIXES_F5_LISTAS_Y_SIMBOLOS.md` |
+| 2026-11-27 (F6) | **pendiente**: no lanzada todavía | — | `GOOG`, `ANT`, `601939.SS`, `RO.SW`, `TCEHY`, `688825.SS`, `NVS`, `AZN` entran `dormant` (`warm`; divisa del sufijo y nombre sin verificar en Yahoo; top 50 del 27-11). Ver `docs/universo/TOP50_MCAP_2026-11-27.md` y `auditorias/FIXES_F6_TOP50.md` |
 
 ## 3. Qué pasa si un símbolo muere después
 
@@ -100,7 +104,7 @@ de sitio (10 años diarios) y ~10,4 ficheros; una sola vez, 1 descarga larga (10
 
 ## 5. Techos (no pagar infraestructura; quedarse lejos de los límites gratuitos)
 
-Regla del dueño: nada de pago y **avisar cuando una estimación pase del ~50 % de un límite**. Estimaciones para añadir N símbolos `warm` a lo medido el 19-nov (224 activos de Yahoo; desde la activación del 20-nov son **231**; con F5 el registro pasa de 249 a **251** filas (2 `dormant`), 63 % de `MAX_REGISTRY_SYMBOLS`):
+Regla del dueño: nada de pago y **avisar cuando una estimación pase del ~50 % de un límite**. Estimaciones para añadir N símbolos `warm` a lo medido el 19-nov (224 activos de Yahoo; desde la activación del 20-nov son **231**; con F5 el registro pasa de 249 a 251 filas (2 `dormant`), 63 % de `MAX_REGISTRY_SYMBOLS`; con F6, a **259** filas (10 `dormant`), **65 %**; los activos de Yahoo siguen siendo 231):
 
 | Límite | Valor | Hoy | +50 | +250 | Fuente del límite |
 |---|---|---|---|---|---|

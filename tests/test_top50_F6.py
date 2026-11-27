@@ -271,3 +271,41 @@ def test_control_negativo_con_la_lista_estropeada_ni_el_generador_ni_el_validado
     assert f2.main(["--registry", str(p), "--out", str(tmp_path / "o" / "v2")]) != 0
     assert not (tmp_path / "o" / "v2" / "manifest.json").exists()
     assert sc.main(["--site", str(tmp_path / "o" / "v2"), "--registry", str(p)]) != 0
+
+
+# ------------------------------------------------------------------ punto 5: límites
+def test_limites_el_registro_queda_bajo_el_80_por_ciento_de_su_tope():
+    n = len(_rows())
+    assert n == 259 and n / c.MAX_REGISTRY_SYMBOLS < 0.8                                  # 259 de 400 = 64,75 %; parar si pasara de 320
+    assert c.MAX_REGISTRY_SYMBOLS == 400 and c.HEADROOM_WARN_FRACTION == 0.5               # el aviso al 50 % no cambia
+
+
+def test_limites_las_filas_dormant_y_la_lista_no_anaden_ficheros_y_el_manifest_apenas_cambia(world, tmp_path):
+    """Mismo mundo simulado, dos registros: el real (F6) y el real sin lo de F6 (sin las 8 filas nuevas, sin la lista de la raíz ni las anotaciones,
+    que no se publican). Los ficheros publicados son los mismos; solo crecen index.json (8 filas + la lista) y health.json (las 8 en `dormant`).
+    `V2_MEASURE=1 pytest -s -k limites_las_filas` imprime los bytes."""
+    import os
+
+    from v2_world import gen
+    rows, lists = c.load_registry_doc(REGISTRY)
+    antes = [{k: v for k, v in r.items() if k != "lists"} for r in rows if r["symbol"] not in NUEVAS_F6]
+    world.decl = {e["symbol"]: e for e in rows}
+    world.end = NOW_F6.date()
+    o1, _ = gen(tmp_path, "antes", now=NOW_F6, registry=antes)
+    o2, _ = gen(tmp_path, "despues", now=NOW_F6, registry=rows, lists=lists)
+
+    def files(o):
+        base = os.path.join(o, "v2")
+        return {os.path.relpath(os.path.join(d, f), base): os.path.getsize(os.path.join(d, f)) for d, _s, fs in os.walk(base) for f in fs}
+    f1, f2_ = files(o1), files(o2)
+    assert set(f1) == set(f2_)
+    changed = {k for k in f1 if f1[k] != f2_[k]}
+    assert changed <= {"index.json", "health.json", "manifest.json", c.MANIFEST_ROOT}, changed
+    d_index = f2_["index.json"] - f1["index.json"]
+    d_lists = len(c.dumps({"lists": c.index_lists(lists)}).encode()) - len("{}")
+    assert 0 < d_lists < d_index < 2500
+    assert abs(f2_["manifest.json"] - f1["manifest.json"]) <= 4 and f2_["index.json"] < c.MAX_BYTES["index"] / 2
+    if os.environ.get("V2_MEASURE"):
+        print("\n  ficheros %d -> %d; index.json %d -> %d B (+%d; lista ~%d); health.json %d -> %d B; manifest.json %d -> %d B (tope %d)" % (
+            len(f1), len(f2_), f1["index.json"], f2_["index.json"], d_index, d_lists, f1["health.json"], f2_["health.json"],
+            f1["manifest.json"], f2_["manifest.json"], c.MAX_BYTES["manifest"]))
