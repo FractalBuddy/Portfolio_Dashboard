@@ -16,7 +16,7 @@ def test_topes_fijados():
 
 def test_el_registro_real_esta_bajo_el_tope_y_por_encima_del_aviso():
     n = len(c.load_registry(ROOT / "registry.json"))
-    assert c.HEADROOM_WARN_FRACTION * c.MAX_REGISTRY_SYMBOLS <= n < c.MAX_REGISTRY_SYMBOLS      # 251 de 400 = 63 %: el validador avisa (no bloquea)
+    assert c.HEADROOM_WARN_FRACTION * c.MAX_REGISTRY_SYMBOLS <= n < c.MAX_REGISTRY_SYMBOLS      # 259 de 400 = 65 % (F6; antes 251 = 63 %): el validador avisa
 
 
 def test_el_aviso_del_50_por_ciento_salta_con_el_tamano_real_del_registro():
@@ -30,7 +30,8 @@ def test_el_aviso_del_50_por_ciento_salta_con_el_tamano_real_del_registro():
             self.w.append(m)
     ctx = Ctx()
     sc._check_headroom({}, len(c.load_registry(ROOT / "registry.json")), ctx)
-    assert ctx.w and "MAX_REGISTRY_SYMBOLS 63 % (251 de 400)" in ctx.w[0]
+    # REQUISITO CAMBIADO (F6, auditorias/FIXES_F6_TOP50.md): F6 añade 8 filas `dormant` (251 -> 259). Antes: "63 % (251 de 400)". El umbral del aviso no cambia.
+    assert ctx.w and "MAX_REGISTRY_SYMBOLS 65 % (259 de 400)" in ctx.w[0]
     ctx = Ctx()
     sc._check_headroom({}, 199, ctx)                                                         # control negativo: por debajo del 50 %, sin aviso
     assert ctx.w == []

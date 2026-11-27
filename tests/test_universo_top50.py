@@ -11,13 +11,16 @@ import feed_v2_common as c
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 REGISTRY = ROOT / "registry.json"
-LIST_ID = "top50-mcap@2026-11-13"
+LIST_ID = "top50-mcap@2026-11-13"            # id de ejemplo para los tests sintéticos de formato (ya no está en el registro real)
+# F6 (auditorias/FIXES_F6_TOP50.md): la lista del 13-11 queda sustituida por la del 27-11 en el registro real.
+REAL_LIST_ID = "top50-mcap@2026-11-27"
 # Las 7 filas que añade esta tanda (empresas del top 50 que faltaban), con su divisa y unidad esperadas. Ninguna cotiza en subunidad.
 NUEVAS = {
     "SPCX": ("USD", "currency", "US"), "2222.SR": ("SAR", "currency", "SA"), "000660.KS": ("KRW", "currency", "KR"),
     "1398.HK": ("HKD", "currency", "CN"), "601288.SS": ("CNY", "currency", "CN"), "601988.SS": ("CNY", "currency", "CN"),
     "PM": ("USD", "currency", "US"),
 }
+F6_DORMANT = {"GOOG", "ANT", "601939.SS", "RO.SW", "TCEHY", "688825.SS", "NVS", "AZN"}   # F6: auditorias/FIXES_F6_TOP50.md
 
 
 def doc(*rows):
@@ -70,7 +73,8 @@ def test_load_registry_acepta_los_metadatos_y_los_devuelve():
     entries = c.load_registry(REGISTRY)
     by = {e["symbol"]: e for e in entries}
     for sym, (_cur, _unit, country) in NUEVAS.items():
-        assert by[sym]["country"] == country and LIST_ID in by[sym]["lists"], sym
+        # REQUISITO CAMBIADO (F6): antes `LIST_ID` (13-11) en `lists`; la anotación pasa a la lista del 27-11.
+        assert by[sym]["country"] == country and REAL_LIST_ID in by[sym]["lists"], sym
 
 
 # ------------------------------------------------------------------ controles negativos pedidos (registro real + 1 fila mala)
@@ -129,7 +133,8 @@ def test_las_filas_nuevas_estan_y_son_coherentes(raw):
         # nombre y divisa cotejados) y se activan. Antes: == "dormant".
         assert r["status"] == "active", sym
         assert c.SYMBOL_RE.fullmatch(sym) and re.fullmatch(r"^[A-Za-z0-9.^=\-]{1,15}$", sym)
-        assert list(r["lists"]) == [LIST_ID]
+        # REQUISITO CAMBIADO (F6, auditorias/FIXES_F6_TOP50.md): antes `[LIST_ID]` (lista del 13-11, incompleta); ahora solo la del 27-11.
+        assert list(r["lists"]) == [REAL_LIST_ID]
 
 
 def test_solo_las_filas_nuevas_llevan_metadatos_y_estan_en_dormant(raw):
@@ -139,7 +144,14 @@ def test_solo_las_filas_nuevas_llevan_metadatos_y_estan_en_dormant(raw):
     for r in raw["symbols"]:
         if r["symbol"] in NUEVAS:
             continue
-        assert "country" not in r and "lists" not in r, r["symbol"]
+        # REQUISITO CAMBIADO (F6, auditorias/FIXES_F6_TOP50.md): las 8 filas nuevas del top 50 del 27-11 entran `dormant` (con `country`). Antes: solo ENPH y
+        # ORSTED.CO `dormant` y ninguna otra fila con metadatos.
+        if r["symbol"] in F6_DORMANT:
+            assert r["status"] == "dormant", r["symbol"]
+            continue
+        # REQUISITO CAMBIADO (F6): las 50 filas del top 50 del 27-11 llevan su anotación `lists` (y solo esa). Antes: ninguna fila fuera de NUEVAS con `lists`.
+        assert "country" not in r, r["symbol"]
+        assert set(r.get("lists", {})) <= {REAL_LIST_ID}, r["symbol"]
         assert r["status"] == ("dormant" if r["symbol"] in {"ENPH", "ORSTED.CO"} else "active"), r["symbol"]
 
 
@@ -212,5 +224,13 @@ def test_la_fila_de_ejemplo_del_procedimiento_es_valida_y_coincide_con_el_regist
 def test_el_registro_publico_sigue_sin_nada_personal(raw):
     text = REGISTRY.read_text(encoding="utf-8")
     assert not re.search(r"\b[A-Z]{2}[A-Z0-9]{9}[0-9]\b", text), "algo con forma de ISIN"
+    # REQUISITO CAMBIADO (F6, auditorias/FIXES_F6_TOP50.md): la definición de la lista publicada exige una fuente `https` en la raíz del registro, así
+    # que "http" ya no puede faltar del texto entero. Antes: ninguna aparición de "http" en todo registry.json. Ahora: la ÚNICA URL admitida es la
+    # fuente pública de la lista, exactamente (una aparición, en `lists.<id>.source`); fuera de eso, "http" sigue prohibido, y las filas no llevan ninguna.
+    srcs = [d["source"] for d in raw.get("lists", {}).values()]
+    assert srcs == ["https://companiesmarketcap.com/"]
+    assert text.count("http") == 1 and text.count(srcs[0]) == 1
+    rest = text.replace(srcs[0], "")
+    assert "http" not in json.dumps(raw["symbols"]).lower()
     for bad in ("supabase", "http", "/products/", "sb_", "token", "@gmail", "ishares.com"):
-        assert bad not in text.lower(), bad
+        assert bad not in rest.lower(), bad

@@ -120,7 +120,8 @@ def test_texto_de_yahoo_saneado_para_markdown_y_json():
 
 # ------------------------------------------------------------------ selección y CLI
 TOP50_ACTIVADAS = {"SPCX", "2222.SR", "000660.KS", "1398.HK", "601288.SS", "601988.SS", "PM"}
-F5_DORMANT = {"ENPH", "ORSTED.CO"}
+# REQUISITO CAMBIADO (F6, auditorias/FIXES_F6_TOP50.md): antes solo {"ENPH", "ORSTED.CO"}; F6 añade 8 filas `dormant` del top 50 (pendientes de sonda).
+F5_DORMANT = {"ENPH", "ORSTED.CO"} | {"GOOG", "ANT", "601939.SS", "RO.SW", "TCEHY", "688825.SS", "NVS", "AZN"}
 
 
 def test_seleccion_por_defecto_son_las_dormant_y_symbols_debe_estar_en_el_registro(capsys, tmp_path):

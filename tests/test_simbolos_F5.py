@@ -28,14 +28,19 @@ def test_las_filas_f5_estan_en_dormant_con_divisa_y_unidad_del_sufijo():
 
 
 def test_tamano_del_registro_y_solo_estas_filas_estan_en_dormant():
+    # REQUISITO CAMBIADO (F6, auditorias/FIXES_F6_TOP50.md): F6 añade 8 filas `dormant` del top 50. Antes: el registro tenía exactamente 249 + 2 filas y las
+    # únicas `dormant` eran las 2 de F5. Ahora se comprueba que las de F5 siguen ahí y `dormant`; el tamaño exacto y el conjunto completo de `dormant`
+    # los fija tests/test_top50_F6.py::test_tamano_del_registro_y_filas_dormant.
     rows = _rows()
-    assert len(rows) == FILAS_ANTES + len(NUEVAS_F5)
-    assert {r["symbol"] for r in rows if r["status"] == "dormant"} == set(NUEVAS_F5)
+    assert len(rows) >= FILAS_ANTES + len(NUEVAS_F5)
+    assert set(NUEVAS_F5) <= {r["symbol"] for r in rows if r["status"] == "dormant"}
 
 
 def test_la_sonda_por_defecto_prueba_exactamente_las_filas_f5():
+    # REQUISITO CAMBIADO (F6): antes `== set(NUEVAS_F5)` (eran las únicas `dormant`). Con las 8 de F6 la sonda por defecto prueba las 10; la igualdad
+    # exacta la fija tests/test_top50_F6.py::test_la_sonda_por_defecto_prueba_las_dormant_f5_y_f6.
     import symbol_probe as sp
-    assert {e["symbol"] for e in sp.select(_rows())} == set(NUEVAS_F5)
+    assert set(NUEVAS_F5) <= {e["symbol"] for e in sp.select(_rows())}
 
 
 def test_ninguna_fila_f5_duplica_una_empresa_ya_presente():
@@ -69,9 +74,15 @@ def test_control_negativo_una_fila_f5_activa_si_se_pediria(world, tmp_path):
 def test_el_texto_del_registro_sigue_sin_isin_ni_urls():
     text = REGISTRY.read_text(encoding="utf-8")
     raw = json.loads(text)
-    assert "lists" not in raw
+    # REQUISITO CAMBIADO (F6, auditorias/FIXES_F6_TOP50.md). Antes: `"lists" not in raw` y ninguna aparición de "http" en todo el texto. F6 define a
+    # propósito la lista top50-mcap@2026-11-27 en la raíz, con su fuente https obligatoria. Ahora: la única lista es esa, la única URL es su fuente
+    # exacta (una sola aparición) y, quitada esa fuente, el texto sigue sin "http" ni el resto de cadenas prohibidas.
+    assert list(raw["lists"]) == ["top50-mcap@2026-11-27"]
+    src = raw["lists"]["top50-mcap@2026-11-27"]["source"]
+    assert src == "https://companiesmarketcap.com/" and text.count("http") == 1
+    rest = text.replace(src, "")
     for bad in ("http", "supabase", "/products/", "sb_", "token"):
-        assert bad not in text.lower(), bad
+        assert bad not in rest.lower(), bad
 
 
 # ------------------------------------------------------------------ punto 3: ETF de referencia del benchmark (en EUR)
