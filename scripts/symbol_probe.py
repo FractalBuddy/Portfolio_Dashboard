@@ -12,7 +12,7 @@ y parada limpia (sin reintentos) ante un 429 o tres fallos de red seguidos. Apli
 `check_unit`, barras con `split_bars`, congelado a FROZEN_DAYS, rango plausible del precio por `unit`) y una más estricta: en `currency`/`subunit` Yahoo
 TIENE que informar la divisa (el generador, en `currency`, publica aunque Yahoo calle; para ACTIVAR un símbolo se exige verla).
 
-Salida: tabla en Markdown (--summary-out, p. ej. $GITHUB_STEP_SUMMARY) y JSON (--json-out). Solo datos públicos: símbolo, nombre del registro, divisa y
+Salida: una línea por símbolo en el log del paso (stdout; ver `log_line`), tabla en Markdown (--summary-out, p. ej. $GITHUB_STEP_SUMMARY) y JSON (--json-out). Solo datos públicos: símbolo, nombre del registro, divisa y
 unidad declaradas y observadas, nombre/bolsa/tipo que da Yahoo (saneados), última fecha y último cierre. Código de salida: 0 = todos OK; 1 = alguno
 falla o no se pudo probar; 2 = argumentos o registro inválidos.
 
@@ -108,14 +108,23 @@ def fetch(sym):
     return df, meta
 
 
-def probe(entries, max_symbols, fetcher=fetch, sleep=time.sleep, clock=time.monotonic, today=None):
-    """Prueba hasta `max_symbols` entradas. Devuelve la lista de resultados (uno por entrada, en orden; las que no se prueban, `not_tried`)."""
+def probe(entries, max_symbols, fetcher=fetch, sleep=time.sleep, clock=time.monotonic, today=None, emit=None):
+    """Prueba hasta `max_symbols` entradas. Devuelve la lista de resultados (uno por entrada, en orden; las que no se prueban, `not_tried`).
+    `emit(resultado)`, si se da, se llama una vez por resultado nada más tenerlo (así el log del paso va avanzando); no cambia lo que se devuelve."""
     today = today or datetime.now(timezone.utc).date()
     results, last, net_fails, stop = [], None, 0, None
+    n_done = 0
+
+    def flush():
+        nonlocal n_done
+        while emit is not None and n_done < len(results):
+            emit(results[n_done])
+            n_done += 1
     for i, e in enumerate(entries):
         base = {"symbol": e["symbol"], "name": e["name"], "currency": e["currency"], "unit": e["unit"], "status": e["status"]}
         if stop or i >= max_symbols:
             results.append({**base, "verdict": "not_tried", "why": stop or "tope de símbolos por run"})
+            flush()
             continue
         if last is not None:
             wait = MIN_GAP_SECONDS - (clock() - last)
@@ -129,22 +138,50 @@ def probe(entries, max_symbols, fetcher=fetch, sleep=time.sleep, clock=time.mono
             if fm._is_rate_limit(exc):
                 stop = "Yahoo respondió 429: parada limpia"
                 results.append({**base, "verdict": "not_tried", "why": stop})
+                flush()
                 continue
             net_fails += 1
             results.append({**base, "verdict": "http_error", "why": type(exc).__name__})
             if net_fails >= MAX_NET_FAILS_IN_A_ROW:
                 stop = "%d fallos de red seguidos: parada limpia" % net_fails
+            flush()
             continue
         try:
             verdict, info = judge(e, df, meta, today)
         except Exception as exc:                                          # noqa: BLE001
             verdict, info = "empty", {"why": type(exc).__name__}
         results.append({**base, "verdict": verdict, **info})
+        flush()
     return results
 
 
 def _cell(v):
     return "—" if v is None else str(v).replace("|", "/")
+
+
+_LOG_DROP_RE = re.compile(r"[<>`\x00-\x1f\x7f-\x9f]+")
+
+
+def _log_text(v):
+    """Texto para el log del paso en una sola línea: sin <, >, ` ni controles (saltos de línea, tabuladores), `|` -> `/` como en el resumen, espacios
+    colapsados. Conserva acentos (el nombre del registro se compara a ojo; `clean` los quitaría)."""
+    if v is None or v == "":
+        return "—"
+    s = " ".join(_LOG_DROP_RE.sub(" ", str(v)).replace("|", "/").split())
+    return s or "—"
+
+
+def log_line(r):
+    """UNA línea de texto por símbolo para el LOG del paso (stdout), con lo necesario para comparar la empresa a ojo:
+    símbolo · veredicto · registro: nombre (divisa/unidad) · yahoo: nombre · bolsa · tipo · divisa · última: fecha cierre.
+    Sin Yahoo (http_error, not_tried) en lugar de los campos de Yahoo va el motivo. Solo formatea lo que ya calculó `probe`."""
+    if "yahoo_name" in r:
+        yahoo = " · ".join(_log_text(r.get(k)) for k in ("yahoo_name", "yahoo_exchange", "yahoo_type", "yahoo_currency"))
+    else:
+        yahoo = "— (%s)" % _log_text(r.get("why"))
+    last = "%s %s" % (_log_text(r.get("last_date")), _log_text(r.get("last_close"))) if r.get("last_date") else "—"
+    return "%s · %s · registro: %s (%s/%s) · yahoo: %s · última: %s" % (
+        r["symbol"], r["verdict"].upper(), _log_text(r["name"]), r["currency"], r["unit"], yahoo, last)
 
 
 def summary_md(results, generated_at):
@@ -189,7 +226,7 @@ def main(argv=None, fetcher=fetch):
         print("sonda: nada que probar (ninguna fila yahoo en %s)" % a.select)
         return 0
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    results = probe(entries, n, fetcher=fetcher)
+    results = probe(entries, n, fetcher=fetcher, emit=lambda r: print(log_line(r), flush=True))
     md = summary_md(results, generated_at)
     if a.summary_out:
         with open(a.summary_out, "a", encoding="utf-8") as f:
