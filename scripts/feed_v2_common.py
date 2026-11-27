@@ -90,6 +90,16 @@ MAX_LISTS_PER_SYMBOL = 10
 MAX_LIST_RANK = 100_000
 MAX_NAME_LEN = 80
 MAX_REGISTRY_SYMBOLS = 400
+# Listas PUBLICADAS (F5): clave opcional `lists` en la RAÍZ del registro, {"<lista>@<AAAA-MM-DD>": {"source": "https://...", "as_of": "AAAA-MM-DD",
+# "size": N, "symbols": [N símbolos del registro, en orden de rango]}}. Solo se define una lista cuando está COMPLETA (len(symbols) == size), con fuente
+# https y fecha igual a la del id; si no, el registro entero es inválido (no hay publicación a medias). Lo que valida se publica tal cual en
+# `index.json.lists` (ver index_lists). Las anotaciones por fila (`symbols[i].lists`) siguen siendo metadatos no publicados y tienen que coincidir
+# con la definición de la raíz cuando esta existe.
+MAX_LISTS = 10
+MAX_LIST_SIZE = MAX_REGISTRY_SYMBOLS           # una lista no puede tener más símbolos que el registro
+MAX_LIST_SOURCE_LEN = 300
+LIST_FIELDS = frozenset({"source", "as_of", "size", "symbols"})
+_SOURCE_RE = re.compile(r"^https://[A-Za-z0-9.\-]+(?::\d{1,5})?(?:/[^\s<>\x00-\x1f\x7f]*)?$")
 _NAME_BAD_RE = re.compile(r"[<>\x00-\x1f\x7f]")
 
 # Frecuencia mínima entre dos refrescos de un símbolo según su nivel. hot = en cada run (AU01-F1: el disparador externo lanza el workflow cada ~60 min en
@@ -108,8 +118,8 @@ class RegistryError(ValueError):
 def registry_problems(doc):
     """Lista de textos con lo que está mal en un registro ya parseado (vacía = válido)."""
     out = []
-    if not isinstance(doc, dict) or set(doc) - {"schema", "symbols"}:
-        return ["la raíz debe ser un objeto con solo `schema` y `symbols`"]
+    if not isinstance(doc, dict) or set(doc) - {"schema", "symbols", "lists"}:
+        return ["la raíz debe ser un objeto con solo `schema`, `symbols` y, opcional, `lists`"]
     if doc.get("schema") != 1:
         out.append("schema del registro != 1")
     rows = doc.get("symbols")
@@ -163,7 +173,80 @@ def registry_problems(doc):
             out.append("%s: country inválido (ISO 3166-1 alfa-2 en mayúsculas)" % where)
         if "lists" in r and not _lists_ok(r["lists"]):
             out.append("%s: lists inválido ({\"<lista>@AAAA-MM-DD\": rango >= 1 o null}, de 1 a %d listas)" % (where, MAX_LISTS_PER_SYMBOL))
+    if "lists" in doc:
+        out += list_problems(doc["lists"], rows)
     return out
+
+
+def _list_id_ok(k):
+    m = LIST_ID_RE.fullmatch(k) if isinstance(k, str) else None
+    if not m:
+        return None
+    try:
+        return datetime.date.fromisoformat(m.group(1))
+    except ValueError:
+        return None
+
+
+def list_problems(lists, rows):
+    """Problemas de la definición de listas de la raíz del registro (vacía = todas publicables). `rows`: filas del registro."""
+    if not isinstance(lists, dict) or not 1 <= len(lists) <= MAX_LISTS:
+        return ["lists (raíz) debe ser un objeto con 1 a %d listas" % MAX_LISTS]
+    out = []
+    by = {r["symbol"].upper(): r for r in rows if isinstance(r, dict) and isinstance(r.get("symbol"), str)}
+    for lid, d in lists.items():
+        cut = _list_id_ok(lid)
+        where = "lists[%s]" % (lid if cut else "?")
+        if cut is None:
+            out.append("%s: id de lista inválido (<lista>@AAAA-MM-DD)" % where)
+            continue
+        if not isinstance(d, dict):
+            out.append("%s: no es un objeto" % where)
+            continue
+        if set(d) != LIST_FIELDS:
+            out.append("%s: campos %s (se esperan %s)" % (where, sorted(map(str, d)), sorted(LIST_FIELDS)))
+        src = d.get("source")
+        if not (isinstance(src, str) and len(src) <= MAX_LIST_SOURCE_LEN and _SOURCE_RE.fullmatch(src)):
+            out.append("%s: source ausente o no es una URL https" % where)
+        if d.get("as_of") != cut.isoformat():
+            out.append("%s: as_of ausente o distinta de la fecha del id" % where)
+        size = d.get("size")
+        if not (type(size) is int and 1 <= size <= MAX_LIST_SIZE):
+            out.append("%s: size inválido (entero de 1 a %d)" % (where, MAX_LIST_SIZE))
+            size = None
+        syms = d.get("symbols")
+        if not isinstance(syms, list):
+            out.append("%s: symbols no es una lista" % where)
+            continue
+        if size is not None and len(syms) != size:
+            out.append("%s: lista incompleta (%d de %d símbolos)" % (where, len(syms), size))
+        seen = set()
+        members = {x.upper() for x in syms if isinstance(x, str)}
+        for pos, s in enumerate(syms, 1):
+            key = s.upper() if isinstance(s, str) else None
+            if key is not None and key in seen:
+                out.append("%s: símbolo repetido %s" % (where, s if safe_symbol(s) else "?"))
+                continue
+            if key is None or key not in by or by[key]["symbol"] != s:
+                out.append("%s: el símbolo %s no está en el registro" % (where, s if safe_symbol(s) else "?"))
+                continue
+            seen.add(key)
+            ann = by[key].get("lists")
+            if not isinstance(ann, dict) or lid not in ann:
+                out.append("%s: %s no lleva la anotación de la lista en su fila" % (where, s))
+            elif ann[lid] is not None and ann[lid] != pos:
+                out.append("%s: %s tiene rango %r en su fila y posición %d en la lista" % (where, s, ann[lid], pos))
+        for key, r in by.items():
+            if isinstance(r.get("lists"), dict) and lid in r["lists"] and key not in members:
+                out.append("%s: %s lleva la anotación de la lista pero no está en ella" % (where, r["symbol"]))
+    return out
+
+
+def index_lists(lists):
+    """Lo que se publica en `index.json.lists` (None = no se publica la clave). `lists` ya validado por registry_problems."""
+    if not lists:
+        return None
+    return {lid: {"id": lid, "source": d["source"], "as_of": d["as_of"], "symbols": list(d["symbols"])} for lid, d in lists.items()}
 
 
 def _lists_ok(v):
@@ -184,6 +267,11 @@ def _lists_ok(v):
 
 def load_registry(path):
     """Lee y valida registry.json. Devuelve la lista de entradas (dicts). Lanza RegistryError si algo está mal."""
+    return load_registry_doc(path)[0]
+
+
+def load_registry_doc(path):
+    """Como load_registry, pero devuelve (filas, listas validadas de la raíz; {} si no hay)."""
     try:
         with open(path, encoding="utf-8") as f:
             doc = json.load(f)
@@ -192,7 +280,7 @@ def load_registry(path):
     problems = registry_problems(doc)
     if problems:
         raise RegistryError("; ".join(problems[:12]) + (" (+%d más)" % (len(problems) - 12) if len(problems) > 12 else ""))
-    return doc["symbols"]
+    return doc["symbols"], doc.get("lists", {})
 
 
 # ------------------------------------------------------------------------------------------------------------------------------

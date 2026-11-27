@@ -135,11 +135,12 @@ def test_las_filas_nuevas_estan_y_son_coherentes(raw):
 def test_solo_las_filas_nuevas_llevan_metadatos_y_estan_en_dormant(raw):
     """Las filas existentes no se han tocado: ni metadatos ni estado distinto de `active`. (El nombre es histórico: las nuevas ya están `active`,
     ver test_las_filas_nuevas_estan_y_son_coherentes; aquí no cambia ninguna aserción.)"""
+    # REQUISITO CAMBIADO (F5, auditorias/FIXES_F5_LISTAS_Y_SIMBOLOS.md): ENPH y ORSTED.CO entran `dormant` (sin metadatos) hasta pasar la sonda. Antes: todas `active`.
     for r in raw["symbols"]:
         if r["symbol"] in NUEVAS:
             continue
         assert "country" not in r and "lists" not in r, r["symbol"]
-        assert r["status"] == "active", r["symbol"]
+        assert r["status"] == ("dormant" if r["symbol"] in {"ENPH", "ORSTED.CO"} else "active"), r["symbol"]
 
 
 def test_ningun_simbolo_nuevo_choca_con_uno_existente_ni_es_otra_linea_de_una_empresa_ya_presente(raw):

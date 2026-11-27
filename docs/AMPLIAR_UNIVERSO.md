@@ -36,6 +36,13 @@ subunidad (`GBp`, `ZAc`, `ILA`) — pero no todo: algunos ETF de Londres cotizan
 **Varias líneas de la misma empresa**: una sola fila por empresa. Se usa la línea que la fuente de la lista trate como principal; si la empresa ya está en el
 registro (aunque sea por otra línea o por un ADR), no se añade otra.
 
+**Listas publicadas (F5)**: la anotación `lists` de una fila **no se publica**. Para publicar una lista en `index.json.lists` se añade en la **raíz** del registro
+`"lists": {"<lista>@<AAAA-MM-DD>": {"source": "https://…", "as_of": "AAAA-MM-DD", "size": N, "symbols": [N símbolos, en orden de rango]}}`. El validador
+(`feed_v2_common.list_problems`) rechaza el registro entero si la lista está incompleta (`len(symbols) != size`) o vacía, si falta la fuente o no es `https`, si
+`as_of` no es la fecha del id, si un símbolo no está en el registro o se repite, o si la anotación de las filas no coincide (cada miembro lleva la clave en su
+`lists`, ninguna fila ajena la lleva y un rango no nulo es su posición). Hoy **no hay ninguna lista en la raíz**: el top 50 del 13-nov-2026 solo está anotado en 7
+filas y está incompleto (ver `auditorias/FIXES_F5_LISTAS_Y_SIMBOLOS.md`).
+
 ## 2. Pasos para añadir N símbolos
 
 1. Añadir las filas en `dormant`, con `tier`, `currency` y `unit` decididos según lo de arriba. Si salen de una lista, anotar `lists` y dejar el documento de la
@@ -58,6 +65,7 @@ registro (aunque sea por otra línea o por un ADR), no se añade otra.
 | Fecha | Sonda | Activados | Pendientes |
 |---|---|---|---|
 | 2026-11-20 | «Symbol probe» en `main`, 17:21 UTC: 7 de 7 `OK`, nombre de Yahoo = empresa esperada, divisa = la declarada, última barra del 19 o 20-11 | `SPCX`, `2222.SR`, `000660.KS`, `601288.SS`, `1398.HK`, `601988.SS`, `PM` (top 50, `warm`; ver `docs/universo/TOP50_MCAP_2026-11-13.md`) | ninguna fila `dormant` en el registro |
+| 2026-11-26 (F5) | **pendiente**: no lanzada todavía | — | `ENPH`, `ORSTED.CO` entran `dormant` (`warm`; divisa del sufijo, sin verificar en Yahoo). Ver `auditorias/FIXES_F5_LISTAS_Y_SIMBOLOS.md` |
 
 ## 3. Qué pasa si un símbolo muere después
 
@@ -91,7 +99,7 @@ de sitio (10 años diarios) y ~10,4 ficheros; una sola vez, 1 descarga larga (10
 
 ## 5. Techos (no pagar infraestructura; quedarse lejos de los límites gratuitos)
 
-Regla del dueño: nada de pago y **avisar cuando una estimación pase del ~50 % de un límite**. Estimaciones para añadir N símbolos `warm` a lo medido el 19-nov (224 activos de Yahoo; desde la activación del 20-nov son **231** y el registro sigue en 249 filas, así que la fila de `MAX_REGISTRY_SYMBOLS` no cambia):
+Regla del dueño: nada de pago y **avisar cuando una estimación pase del ~50 % de un límite**. Estimaciones para añadir N símbolos `warm` a lo medido el 19-nov (224 activos de Yahoo; desde la activación del 20-nov son **231**; con F5 el registro pasa de 249 a **251** filas (2 `dormant`), 63 % de `MAX_REGISTRY_SYMBOLS`):
 
 | Límite | Valor | Hoy | +50 | +250 | Fuente del límite |
 |---|---|---|---|---|---|

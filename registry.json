@@ -177,6 +177,8 @@
 {"symbol":"1398.HK","kind":"yahoo","name":"ICBC (HK)","currency":"HKD","unit":"currency","tier":"warm","status":"active","fail_streak":0,"country":"CN","lists":{"top50-mcap@2026-11-13":40}},
 {"symbol":"601988.SS","kind":"yahoo","name":"Bank of China (Shanghai)","currency":"CNY","unit":"currency","tier":"warm","status":"active","fail_streak":0,"country":"CN","lists":{"top50-mcap@2026-11-13":43}},
 {"symbol":"PM","kind":"yahoo","name":"Philip Morris International","currency":"USD","unit":"currency","tier":"warm","status":"active","fail_streak":0,"country":"US","lists":{"top50-mcap@2026-11-13":46}},
+{"symbol":"ENPH","kind":"yahoo","name":"Enphase Energy","currency":"USD","unit":"currency","tier":"warm","status":"dormant","fail_streak":0},
+{"symbol":"ORSTED.CO","kind":"yahoo","name":"Orsted A/S","currency":"DKK","unit":"currency","tier":"warm","status":"dormant","fail_streak":0},
 {"symbol":"SPY","kind":"yahoo","name":"SPDR S&P 500 ETF","currency":"USD","unit":"currency","tier":"hot","status":"active","fail_streak":0},
 {"symbol":"QQQ","kind":"yahoo","name":"Invesco QQQ Trust","currency":"USD","unit":"currency","tier":"hot","status":"active","fail_streak":0},
 {"symbol":"IWM","kind":"yahoo","name":"iShares Russell 2000 ETF","currency":"USD","unit":"currency","tier":"hot","status":"active","fail_streak":0},
